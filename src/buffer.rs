@@ -1,4 +1,4 @@
-use ropey::Rope;
+use ropey::{Rope, RopeSlice};
 use std::{
     fs::File,
     io::{self, BufReader, BufWriter, Write},
@@ -41,6 +41,31 @@ impl Buffer {
         self.text.len_chars()
     }
 
+    pub fn len_lines(&self) -> usize {
+        self.text.len_lines()
+    }
+
+    pub fn line_for_char(&self, char_idx: usize) -> usize {
+        let len_chars = self.len_chars();
+
+        if len_chars == 0 || char_idx >= len_chars {
+            return self.len_lines().saturating_sub(1);
+        }
+
+        self.text.char_to_line(char_idx)
+    }
+
+    pub fn line_start_char(&self, line_idx: usize) -> usize {
+        let line_idx = self.clamp_line_idx(line_idx);
+        self.text.line_to_char(line_idx)
+    }
+
+    pub fn line_end_char(&self, line_idx: usize) -> usize {
+        let line_idx = self.clamp_line_idx(line_idx);
+        let line = self.text.line(line_idx);
+        self.line_start_char(line_idx) + line_content_len_chars(line)
+    }
+
     pub fn text(&self) -> String {
         self.text.to_string()
     }
@@ -72,6 +97,24 @@ impl Buffer {
         writer.flush()?;
         self.dirty = false;
         Ok(())
+    }
+
+    fn clamp_line_idx(&self, line_idx: usize) -> usize {
+        line_idx.min(self.len_lines().saturating_sub(1))
+    }
+}
+
+fn line_content_len_chars(line: RopeSlice<'_>) -> usize {
+    let len_chars = line.len_chars();
+
+    if len_chars == 0 || line.char(len_chars - 1) != '\n' {
+        return len_chars;
+    }
+
+    if len_chars >= 2 && line.char(len_chars - 2) == '\r' {
+        len_chars - 2
+    } else {
+        len_chars - 1
     }
 }
 
