@@ -1,0 +1,11 @@
+[package]
+name = "cortex"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/owainlewis/cortex"
+description = "A fast, lightweight, macOS-only terminal code editor."
+
+[dependencies]
+crossterm = "0.27"
+ropey = "1.6"
