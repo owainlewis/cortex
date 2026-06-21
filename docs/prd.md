@@ -1,20 +1,28 @@
 # Cortex — Design Specification
 
-*An AI-native, Emacs-flavored, terminal-native text editor in Rust.*
+*A macOS-only, Emacs-flavored, terminal-native code editor in Rust.*
 
 **Status:** Ready for v0.1 implementation planning.
 **Audience:** the author (solo build), and any future contributor.
-**One-line pitch:** A stunning, lightweight, fast terminal editor with Emacs keybindings — where the AI agent is simply a real terminal running in a pane, not a protocol to integrate.
+**One-line pitch:** The best fast lightweight code editor in the world for a macOS terminal workflow: Emacs power without Emacs bloat, with an AI agent running as a real terminal pane when the workflow needs it.
 
 ---
 
 ## 1. Vision
 
-Cortex is a terminal text editor for someone who wants the *feel* of Emacs — modeless chord-driven editing, a kill ring, a minibuffer, point-and-mark — without the forty years of accumulated weight, and who has decided that an AI model, not a language server, is their source of code intelligence.
+Cortex is a macOS-only terminal code editor for someone who wants the *feel* of Emacs: modeless chord-driven editing, a kill ring, a minibuffer, point-and-mark, and serious keyboard power without the forty years of accumulated weight.
+Cortex is designed for a developer who wants the editor to feel instant, look beautiful, and stay small enough to understand.
+Cortex treats an AI model, not a language server, as the main source of code intelligence.
 
-It is deliberately small. It is not trying to out-feature VS Code or out-ecosystem Emacs. It is trying to be the editor *one specific person* daily-drives because it is fast, looks good, behaves like Emacs where it matters, and treats a coding agent (e.g. Claude Code) as a first-class collaborator rather than a chat panel bolted onto the side.
+It is deliberately small.
+It is not trying to out-feature VS Code or out-ecosystem Emacs.
+It is trying to be the editor *one specific person* daily-drives because it is fast, looks good, behaves like Emacs where it matters, and treats a coding agent like Claude Code as a first-class collaborator rather than a chat panel bolted onto the side.
 
-The taste benchmark is Ghostty: fast, elegant, native-feeling, minimal-but-complete. Cortex should feel like it belongs in that lineage.
+The taste benchmark is Ghostty: fast, elegant, native-feeling, minimal-but-complete.
+Cortex should feel like it belongs in that lineage.
+It should reward attention to details most editors treat as incidental: font rendering assumptions, padding, cursor shape, modeline balance, color restraint, flicker-free paint, terminal cleanup, and the feel of every common keypress.
+The standard is not "a working editor."
+The standard is an editor with pride in the craft.
 
 ---
 
@@ -34,15 +42,17 @@ These are the rules that settle arguments. When a feature or a decision is in do
 
 **Native muscle memory, no surprises.** Emacs keybindings behave exactly as a muscle-memoried Emacs user expects, or they aren't claimed. Half-right bindings are worse than absent ones.
 
+**Craft is a feature.** Cortex should feel made by someone who cares. Typography, spacing, color, cursor behavior, modeline composition, status messages, and terminal cleanup are not polish after the fact. They are part of the product.
+
 ---
 
 ## 2. Goals and Non-Goals
 
 ### Goals
-- **Terminal-native.** Runs in any modern terminal. No GUI, no Electron, no web view.
+- **Terminal-native.** Runs in a modern macOS terminal. No GUI, no Electron, no web view.
 - **Fast.** Sub-frame input latency. Flicker-free, diffed rendering. Big files stay snappy.
 - **Emacs feel.** Chord sequences, kill ring, minibuffer, point/mark, incremental search.
-- **Aesthetic.** Truecolor themes, tree-sitter highlighting, a real modeline, considered spacing and cursor.
+- **Aesthetic.** Beautiful fonts in the terminal, truecolor themes, tree-sitter highlighting, a real modeline, considered spacing, and a crisp cursor.
 - **AI by composition, not integration.** The agent runs in an ordinary terminal pane and edits files on disk; file panes reflect the changes. No protocol, no server — the simplest thing that works, and it inherits everything the agent can already do.
 - **Windowed.** In-editor splits and tabs, so source and the agent's pane sit side by side without leaving Cortex.
 - **Coherent core.** A clean command-dispatch core with an introspectable command registry (powers `M-x` and key remapping) — but deliberately *not* a programmable scripting runtime.
