@@ -1,11 +1,14 @@
 use crate::{
     buffer::Buffer,
+    commands,
+    input::key_from_event,
+    keymap::{Keymap, KeymapResult},
     renderer::{Renderer, TerminalSize},
     terminal::TerminalSession,
     view::View,
 };
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyEventKind},
     terminal,
 };
 use std::{
@@ -14,9 +17,10 @@ use std::{
 };
 
 pub fn run(path: &Path) -> io::Result<()> {
-    let buffer = Buffer::open(path)?;
+    let mut buffer = Buffer::open(path)?;
     let mut terminal = TerminalSession::enter(io::stdout())?;
     let mut view = View::new();
+    let mut keymap = Keymap::new();
     let renderer = Renderer::new();
 
     render(&renderer, terminal.writer_mut(), &buffer, &mut view)?;
@@ -24,10 +28,18 @@ pub fn run(path: &Path) -> io::Result<()> {
     loop {
         match event::read()? {
             Event::Key(key) => {
-                if key.kind == KeyEventKind::Press
-                    && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                {
-                    break;
+                if key.kind == KeyEventKind::Press {
+                    let key = key_from_event(key);
+                    match keymap.resolve(key) {
+                        KeymapResult::Command(command) => {
+                            let outcome = commands::dispatch(command, &mut buffer, &mut view);
+                            if outcome.quit {
+                                break;
+                            }
+                            render(&renderer, terminal.writer_mut(), &buffer, &mut view)?;
+                        }
+                        KeymapResult::PendingPrefix | KeymapResult::Unbound => {}
+                    }
                 }
             }
             Event::Resize(_, _) => render(&renderer, terminal.writer_mut(), &buffer, &mut view)?,
