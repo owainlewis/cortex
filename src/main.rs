@@ -1,6 +1,9 @@
 mod app;
 pub mod buffer;
 mod cli;
+mod commands;
+mod input;
+mod keymap;
 pub mod renderer;
 mod terminal;
 pub mod view;

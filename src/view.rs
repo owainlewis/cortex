@@ -20,6 +20,11 @@ impl View {
         self.scroll_line
     }
 
+    pub fn set_point(&mut self, point: usize, buffer: &Buffer) {
+        self.point = point.min(buffer.len_chars());
+        self.clear_preferred_column();
+    }
+
     pub fn move_forward_char(&mut self, buffer: &Buffer) {
         self.point = self.point.saturating_add(1).min(buffer.len_chars());
         self.clear_preferred_column();
