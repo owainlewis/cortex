@@ -1,4 +1,6 @@
+mod app;
 mod cli;
+mod terminal;
 
 use cli::{parse_args, ParseResult, USAGE};
 use std::{env, process::ExitCode};
@@ -10,9 +12,12 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(ParseResult::Run(args)) => {
-            println!("cortex: editor UI is not implemented yet");
-            println!("file: {}", args.path.display());
-            ExitCode::SUCCESS
+            if let Err(error) = app::run(&args.path) {
+                eprintln!("error: failed to run editor: {error}");
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(message) => {
             eprintln!("error: {message}");
