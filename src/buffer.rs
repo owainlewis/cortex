@@ -66,6 +66,17 @@ impl Buffer {
         self.line_start_char(line_idx) + line_content_len_chars(line)
     }
 
+    pub fn line_prefix_text(&self, line_idx: usize, max_chars: usize) -> String {
+        if max_chars == 0 {
+            return String::new();
+        }
+
+        let line_idx = self.clamp_line_idx(line_idx);
+        let line = self.text.line(line_idx);
+        let content_len = line_content_len_chars(line);
+        line.slice(..content_len.min(max_chars)).to_string()
+    }
+
     pub fn text(&self) -> String {
         self.text.to_string()
     }
