@@ -2,6 +2,7 @@ mod app;
 pub mod buffer;
 mod cli;
 mod terminal;
+pub mod view;
 
 use cli::{parse_args, ParseResult, USAGE};
 use std::{env, process::ExitCode};
