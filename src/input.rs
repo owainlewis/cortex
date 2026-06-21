@@ -5,6 +5,7 @@ pub enum Key {
     Char(char),
     Ctrl(char),
     Enter,
+    Escape,
     Backspace,
     Delete,
     Left,
@@ -28,6 +29,7 @@ pub fn key_from_event(event: KeyEvent) -> Key {
         }
         KeyCode::Char(ch) if printable_char(ch, event.modifiers) => Key::Char(ch),
         KeyCode::Enter => Key::Enter,
+        KeyCode::Esc => Key::Escape,
         KeyCode::Backspace => Key::Backspace,
         KeyCode::Delete => Key::Delete,
         KeyCode::Left => Key::Left,
@@ -78,9 +80,13 @@ mod tests {
             key_from_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SUPER)),
             Key::Unhandled
         );
+    }
+
+    #[test]
+    fn maps_escape() {
         assert_eq!(
             key_from_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            Key::Unhandled
+            Key::Escape
         );
     }
 

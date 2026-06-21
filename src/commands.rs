@@ -16,11 +16,12 @@ pub enum Command {
     Quit,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommandOutcome {
     pub quit: bool,
     pub dirty_quit_blocked: bool,
     pub save_failed: bool,
+    pub status_message: Option<String>,
 }
 
 pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> CommandOutcome {
@@ -77,9 +78,16 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
             view.move_to_line_end(buffer);
             CommandOutcome::default()
         }
-        Command::SaveBuffer => CommandOutcome {
-            save_failed: buffer.save().is_err(),
-            ..CommandOutcome::default()
+        Command::SaveBuffer => match buffer.save() {
+            Ok(()) => CommandOutcome {
+                status_message: Some(format!("Wrote {}", buffer.path().display())),
+                ..CommandOutcome::default()
+            },
+            Err(error) => CommandOutcome {
+                save_failed: true,
+                status_message: Some(format!("Save failed: {error}")),
+                ..CommandOutcome::default()
+            },
         },
         Command::Quit if buffer.is_dirty() => CommandOutcome {
             dirty_quit_blocked: true,
@@ -182,6 +190,12 @@ mod tests {
 
         assert!(!outcome.quit);
         assert!(!outcome.save_failed);
+        assert!(
+            outcome
+                .status_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Wrote"))
+        );
         assert!(!buffer.is_dirty());
         assert_eq!(fs::read_to_string(&path).unwrap(), "!old");
         fs::remove_dir_all(dir).unwrap();
@@ -196,6 +210,12 @@ mod tests {
 
         assert!(outcome.save_failed);
         assert!(!outcome.quit);
+        assert!(
+            outcome
+                .status_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Save failed"))
+        );
         assert!(buffer.is_dirty());
         fs::remove_dir_all(dir).unwrap();
     }
