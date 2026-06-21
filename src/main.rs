@@ -1,6 +1,7 @@
 mod app;
 pub mod buffer;
 mod cli;
+pub mod renderer;
 mod terminal;
 pub mod view;
 
