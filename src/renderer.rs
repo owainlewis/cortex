@@ -45,8 +45,9 @@ impl Renderer {
         buffer: &Buffer,
         view: &View,
         size: TerminalSize,
+        status_message: Option<&str>,
     ) -> io::Result<()> {
-        let frame = build_frame(buffer, view, size);
+        let frame = build_frame(buffer, view, size, status_message);
 
         queue!(
             writer,
@@ -77,7 +78,12 @@ impl Renderer {
     }
 }
 
-fn build_frame(buffer: &Buffer, view: &View, size: TerminalSize) -> Frame {
+fn build_frame(
+    buffer: &Buffer,
+    view: &View,
+    size: TerminalSize,
+    status_message: Option<&str>,
+) -> Frame {
     let width = size.cols as usize;
     let viewport_height = size.rows.saturating_sub(1) as usize;
     let mut lines = Vec::with_capacity(viewport_height);
@@ -94,7 +100,7 @@ fn build_frame(buffer: &Buffer, view: &View, size: TerminalSize) -> Frame {
 
     Frame {
         lines,
-        modeline: fit_status_line(&modeline_text(buffer, view), width),
+        modeline: fit_status_line(&modeline_text(buffer, view, status_message), width),
         cursor: cursor_position(buffer, view, size),
     }
 }
@@ -117,7 +123,7 @@ fn cursor_position(buffer: &Buffer, view: &View, size: TerminalSize) -> CursorPo
     CursorPosition { col, row }
 }
 
-fn modeline_text(buffer: &Buffer, view: &View) -> String {
+fn modeline_text(buffer: &Buffer, view: &View, status_message: Option<&str>) -> String {
     let line_idx = buffer.line_for_char(view.point());
     let column = view.point() - buffer.line_start_char(line_idx);
     let dirty_state = if buffer.is_dirty() { "modified" } else { "clean" };
@@ -127,13 +133,21 @@ fn modeline_text(buffer: &Buffer, view: &View) -> String {
         .and_then(|name| name.to_str())
         .map_or_else(|| buffer.path().display().to_string(), ToOwned::to_owned);
 
-    format!(
+    let mut text = format!(
         " {}  {}  Ln {}, Col {} ",
         file_name,
         dirty_state,
         line_idx + 1,
         column + 1
-    )
+    );
+
+    if let Some(message) = status_message.filter(|message| !message.is_empty()) {
+        text.push_str(" | ");
+        text.push_str(message);
+        text.push(' ');
+    }
+
+    text
 }
 
 fn fit_line_cells(line: &str, width: usize) -> String {
@@ -271,7 +285,7 @@ mod tests {
         let buffer = buffer_with_text("notes.txt", "alpha\nbeta\n");
         let view = View::new();
 
-        let frame = build_frame(&buffer, &view, TerminalSize { cols: 40, rows: 3 });
+        let frame = build_frame(&buffer, &view, TerminalSize { cols: 40, rows: 3 }, None);
 
         assert_eq!(frame.lines, vec!["alpha", "beta"]);
         assert!(frame.modeline.contains("notes.txt"));
@@ -285,7 +299,7 @@ mod tests {
         let mut buffer = buffer_with_text("notes.txt", "alpha\n");
 
         buffer.insert(0, "z");
-        let frame = build_frame(&buffer, &View::new(), TerminalSize { cols: 40, rows: 3 });
+        let frame = build_frame(&buffer, &View::new(), TerminalSize { cols: 40, rows: 3 }, None);
 
         assert!(frame.modeline.contains("modified"));
     }
@@ -299,7 +313,7 @@ mod tests {
         view.move_next_line(&buffer);
         view.ensure_point_visible(&buffer, 2);
 
-        let frame = build_frame(&buffer, &view, TerminalSize { cols: 40, rows: 3 });
+        let frame = build_frame(&buffer, &view, TerminalSize { cols: 40, rows: 3 }, None);
 
         assert_eq!(frame.lines, vec!["two", "three"]);
         assert_eq!(frame.cursor, CursorPosition { col: 0, row: 1 });
@@ -311,7 +325,7 @@ mod tests {
         let mut buffer = buffer_with_text("notes.txt", "abcdef");
         buffer.insert(0, "z");
 
-        let frame = build_frame(&buffer, &View::new(), TerminalSize { cols: 4, rows: 2 });
+        let frame = build_frame(&buffer, &View::new(), TerminalSize { cols: 4, rows: 2 }, None);
 
         assert_eq!(frame.lines, vec!["zabc"]);
         assert_eq!(frame.modeline.chars().count(), 4);
@@ -324,7 +338,7 @@ mod tests {
         let mut view = View::new();
 
         view.move_forward_char(&buffer);
-        let frame = build_frame(&buffer, &view, TerminalSize { cols: 10, rows: 3 });
+        let frame = build_frame(&buffer, &view, TerminalSize { cols: 10, rows: 3 }, None);
 
         assert_eq!(frame.lines, vec!["    ab", ""]);
         assert_eq!(frame.cursor, CursorPosition { col: 4, row: 0 });
@@ -335,14 +349,29 @@ mod tests {
         let buffer = buffer_with_text("notes.txt", "abcdef");
         let view = View::new();
 
-        let zero = build_frame(&buffer, &view, TerminalSize { cols: 0, rows: 0 });
-        let modeline_only = build_frame(&buffer, &view, TerminalSize { cols: 8, rows: 1 });
+        let zero = build_frame(&buffer, &view, TerminalSize { cols: 0, rows: 0 }, None);
+        let modeline_only = build_frame(&buffer, &view, TerminalSize { cols: 8, rows: 1 }, None);
 
         assert!(zero.lines.is_empty());
         assert_eq!(zero.modeline, "");
         assert_eq!(zero.cursor, CursorPosition { col: 0, row: 0 });
         assert!(modeline_only.lines.is_empty());
         assert!(modeline_only.modeline.chars().count() <= 8);
+    }
+
+    #[test]
+    fn frame_modeline_shows_status_message() {
+        let buffer = buffer_with_text("notes.txt", "alpha\n");
+
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 80, rows: 3 },
+            Some("Save failed: parent directory does not exist"),
+        );
+
+        assert!(frame.modeline.contains("notes.txt"));
+        assert!(frame.modeline.contains("Save failed"));
     }
 
     fn buffer_with_text(file_name: &str, text: &str) -> Buffer {
