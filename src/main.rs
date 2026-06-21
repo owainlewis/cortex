@@ -1,4 +1,5 @@
 mod app;
+pub mod buffer;
 mod cli;
 mod terminal;
 
