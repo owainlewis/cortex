@@ -1,0 +1,82 @@
+name: Nightly
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS nightly
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package nightly artifact
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            arm64) target_triple="aarch64-apple-darwin" ;;
+            x86_64) target_triple="x86_64-apple-darwin" ;;
+            *)
+              echo "Unsupported macOS architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          archive="cortex-nightly-${RUN_NUMBER}-${short_sha}-${target_triple}.tar.gz"
+          mkdir -p dist
+          cp target/release/cortex dist/cortex
+          tar -czf "${archive}" -C dist cortex
+          shasum -a 256 "${archive}" > "${archive}.sha256"
+
+          {
+            echo "archive=${archive}"
+            echo "checksum=${archive}.sha256"
+            echo "artifact_name=cortex-nightly-${RUN_NUMBER}-${target_triple}"
+            echo "short_sha=${short_sha}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Upload nightly artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.artifact_name }}
+          path: |
+            ${{ env.archive }}
+            ${{ env.checksum }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Write nightly summary
+        run: |
+          {
+            echo "## Cortex nightly"
+            echo
+            echo "Nightly builds are unstable test artifacts from main."
+            echo
+            echo "- Commit: ${short_sha}"
+            echo "- Archive: ${archive}"
+            echo "- Checksum: ${checksum}"
+          } >> "${GITHUB_STEP_SUMMARY}"
