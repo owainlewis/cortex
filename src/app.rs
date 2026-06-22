@@ -3,6 +3,7 @@ use crate::{
     commands,
     input::key_from_event,
     keymap::{Keymap, KeymapResult},
+    picker::{DirectoryPicker, DirectoryPickerAction},
     renderer::{Renderer, TerminalSize},
     terminal::TerminalSession,
     view::View,
@@ -12,8 +13,8 @@ use crossterm::{
     terminal,
 };
 use std::{
-    io,
-    path::Path,
+    fs, io,
+    path::{Path, PathBuf},
 };
 
 const DIRTY_QUIT_PROMPT: &str = "Buffer modified; quit without saving? (y or n)";
@@ -31,8 +32,39 @@ enum AppAction {
 }
 
 pub fn run(path: &Path) -> io::Result<()> {
-    let mut buffer = Buffer::open(path)?;
+    if is_directory_path(path)? {
+        return run_directory_path(path);
+    }
+
+    let buffer = Buffer::open(path)?;
     let mut terminal = TerminalSession::enter(io::stdout())?;
+    run_editor(&mut terminal, buffer)
+}
+
+fn run_directory_path(path: &Path) -> io::Result<()> {
+    let picker = DirectoryPicker::read(path)?;
+    let mut terminal = TerminalSession::enter(io::stdout())?;
+
+    let Some(path) = run_directory_picker(&mut terminal, picker)? else {
+        return Ok(());
+    };
+
+    let buffer = Buffer::open(path)?;
+    run_editor(&mut terminal, buffer)
+}
+
+fn is_directory_path(path: &Path) -> io::Result<bool> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_dir()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn run_editor<W: io::Write>(
+    terminal: &mut TerminalSession<W>,
+    mut buffer: Buffer,
+) -> io::Result<()> {
     let mut view = View::new();
     let mut keymap = Keymap::new();
     let renderer = Renderer::new();
@@ -77,6 +109,36 @@ pub fn run(path: &Path) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+fn run_directory_picker<W: io::Write>(
+    terminal: &mut TerminalSession<W>,
+    mut picker: DirectoryPicker,
+) -> io::Result<Option<PathBuf>> {
+    let renderer = Renderer::new();
+
+    render_directory_picker(&renderer, terminal.writer_mut(), &picker)?;
+
+    loop {
+        match event::read()? {
+            Event::Key(key) => {
+                if key.kind == KeyEventKind::Press {
+                    let key = key_from_event(key);
+                    match picker.handle_key(key) {
+                        DirectoryPickerAction::Continue => {
+                            render_directory_picker(&renderer, terminal.writer_mut(), &picker)?;
+                        }
+                        DirectoryPickerAction::Quit => return Ok(None),
+                        DirectoryPickerAction::Open(path) => return Ok(Some(path)),
+                    }
+                }
+            }
+            Event::Resize(_, _) => {
+                render_directory_picker(&renderer, terminal.writer_mut(), &picker)?
+            }
+            _ => {}
+        }
+    }
 }
 
 impl AppState {
@@ -157,6 +219,16 @@ fn render<W: io::Write>(
     )
 }
 
+fn render_directory_picker<W: io::Write>(
+    renderer: &Renderer,
+    writer: &mut W,
+    picker: &DirectoryPicker,
+) -> io::Result<()> {
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let size = TerminalSize { cols, rows };
+    renderer.render_directory_picker(writer, picker, size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AppAction, AppState, DIRTY_QUIT_PROMPT};
@@ -189,11 +261,10 @@ mod tests {
         assert_eq!(action, AppAction::Continue);
         assert!(!buffer.is_dirty());
         assert_eq!(fs::read_to_string(&path).unwrap(), "xold");
-        assert!(
-            app.status_message
-                .as_deref()
-                .is_some_and(|message| message.contains("Wrote"))
-        );
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Wrote")));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -212,11 +283,10 @@ mod tests {
 
         assert_eq!(action, AppAction::Continue);
         assert!(buffer.is_dirty());
-        assert!(
-            app.status_message
-                .as_deref()
-                .is_some_and(|message| message.contains("Save failed"))
-        );
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Save failed")));
         fs::remove_dir_all(dir).unwrap();
     }
 
