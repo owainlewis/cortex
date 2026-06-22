@@ -31,6 +31,7 @@ struct AppState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppAction {
     Continue,
+    OpenFilePicker,
     Quit,
 }
 
@@ -86,10 +87,15 @@ fn run_editor<W: io::Write>(
             Event::Key(key) => {
                 if key.kind == KeyEventKind::Press {
                     let key = key_from_event(key);
-                    if app_state.handle_key(key, &mut keymap, &mut buffer, &mut view)
-                        == AppAction::Quit
-                    {
-                        break;
+                    match app_state.handle_key(key, &mut keymap, &mut buffer, &mut view) {
+                        AppAction::Continue => {}
+                        AppAction::OpenFilePicker => open_file_from_picker(
+                            terminal,
+                            &mut buffer,
+                            &mut view,
+                            &mut app_state,
+                        )?,
+                        AppAction::Quit => break,
                     }
                     render(
                         &renderer,
@@ -132,6 +138,24 @@ fn run_directory_picker<W: io::Write>(
                             render_directory_picker(&renderer, terminal.writer_mut(), &picker)?;
                         }
                         DirectoryPickerAction::Quit => return Ok(None),
+                        DirectoryPickerAction::Browse(path) => match DirectoryPicker::read(&path) {
+                            Ok(next_picker) => {
+                                picker = next_picker;
+                                render_directory_picker(
+                                    &renderer,
+                                    terminal.writer_mut(),
+                                    &picker,
+                                )?;
+                            }
+                            Err(error) => {
+                                picker.set_status_message(format!("Open failed: {error}"));
+                                render_directory_picker(
+                                    &renderer,
+                                    terminal.writer_mut(),
+                                    &picker,
+                                )?;
+                            }
+                        },
                         DirectoryPickerAction::Open(path) => return Ok(Some(path)),
                     }
                 }
@@ -142,6 +166,48 @@ fn run_directory_picker<W: io::Write>(
             _ => {}
         }
     }
+}
+
+fn open_file_from_picker<W: io::Write>(
+    terminal: &mut TerminalSession<W>,
+    buffer: &mut Buffer,
+    view: &mut View,
+    app_state: &mut AppState,
+) -> io::Result<()> {
+    let directory = picker_directory(buffer.path());
+    let picker = match DirectoryPicker::read(&directory) {
+        Ok(picker) => picker,
+        Err(error) => {
+            app_state.set_status(format!("Open failed: {error}"), StatusKind::Error);
+            return Ok(());
+        }
+    };
+
+    let Some(path) = run_directory_picker(terminal, picker)? else {
+        app_state.set_status("Open canceled", StatusKind::Info);
+        return Ok(());
+    };
+
+    match Buffer::open(&path) {
+        Ok(opened) => {
+            *buffer = opened;
+            *view = View::new();
+            app_state.set_status(format!("Opened {}", path.display()), StatusKind::Success);
+        }
+        Err(error) => {
+            app_state.set_status(format!("Open failed: {error}"), StatusKind::Error);
+        }
+    }
+
+    Ok(())
+}
+
+fn picker_directory(file_path: &Path) -> PathBuf {
+    file_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 impl AppState {
@@ -333,6 +399,17 @@ impl AppState {
             return AppAction::Continue;
         }
 
+        if outcome.open_file_picker {
+            self.clear_status();
+            return AppAction::OpenFilePicker;
+        }
+
+        if outcome.open_file_blocked {
+            self.status_message = outcome.status_message;
+            self.status_kind = Some(StatusKind::Prompt);
+            return AppAction::Continue;
+        }
+
         self.status_kind = outcome.status_message.as_ref().map(|_| {
             if outcome.save_failed {
                 StatusKind::Error
@@ -388,7 +465,7 @@ fn render_directory_picker<W: io::Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::{AppAction, AppState, DIRTY_QUIT_PROMPT};
+    use super::{picker_directory, AppAction, AppState, DIRTY_QUIT_PROMPT};
     use crate::{buffer::Buffer, input::Key, keymap::Keymap, renderer::StatusKind, view::View};
     use std::{
         fs,
@@ -575,6 +652,55 @@ mod tests {
         assert_eq!(action, AppAction::Continue);
         assert_eq!(app.status_message.as_deref(), Some("C-x"));
         assert_eq!(app.status_kind, Some(StatusKind::Prefix));
+    }
+
+    #[test]
+    fn ctrl_x_ctrl_f_requests_file_picker_when_buffer_is_clean() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
+        let action = app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::OpenFilePicker);
+        assert_eq!(app.status_message, None);
+        assert_eq!(buffer.text(), "old");
+        assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn ctrl_x_ctrl_f_keeps_dirty_buffer_in_place() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        app.handle_key(Key::Char('x'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
+        let action = app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(buffer.text(), "xold");
+        assert!(buffer.is_dirty());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Open canceled: current buffer has unsaved changes")
+        );
+        assert_eq!(app.status_kind, Some(StatusKind::Prompt));
+    }
+
+    #[test]
+    fn file_picker_starts_from_current_file_parent_or_current_directory() {
+        assert_eq!(
+            picker_directory(PathBuf::from("/tmp/current.txt").as_path()),
+            PathBuf::from("/tmp")
+        );
+        assert_eq!(
+            picker_directory(PathBuf::from("current.txt").as_path()),
+            PathBuf::from(".")
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use ropey::{Rope, RopeSlice};
 use std::{
-    fs::File,
+    ffi::{OsStr, OsString},
+    fs::{self, File},
     io::{self, BufReader, BufWriter, Write},
     ops::Range,
     path::{Path, PathBuf},
@@ -101,11 +102,7 @@ impl Buffer {
 
     pub fn save(&mut self) -> io::Result<()> {
         ensure_parent_directory_exists(&self.path)?;
-
-        let file = File::create(&self.path)?;
-        let mut writer = BufWriter::new(file);
-        self.text.write_to(&mut writer)?;
-        writer.flush()?;
+        write_atomically(&self.path, &self.text)?;
         self.dirty = false;
         Ok(())
     }
@@ -126,6 +123,42 @@ fn line_content_len_chars(line: RopeSlice<'_>) -> usize {
         len_chars - 2
     } else {
         len_chars - 1
+    }
+}
+
+/// Writes `text` to `path` without ever truncating the existing file in place.
+///
+/// The contents are written to a temporary sibling file, flushed and fsynced,
+/// then atomically renamed over the target. If any step fails the original file
+/// is left untouched and the temporary file is removed.
+fn write_atomically(path: &Path, text: &Rope) -> io::Result<()> {
+    let temp_path = temp_path_for(path);
+
+    let result = (|| {
+        let file = File::create(&temp_path)?;
+        let mut writer = BufWriter::new(file);
+        text.write_to(&mut writer)?;
+        writer.flush()?;
+        let file = writer.into_inner().map_err(|error| error.into_error())?;
+        file.sync_all()?;
+        fs::rename(&temp_path, path)
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+
+    result
+}
+
+fn temp_path_for(path: &Path) -> PathBuf {
+    let mut name = OsString::from(".");
+    name.push(path.file_name().unwrap_or_else(|| OsStr::new("cortex")));
+    name.push(format!(".cortex-{}.tmp", std::process::id()));
+
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => PathBuf::from(name),
     }
 }
 
@@ -265,6 +298,52 @@ mod tests {
         assert!(error.to_string().contains("parent directory does not exist"));
         assert!(buffer.is_dirty());
         assert!(!path.exists());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_leaves_no_temporary_files_behind() {
+        let dir = test_dir("save-no-temp-files");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "before").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(buffer.len_chars(), "\nafter");
+        buffer.save().unwrap();
+
+        let names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(names, vec!["notes.txt".to_string()]);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "before\nafter");
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_failure_after_writing_cleans_up_the_temporary_file() {
+        let dir = test_dir("save-failure-cleanup");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(0, "x");
+
+        // Replace the target with a directory so the final rename fails after the
+        // temporary file has already been written and synced.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+
+        let result = buffer.save();
+
+        assert!(result.is_err());
+        assert!(buffer.is_dirty());
+        assert!(path.is_dir());
+        let leftover_temp = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".cortex-"));
+        assert!(!leftover_temp, "temporary save file should be cleaned up");
         remove_dir(dir);
     }
 

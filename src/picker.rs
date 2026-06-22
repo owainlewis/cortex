@@ -32,6 +32,7 @@ pub struct DirectoryPicker {
 pub enum DirectoryPickerAction {
     Continue,
     Quit,
+    Browse(PathBuf),
     Open(PathBuf),
 }
 
@@ -99,6 +100,10 @@ impl DirectoryPicker {
         self.status_message.as_deref()
     }
 
+    pub fn set_status_message(&mut self, message: impl Into<String>) {
+        self.status_message = Some(message.into());
+    }
+
     pub fn handle_key(&mut self, key: Key) -> DirectoryPickerAction {
         if self.pending_ctrl_x {
             self.pending_ctrl_x = false;
@@ -153,11 +158,16 @@ impl DirectoryPicker {
             return DirectoryPickerAction::Continue;
         };
 
-        if entry.is_file() {
-            DirectoryPickerAction::Open(entry.path().to_path_buf())
-        } else {
-            self.status_message = Some("Only regular files can be opened".to_string());
-            DirectoryPickerAction::Continue
+        match entry.kind() {
+            DirectoryEntryKind::File => DirectoryPickerAction::Open(entry.path().to_path_buf()),
+            DirectoryEntryKind::Directory => {
+                DirectoryPickerAction::Browse(entry.path().to_path_buf())
+            }
+            DirectoryEntryKind::Other => {
+                self.status_message =
+                    Some("Only regular files and directories can be opened".to_string());
+                DirectoryPickerAction::Continue
+            }
         }
     }
 }
@@ -170,6 +180,16 @@ fn read_directory_entries(directory: &Path) -> io::Result<Vec<DirectoryEntry>> {
         )
     })?;
     let mut visible = Vec::new();
+
+    if let Some(parent) = parent_directory(directory) {
+        visible.push(DirectoryEntry::new(
+            "..".to_string(),
+            parent,
+            DirectoryEntryKind::Directory,
+        ));
+    }
+
+    let mut entries_to_sort = Vec::new();
 
     for entry in entries {
         let entry = entry.map_err(|error| {
@@ -201,11 +221,26 @@ fn read_directory_entries(directory: &Path) -> io::Result<Vec<DirectoryEntry>> {
             DirectoryEntryKind::Other
         };
 
-        visible.push(DirectoryEntry::new(name, entry.path(), kind));
+        entries_to_sort.push(DirectoryEntry::new(name, entry.path(), kind));
     }
 
-    visible.sort_by(compare_entries);
+    entries_to_sort.sort_by(compare_entries);
+    visible.extend(entries_to_sort);
     Ok(visible)
+}
+
+fn parent_directory(directory: &Path) -> Option<PathBuf> {
+    directory
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            if directory.parent().is_some() {
+                Some(directory.join(".."))
+            } else {
+                None
+            }
+        })
 }
 
 fn compare_entries(left: &DirectoryEntry, right: &DirectoryEntry) -> Ordering {
@@ -217,7 +252,10 @@ fn compare_entries(left: &DirectoryEntry, right: &DirectoryEntry) -> Ordering {
 
 #[cfg(test)]
 mod tests {
-    use super::{DirectoryEntry, DirectoryEntryKind, DirectoryPicker, DirectoryPickerAction};
+    use super::{
+        parent_directory, DirectoryEntry, DirectoryEntryKind, DirectoryPicker,
+        DirectoryPickerAction,
+    };
     use crate::input::Key;
     use std::{
         fs,
@@ -239,10 +277,23 @@ mod tests {
         let picker = DirectoryPicker::read(&dir).unwrap();
         let names: Vec<&str> = picker.entries().iter().map(DirectoryEntry::name).collect();
 
-        assert_eq!(names, vec!["alpha", "Beta.txt", "zeta.txt"]);
+        assert_eq!(names, vec!["..", "alpha", "Beta.txt", "zeta.txt"]);
         assert!(picker.entries()[0].is_directory());
-        assert!(picker.entries()[1].is_file());
+        assert!(picker.entries()[1].is_directory());
+        assert!(picker.entries()[2].is_file());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn parent_directory_supports_relative_directories() {
+        assert_eq!(
+            parent_directory(PathBuf::from(".").as_path()),
+            Some(PathBuf::from("./.."))
+        );
+        assert_eq!(
+            parent_directory(PathBuf::from("src").as_path()),
+            Some(PathBuf::from("src/.."))
+        );
     }
 
     #[test]
@@ -264,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_opens_regular_file_only() {
+    fn enter_browses_directories_and_opens_regular_files() {
         let mut picker = DirectoryPicker::new(
             PathBuf::from("/tmp"),
             vec![
@@ -283,16 +334,33 @@ mod tests {
 
         assert_eq!(
             picker.handle_key(Key::Enter),
-            DirectoryPickerAction::Continue
-        );
-        assert_eq!(
-            picker.status_message(),
-            Some("Only regular files can be opened")
+            DirectoryPickerAction::Browse(PathBuf::from("/tmp/src"))
         );
         picker.handle_key(Key::Down);
         assert_eq!(
             picker.handle_key(Key::Enter),
             DirectoryPickerAction::Open(PathBuf::from("/tmp/main.rs"))
+        );
+    }
+
+    #[test]
+    fn enter_rejects_other_entry_kinds() {
+        let mut picker = DirectoryPicker::new(
+            PathBuf::from("/tmp"),
+            vec![DirectoryEntry::new(
+                "pipe".to_string(),
+                PathBuf::from("/tmp/pipe"),
+                DirectoryEntryKind::Other,
+            )],
+        );
+
+        assert_eq!(
+            picker.handle_key(Key::Enter),
+            DirectoryPickerAction::Continue
+        );
+        assert_eq!(
+            picker.status_message(),
+            Some("Only regular files and directories can be opened")
         );
     }
 

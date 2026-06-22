@@ -7,8 +7,8 @@ use crate::{
 use crossterm::{
     cursor, queue,
     style::{
-        force_color_output, Attribute, Color, Print, ResetColor, SetAttribute,
-        SetBackgroundColor, SetForegroundColor,
+        force_color_output, Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor,
+        SetForegroundColor,
     },
     terminal::{self, ClearType},
 };
@@ -25,11 +25,6 @@ const THEME: Theme = Theme {
         r: 214,
         g: 219,
         b: 220,
-    },
-    editor_bg: Color::Rgb {
-        r: 18,
-        g: 21,
-        b: 24,
     },
     empty_fg: Color::Rgb {
         r: 80,
@@ -260,7 +255,6 @@ enum ModelineStyle {
 #[derive(Debug, Clone, Copy)]
 struct Theme {
     editor_fg: Color,
-    editor_bg: Color,
     empty_fg: Color,
     modeline_fg: Color,
     modeline_bg: Color,
@@ -635,8 +629,8 @@ fn render_editor_line<W: Write>(
     queue!(
         writer,
         cursor::MoveTo(0, row),
-        SetForegroundColor(foreground),
-        SetBackgroundColor(THEME.editor_bg)
+        ResetColor,
+        SetForegroundColor(foreground)
     )?;
 
     for segment in &line.segments {
@@ -667,17 +661,15 @@ fn render_picker_line<W: Write>(
     } else {
         THEME.picker_fg
     };
-    let background = if line.selected {
-        THEME.picker_selected_bg
-    } else {
-        THEME.editor_bg
-    };
+    queue!(writer, cursor::MoveTo(0, row), ResetColor)?;
+
+    if line.selected {
+        queue!(writer, SetBackgroundColor(THEME.picker_selected_bg))?;
+    }
 
     queue!(
         writer,
-        cursor::MoveTo(0, row),
         SetForegroundColor(foreground),
-        SetBackgroundColor(background),
         Print(fit_status_line(&line.text, width)),
         ResetColor
     )
@@ -757,7 +749,7 @@ fn picker_entry_text(entry: &DirectoryEntry, selected: bool) -> String {
 }
 
 fn picker_modeline_text(picker: &DirectoryPicker) -> String {
-    let mut text = " Enter open  C-n/C-p move  Esc/C-x C-c quit ".to_string();
+    let mut text = " Enter open/browse  C-n/C-p move  Esc/C-x C-c quit ".to_string();
 
     if let Some(message) = picker
         .status_message()

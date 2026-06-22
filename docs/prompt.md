@@ -21,6 +21,17 @@ Source of truth:
 - GitHub issues #1-#8
 - GitHub Project #13
 
+Codex thread policy:
+- The coordinator thread coordinates.
+- Implementation work must happen in separate Codex app threads, not internal subagents.
+- Do not implement issues directly in the coordinator thread unless `codex_app.create_thread` is unavailable or fails.
+- Before creating a worker thread, call `codex_app.list_projects` and find the project for `/Users/owainlewis/Code/github/owainlewis/cortex`.
+- For each active issue lane, call `codex_app.create_thread` with a project target and a worktree environment.
+- Prefer a worktree starting from `main` for each issue worker.
+- Give each worker a self-contained prompt with the issue, repo context, branch name, acceptance criteria, verification steps, project status rules, PR expectations, and reporting requirements.
+- Use internal subagents only for adversarial review inside a worker thread.
+- Do not use an internal subagent as a substitute for an implementation worker thread.
+
 Project status rules:
 - Keep the project board current as work progresses.
 - Before starting each issue, confirm the project item exists on GitHub Project #13.
@@ -60,14 +71,17 @@ Workflow for each issue:
   - Verification steps
   - Out of scope
 
-3. Branch and worktree
+3. Create worker thread, branch, and worktree
+- Create a separate Codex app worker thread for the issue using `codex_app.create_thread`.
+- Use `codex_app.list_projects` first to resolve the project ID.
+- Use a project target with a worktree environment.
 - Use one branch per issue.
 - Branch naming format: `issue-<number>-<short-slug>`.
 - Use a separate worktree when helpful.
 - Do not overwrite or discard unrelated local changes.
 
 4. Implement
-- Make the smallest complete change that satisfies the issue.
+- The worker thread makes the smallest complete change that satisfies the issue.
 - Follow existing project patterns.
 - Keep docs/prd.md and docs/roadmap.md aligned if the implementation changes a decision.
 - Add or update tests at the level that would catch the behavior.
@@ -79,7 +93,8 @@ Workflow for each issue:
 - Clearly record anything that could not be verified.
 
 6. Adversarial review
-- Use a subagent to review the branch before opening the PR.
+- Inside the worker thread, use a fresh internal subagent to review the branch before opening the PR.
+- This review subagent is separate from the Codex app worker thread.
 - Ask the subagent to look for:
   - Incorrect behavior vs the issue acceptance criteria
   - Missing tests

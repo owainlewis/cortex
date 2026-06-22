@@ -55,6 +55,7 @@ fn resolve_prefixed(prefix: Prefix, key: Key) -> KeymapResult {
     match (prefix, key) {
         (Prefix::CtrlX, Key::Ctrl('s')) => KeymapResult::Command(Command::SaveBuffer),
         (Prefix::CtrlX, Key::Ctrl('c')) => KeymapResult::Command(Command::Quit),
+        (Prefix::CtrlX, Key::Ctrl('f')) => KeymapResult::Command(Command::OpenFile),
         _ => KeymapResult::Unbound,
     }
 }
@@ -146,6 +147,12 @@ mod tests {
         assert_eq!(
             keymap.resolve(Key::Ctrl('c')),
             KeymapResult::Command(Command::Quit)
+        );
+
+        assert_eq!(keymap.resolve(Key::Ctrl('x')), KeymapResult::PendingPrefix);
+        assert_eq!(
+            keymap.resolve(Key::Ctrl('f')),
+            KeymapResult::Command(Command::OpenFile)
         );
     }
 
