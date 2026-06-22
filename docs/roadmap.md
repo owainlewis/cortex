@@ -12,6 +12,7 @@ Each task should be small enough for one focused branch, one review, and one rol
 - v0.1 implements a tiny Emacs-shaped keyset and a `C-x` prefix state machine.
 - v0.1 keeps point and scroll in editor/window view state, not only inside the buffer.
 - v0.1 does not include splits, tabs, minibuffer, search, kill ring, tree-sitter, config, AI, or an embedded terminal pane.
+- v0.2 keeps one active buffer, but adds directory startup, a small slash command line, visual polish, and first-pass tree-sitter highlighting.
 
 ## Milestone: v0.1 Minimal Editor
 
@@ -220,24 +221,54 @@ Run a manual smoke test against a temporary file.
 
 **Out of scope:** Marketing copy, screenshots, packaging, and release automation.
 
+## Milestone: v0.2 Current Editor Surface
+
+Project board: [Cortex v0.1](https://github.com/users/owainlewis/projects/13)
+
+Status: complete once issue #21 merges.
+
+GitHub issue tracker:
+
+- [#17 Add directory file picker](https://github.com/owainlewis/cortex/issues/17)
+- [#18 Add slash command line](https://github.com/owainlewis/cortex/issues/18)
+- [#19 Add visual theme and modeline polish](https://github.com/owainlewis/cortex/issues/19)
+- [#20 Add tree-sitter syntax highlighting](https://github.com/owainlewis/cortex/issues/20)
+- [#21 Update docs for v0.2 behavior](https://github.com/owainlewis/cortex/issues/21)
+
+Completed behavior:
+
+- Opening a file path starts the editor on that file.
+- Opening a directory path starts a picker over non-hidden entries in that directory.
+- The picker supports Up, Down, `C-p`, `C-n`, Enter, Escape, and `C-x C-c`.
+- The editor has a slash command line with `/open <path>`, `/save`, `/quit`, `/quit!`, and `/help`.
+- Unknown slash commands report an error and keep the editor open.
+- The editor has the current visual theme, modeline polish, and status styles.
+- Tree-sitter highlighting is enabled for Rust, Markdown, JSON, and TOML.
+- README and roadmap describe the current v0.2 behavior and limitations.
+
+Still intentionally out of scope for v0.2:
+
+- Multiple buffers, splits, and tabs.
+- Minibuffer, search, kill ring, undo, config, plugins, LSP, AI integration, and the embedded terminal pane.
+- JavaScript and TypeScript highlighting.
+- Directory navigation inside the picker and directory support for `/open`.
+
 ## Later Milestones
 
-### v0.2 Editing Feel
+### v0.3 Editing Feel
 
 - Kill ring with `C-k`, `C-y`, and `M-y`.
 - Incremental search with `C-s` and `C-r`.
 - Undo and redo.
 - Minibuffer foundation.
 
-### v0.3 Windows And Aesthetics
+### v0.4 Windows
 
 - Split layout tree.
 - Tabs.
-- Modeline polish.
-- Theme defaults.
-- Tree-sitter highlighting.
+- Per-window modelines and view state where needed.
 
-### v0.4 Agent Workflow
+### v0.5 Agent Workflow
 
 - Manual `revert-buffer`.
 - Dirty reload guard.
