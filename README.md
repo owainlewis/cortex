@@ -10,7 +10,54 @@ The current goal is one fast editing loop: open a file or directory, edit one bu
 Cortex is currently macOS-only.
 Other platforms are not a current or v1 goal.
 
-## Run
+## Install
+
+Install the latest stable release with the shell installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/owainlewis/cortex/main/install.sh | bash
+```
+
+The installer downloads the latest GitHub Release for macOS arm64, verifies the checksum, and installs `cortex` to `~/.local/bin` by default.
+Set `CORTEX_INSTALL_DIR` to choose another install directory.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/owainlewis/cortex/main/install.sh | CORTEX_INSTALL_DIR="$HOME/bin" bash
+```
+
+To install a specific stable release, pass its tag:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/owainlewis/cortex/main/install.sh | bash -s -- --version v0.1.0
+```
+
+You can also download the release tarball and `.sha256` file directly from GitHub Releases.
+Verify the checksum before running the binary.
+
+## Update
+
+Run the installer again to update to the latest stable release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/owainlewis/cortex/main/install.sh | bash
+```
+
+Check the installed binary version with:
+
+```sh
+cortex --version
+```
+
+Check whether GitHub has a newer stable release with:
+
+```sh
+cortex --check-update
+```
+
+`cortex --check-update` never updates the binary by itself.
+It only reports release status.
+
+## Developer Run
 
 Install Rust, then run Cortex with exactly one path.
 Pass a file path to open that file directly:
@@ -29,6 +76,12 @@ For a temporary smoke test file:
 
 ```sh
 cargo run -- /tmp/cortex-smoke.txt
+```
+
+You can also install from the current Git repository as a developer fallback:
+
+```sh
+cargo install --git https://github.com/owainlewis/cortex.git
 ```
 
 Existing files open with their current contents.
@@ -97,9 +150,18 @@ Unknown slash commands leave the editor open and show an error message.
 
 ## Syntax Highlighting
 
-Cortex highlights Rust, Markdown, JSON, and TOML files.
+Cortex highlights Rust, Markdown, JSON, TOML, Python, JavaScript, TypeScript, and Ruby files.
 Other file types render as plain text.
-JavaScript and TypeScript highlighting are not implemented yet.
+
+## Releases And Nightlies
+
+Stable releases are built from tags like `v0.1.0`.
+The release workflow publishes a GitHub Release with a macOS tarball and matching `.sha256` checksum.
+
+Nightly builds are unstable test artifacts from `main`.
+They are downloadable from the Nightly workflow run artifacts and are not used by the stable installer.
+
+See [docs/release.md](docs/release.md) for the release checklist.
 
 ## Known Limitations
 
