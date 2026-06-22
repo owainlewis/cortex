@@ -224,7 +224,7 @@ impl Buffer {
     }
 
     fn update_dirty(&mut self) {
-        self.dirty = self.text.to_string() != self.clean_text;
+        self.dirty = self.text != self.clean_text;
     }
 }
 
@@ -251,7 +251,7 @@ fn clean_line_text(text: &str, line_idx: usize) -> String {
         };
 
         if idx == line_idx {
-            return line.trim_end_matches(&['\r', '\n']).to_string();
+            return line.trim_end_matches(['\r', '\n']).to_string();
         }
     }
 
@@ -326,8 +326,7 @@ fn ensure_parent_directory_exists(path: &Path) -> io::Result<()> {
 mod tests {
     use super::Buffer;
     use std::{
-        fs,
-        io,
+        fs, io,
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -551,7 +550,9 @@ mod tests {
         let error = buffer.save().unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error.to_string().contains("parent directory does not exist"));
+        assert!(error
+            .to_string()
+            .contains("parent directory does not exist"));
         assert!(buffer.is_dirty());
         assert!(!path.exists());
         remove_dir(dir);

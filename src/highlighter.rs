@@ -142,12 +142,11 @@ impl SyntaxHighlighter {
         let language = &languages[language_idx];
         let line_starts = line_start_offsets(lines);
         {
-            let events = self.highlighter.highlight(
-                &language.config,
-                source.as_bytes(),
-                None,
-                |name| language_config_for_name(languages, name),
-            );
+            let events =
+                self.highlighter
+                    .highlight(&language.config, source.as_bytes(), None, |name| {
+                        language_config_for_name(languages, name)
+                    });
             let Ok(events) = events else {
                 return highlighted_lines;
             };
@@ -213,12 +212,11 @@ impl SyntaxHighlighter {
                 continue;
             }
 
-            let events = self.highlighter.highlight(
-                &language.config,
-                line.as_bytes(),
-                None,
-                |name| language_config_for_name(languages, name),
-            );
+            let events =
+                self.highlighter
+                    .highlight(&language.config, line.as_bytes(), None, |name| {
+                        language_config_for_name(languages, name)
+                    });
             let Ok(events) = events else {
                 continue;
             };
@@ -514,7 +512,10 @@ mod tests {
     fn highlights_required_file_types() {
         let cases = [
             (Path::new("notes.md"), vec!["# Heading".to_string()]),
-            (Path::new("data.json"), vec!["{\"enabled\": true}".to_string()]),
+            (
+                Path::new("data.json"),
+                vec!["{\"enabled\": true}".to_string()],
+            ),
             (Path::new("config.toml"), vec!["enabled = true".to_string()]),
         ];
 
@@ -537,8 +538,14 @@ mod tests {
             language_label_for_path(Path::new("notes.markdown")),
             Some("MARKDOWN")
         );
-        assert_eq!(language_label_for_path(Path::new("data.json")), Some("JSON"));
-        assert_eq!(language_label_for_path(Path::new("config.toml")), Some("TOML"));
+        assert_eq!(
+            language_label_for_path(Path::new("data.json")),
+            Some("JSON")
+        );
+        assert_eq!(
+            language_label_for_path(Path::new("config.toml")),
+            Some("TOML")
+        );
         assert_eq!(language_label_for_path(Path::new("app.py")), Some("PYTHON"));
         assert_eq!(
             language_label_for_path(Path::new("index.jsx")),
@@ -548,7 +555,10 @@ mod tests {
             language_label_for_path(Path::new("app.tsx")),
             Some("TYPESCRIPT")
         );
-        assert_eq!(language_label_for_path(Path::new("task.rake")), Some("RUBY"));
+        assert_eq!(
+            language_label_for_path(Path::new("task.rake")),
+            Some("RUBY")
+        );
         assert_eq!(language_label_for_path(Path::new("notes.txt")), None);
     }
 
@@ -625,17 +635,25 @@ mod tests {
         let highlighted = highlighter.highlight_visible_lines(Path::new("notes.md"), &lines);
 
         assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupHeading));
-        assert!(line_has_kind(&highlighted[0], HighlightKind::PunctuationSpecial));
-        assert!(line_has_kind(&highlighted[1], HighlightKind::PunctuationSpecial));
-        assert!(line_has_kind(&highlighted[2], HighlightKind::PunctuationSpecial));
+        assert!(line_has_kind(
+            &highlighted[0],
+            HighlightKind::PunctuationSpecial
+        ));
+        assert!(line_has_kind(
+            &highlighted[1],
+            HighlightKind::PunctuationSpecial
+        ));
+        assert!(line_has_kind(
+            &highlighted[2],
+            HighlightKind::PunctuationSpecial
+        ));
     }
 
     #[test]
     fn highlights_markdown_inline_markup() {
         let mut highlighter = SyntaxHighlighter::new();
-        let lines = vec![
-            "Use **bold**, *em*, `code`, and [link](https://example.com).".to_string(),
-        ];
+        let lines =
+            vec!["Use **bold**, *em*, `code`, and [link](https://example.com).".to_string()];
 
         let highlighted = highlighter.highlight_visible_lines(Path::new("notes.md"), &lines);
 

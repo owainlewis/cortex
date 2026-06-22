@@ -95,12 +95,9 @@ fn run_editor<W: io::Write>(
                     let key = key_from_event(key);
                     match app_state.handle_key(key, &mut keymap, &mut buffer, &mut view) {
                         AppAction::Continue => {}
-                        AppAction::OpenFilePicker => open_file_from_picker(
-                            terminal,
-                            &mut buffer,
-                            &mut view,
-                            &mut app_state,
-                        )?,
+                        AppAction::OpenFilePicker => {
+                            open_file_from_picker(terminal, &mut buffer, &mut view, &mut app_state)?
+                        }
                         AppAction::Quit => break,
                     }
                     render(
@@ -147,19 +144,11 @@ fn run_directory_picker<W: io::Write>(
                         DirectoryPickerAction::Browse(path) => match DirectoryPicker::read(&path) {
                             Ok(next_picker) => {
                                 picker = next_picker;
-                                render_directory_picker(
-                                    &renderer,
-                                    terminal.writer_mut(),
-                                    &picker,
-                                )?;
+                                render_directory_picker(&renderer, terminal.writer_mut(), &picker)?;
                             }
                             Err(error) => {
                                 picker.set_status_message(format!("Open failed: {error}"));
-                                render_directory_picker(
-                                    &renderer,
-                                    terminal.writer_mut(),
-                                    &picker,
-                                )?;
+                                render_directory_picker(&renderer, terminal.writer_mut(), &picker)?;
                             }
                         },
                         DirectoryPickerAction::Open(path) => return Ok(Some(path)),
@@ -243,9 +232,7 @@ impl AppState {
 
         match keymap.resolve(key) {
             KeymapResult::Command(commands::Command::SetMark) => self.set_mark(view),
-            KeymapResult::Command(commands::Command::KillRegion) => {
-                self.kill_region(buffer, view)
-            }
+            KeymapResult::Command(commands::Command::KillRegion) => self.kill_region(buffer, view),
             KeymapResult::Command(commands::Command::KillLine) => self.kill_line(buffer, view),
             KeymapResult::Command(commands::Command::Yank) => self.yank(buffer, view),
             KeymapResult::Command(commands::Command::RepeatSearch) => {
@@ -360,12 +347,7 @@ impl AppState {
         }
     }
 
-    fn run_command_line(
-        &mut self,
-        input: &str,
-        buffer: &mut Buffer,
-        view: &mut View,
-    ) -> AppAction {
+    fn run_command_line(&mut self, input: &str, buffer: &mut Buffer, view: &mut View) -> AppAction {
         let trimmed = input.trim();
         let Some(command_text) = trimmed.strip_prefix('/') else {
             self.set_status("Commands must start with /", StatusKind::Error);
@@ -409,12 +391,7 @@ impl AppState {
         }
     }
 
-    fn run_search_command(
-        &mut self,
-        command: &str,
-        buffer: &Buffer,
-        view: &mut View,
-    ) -> AppAction {
+    fn run_search_command(&mut self, command: &str, buffer: &Buffer, view: &mut View) -> AppAction {
         let query = command
             .strip_prefix("search")
             .map(str::trim)
@@ -1116,7 +1093,10 @@ mod tests {
         assert_eq!(buffer.text(), "target");
         assert_eq!(view.point(), 0);
         let expected_status = format!("Opened {}", target_path.display());
-        assert_eq!(app.status_message.as_deref(), Some(expected_status.as_str()));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some(expected_status.as_str())
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1200,7 +1180,13 @@ mod tests {
         let mut buffer = buffer_with_text("notes.txt", "alpha beta alpha");
         let mut view = View::new();
 
-        run_slash_command("/search alpha", &mut app, &mut keymap, &mut buffer, &mut view);
+        run_slash_command(
+            "/search alpha",
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+        );
         assert_eq!(view.point(), 11);
 
         let action = app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
@@ -1221,7 +1207,13 @@ mod tests {
         assert_eq!(app.status_message.as_deref(), Some("Usage: /search <text>"));
         assert_eq!(app.status_kind, Some(StatusKind::Error));
 
-        run_slash_command("/search missing", &mut app, &mut keymap, &mut buffer, &mut view);
+        run_slash_command(
+            "/search missing",
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+        );
         assert_eq!(view.point(), 0);
         assert_eq!(app.status_message.as_deref(), Some("Not found: missing"));
         assert_eq!(app.status_kind, Some(StatusKind::Error));
@@ -1238,7 +1230,10 @@ mod tests {
 
         assert_eq!(action, AppAction::Continue);
         assert_eq!(buffer.text(), "old");
-        assert_eq!(app.status_message.as_deref(), Some("Unknown command: /bogus"));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Unknown command: /bogus")
+        );
     }
 
     fn start_dirty_quit_prompt(
