@@ -243,14 +243,14 @@ Completed behavior:
 - The editor has a slash command line with `/open <path>`, `/save`, `/quit`, `/quit!`, and `/help`.
 - Unknown slash commands report an error and keep the editor open.
 - The editor has the current visual theme, modeline polish, and status styles.
-- Tree-sitter highlighting is enabled for Rust, Markdown, JSON, and TOML.
+- Tree-sitter highlighting is enabled for Rust, Markdown, JSON, TOML, Python, JavaScript, TypeScript, TSX, and Ruby.
 - README and roadmap describe the current v0.2 behavior and limitations.
 
 Still intentionally out of scope for v0.2:
 
 - Multiple buffers, splits, and tabs.
 - Minibuffer, search, kill ring, undo, config, plugins, LSP, AI integration, and the embedded terminal pane.
-- JavaScript and TypeScript highlighting.
+- Additional language packs beyond the primary daily-driver languages.
 - Directory navigation inside the picker and directory support for `/open`.
 
 ## Later Milestones

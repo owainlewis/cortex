@@ -41,6 +41,16 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "variable",
 ];
 
+const RUST_EXTENSIONS: &[&str] = &["rs"];
+const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown"];
+const JSON_EXTENSIONS: &[&str] = &["json"];
+const TOML_EXTENSIONS: &[&str] = &["toml"];
+const PYTHON_EXTENSIONS: &[&str] = &["py", "pyw"];
+const JAVASCRIPT_EXTENSIONS: &[&str] = &["js", "jsx", "mjs", "cjs"];
+const TYPESCRIPT_EXTENSIONS: &[&str] = &["ts", "mts", "cts"];
+const TYPESCRIPT_TSX_EXTENSIONS: &[&str] = &["tsx"];
+const RUBY_EXTENSIONS: &[&str] = &["rb", "rake", "gemspec"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HighlightKind {
     Attribute,
@@ -98,6 +108,11 @@ impl SyntaxHighlighter {
             markdown_inline_definition(),
             json_definition(),
             toml_definition(),
+            python_definition(),
+            javascript_definition(),
+            typescript_definition(),
+            typescript_tsx_definition(),
+            ruby_definition(),
         ]
         .into_iter()
         .flatten()
@@ -243,9 +258,28 @@ impl Default for SyntaxHighlighter {
     }
 }
 
+pub fn language_label_for_path(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+
+    [
+        ("RUST", RUST_EXTENSIONS),
+        ("MARKDOWN", MARKDOWN_EXTENSIONS),
+        ("JSON", JSON_EXTENSIONS),
+        ("TOML", TOML_EXTENSIONS),
+        ("PYTHON", PYTHON_EXTENSIONS),
+        ("JAVASCRIPT", JAVASCRIPT_EXTENSIONS),
+        ("TYPESCRIPT", TYPESCRIPT_EXTENSIONS),
+        ("TYPESCRIPT", TYPESCRIPT_TSX_EXTENSIONS),
+        ("RUBY", RUBY_EXTENSIONS),
+    ]
+    .into_iter()
+    .find(|(_, extensions)| extensions.contains(&extension.as_str()))
+    .map(|(label, _)| label)
+}
+
 fn rust_definition() -> Option<LanguageDefinition> {
     language_definition(
-        &["rs"],
+        RUST_EXTENSIONS,
         tree_sitter_rust::LANGUAGE.into(),
         "rust",
         tree_sitter_rust::HIGHLIGHTS_QUERY,
@@ -255,7 +289,7 @@ fn rust_definition() -> Option<LanguageDefinition> {
 
 fn markdown_definition() -> Option<LanguageDefinition> {
     language_definition(
-        &["md", "markdown"],
+        MARKDOWN_EXTENSIONS,
         tree_sitter_md::LANGUAGE.into(),
         "markdown",
         tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
@@ -275,7 +309,7 @@ fn markdown_inline_definition() -> Option<LanguageDefinition> {
 
 fn json_definition() -> Option<LanguageDefinition> {
     language_definition(
-        &["json"],
+        JSON_EXTENSIONS,
         tree_sitter_json::LANGUAGE.into(),
         "json",
         tree_sitter_json::HIGHLIGHTS_QUERY,
@@ -285,10 +319,66 @@ fn json_definition() -> Option<LanguageDefinition> {
 
 fn toml_definition() -> Option<LanguageDefinition> {
     language_definition(
-        &["toml"],
+        TOML_EXTENSIONS,
         tree_sitter_toml_ng::LANGUAGE.into(),
         "toml",
         tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+        "",
+    )
+}
+
+fn python_definition() -> Option<LanguageDefinition> {
+    language_definition(
+        PYTHON_EXTENSIONS,
+        tree_sitter_python::LANGUAGE.into(),
+        "python",
+        tree_sitter_python::HIGHLIGHTS_QUERY,
+        "",
+    )
+}
+
+fn javascript_definition() -> Option<LanguageDefinition> {
+    let highlights = format!(
+        "{}\n{}",
+        tree_sitter_javascript::HIGHLIGHT_QUERY,
+        tree_sitter_javascript::JSX_HIGHLIGHT_QUERY
+    );
+
+    language_definition(
+        JAVASCRIPT_EXTENSIONS,
+        tree_sitter_javascript::LANGUAGE.into(),
+        "javascript",
+        &highlights,
+        tree_sitter_javascript::INJECTIONS_QUERY,
+    )
+}
+
+fn typescript_definition() -> Option<LanguageDefinition> {
+    language_definition(
+        TYPESCRIPT_EXTENSIONS,
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "typescript",
+        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        "",
+    )
+}
+
+fn typescript_tsx_definition() -> Option<LanguageDefinition> {
+    language_definition(
+        TYPESCRIPT_TSX_EXTENSIONS,
+        tree_sitter_typescript::LANGUAGE_TSX.into(),
+        "tsx",
+        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        "",
+    )
+}
+
+fn ruby_definition() -> Option<LanguageDefinition> {
+    language_definition(
+        RUBY_EXTENSIONS,
+        tree_sitter_ruby::LANGUAGE.into(),
+        "ruby",
+        tree_sitter_ruby::HIGHLIGHTS_QUERY,
         "",
     )
 }
@@ -403,7 +493,7 @@ fn line_for_offset(line_starts: &[usize], offset: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{HighlightKind, SyntaxHighlighter};
+    use super::{language_label_for_path, HighlightKind, SyntaxHighlighter};
     use std::path::Path;
 
     #[test]
@@ -426,6 +516,89 @@ mod tests {
             (Path::new("notes.md"), vec!["# Heading".to_string()]),
             (Path::new("data.json"), vec!["{\"enabled\": true}".to_string()]),
             (Path::new("config.toml"), vec!["enabled = true".to_string()]),
+        ];
+
+        for (path, lines) in cases {
+            let mut highlighter = SyntaxHighlighter::new();
+            let highlighted = highlighter.highlight_visible_lines(path, &lines);
+
+            assert!(
+                highlighted.iter().flatten().next().is_some(),
+                "{} should produce at least one highlight",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn language_labels_follow_highlighted_file_types() {
+        assert_eq!(language_label_for_path(Path::new("main.rs")), Some("RUST"));
+        assert_eq!(
+            language_label_for_path(Path::new("notes.markdown")),
+            Some("MARKDOWN")
+        );
+        assert_eq!(language_label_for_path(Path::new("data.json")), Some("JSON"));
+        assert_eq!(language_label_for_path(Path::new("config.toml")), Some("TOML"));
+        assert_eq!(language_label_for_path(Path::new("app.py")), Some("PYTHON"));
+        assert_eq!(
+            language_label_for_path(Path::new("index.jsx")),
+            Some("JAVASCRIPT")
+        );
+        assert_eq!(
+            language_label_for_path(Path::new("app.tsx")),
+            Some("TYPESCRIPT")
+        );
+        assert_eq!(language_label_for_path(Path::new("task.rake")), Some("RUBY"));
+        assert_eq!(language_label_for_path(Path::new("notes.txt")), None);
+    }
+
+    #[test]
+    fn highlights_primary_language_files() {
+        let cases = [
+            (
+                Path::new("app.py"),
+                vec![
+                    "def greet(name):".to_string(),
+                    "    return f\"hi {name}\"".to_string(),
+                ],
+            ),
+            (
+                Path::new("index.js"),
+                vec![
+                    "export function greet(name) {".to_string(),
+                    "  return `hi ${name}`;".to_string(),
+                ],
+            ),
+            (
+                Path::new("component.jsx"),
+                vec![
+                    "export function Button() {".to_string(),
+                    "  return <button>Save</button>;".to_string(),
+                ],
+            ),
+            (
+                Path::new("app.ts"),
+                vec![
+                    "type User = { name: string };".to_string(),
+                    "const user: User = { name: \"Ada\" };".to_string(),
+                ],
+            ),
+            (
+                Path::new("component.tsx"),
+                vec![
+                    "type Props = { label: string };".to_string(),
+                    "export const Button = ({ label }: Props) => <button>{label}</button>;"
+                        .to_string(),
+                ],
+            ),
+            (
+                Path::new("app.rb"),
+                vec![
+                    "def greet(name)".to_string(),
+                    "  \"hi #{name}\"".to_string(),
+                    "end".to_string(),
+                ],
+            ),
         ];
 
         for (path, lines) in cases {
