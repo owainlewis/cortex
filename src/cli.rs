@@ -9,6 +9,8 @@ pub struct Args {
 pub enum ParseResult {
     Run(Args),
     Help,
+    Version,
+    CheckUpdate,
 }
 
 pub const USAGE: &str = "\
@@ -16,6 +18,8 @@ Cortex
 
 Usage:
   cortex <file>
+  cortex --version
+  cortex --check-update
 
 Opens one file in the Cortex terminal editor.
 ";
@@ -32,6 +36,8 @@ where
     }
 
     match values.as_slice() {
+        [flag] if flag == "--version" || flag == "-V" => Ok(ParseResult::Version),
+        [flag] if flag == "--check-update" => Ok(ParseResult::CheckUpdate),
         [path] => Ok(ParseResult::Run(Args {
             path: PathBuf::from(path),
         })),
@@ -59,6 +65,17 @@ mod tests {
     fn accepts_help_flag() {
         assert_eq!(parse_args(["--help"]), Ok(ParseResult::Help));
         assert_eq!(parse_args(["-h"]), Ok(ParseResult::Help));
+    }
+
+    #[test]
+    fn accepts_version_flag() {
+        assert_eq!(parse_args(["--version"]), Ok(ParseResult::Version));
+        assert_eq!(parse_args(["-V"]), Ok(ParseResult::Version));
+    }
+
+    #[test]
+    fn accepts_check_update_flag() {
+        assert_eq!(parse_args(["--check-update"]), Ok(ParseResult::CheckUpdate));
     }
 
     #[test]
