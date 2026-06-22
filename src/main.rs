@@ -4,6 +4,7 @@ mod cli;
 mod commands;
 mod input;
 mod keymap;
+mod picker;
 pub mod renderer;
 mod terminal;
 pub mod view;

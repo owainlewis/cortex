@@ -1,4 +1,8 @@
-use crate::{buffer::Buffer, view::View};
+use crate::{
+    buffer::Buffer,
+    picker::{DirectoryEntry, DirectoryEntryKind, DirectoryPicker},
+    view::View,
+};
 use crossterm::{
     cursor, queue,
     style::{Attribute, Print, SetAttribute},
@@ -30,6 +34,13 @@ struct CursorPosition {
     row: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PickerFrame {
+    lines: Vec<String>,
+    modeline: String,
+    cursor: CursorPosition,
+}
+
 impl Renderer {
     pub fn new() -> Self {
         Self
@@ -48,6 +59,42 @@ impl Renderer {
         status_message: Option<&str>,
     ) -> io::Result<()> {
         let frame = build_frame(buffer, view, size, status_message);
+
+        queue!(
+            writer,
+            cursor::Hide,
+            terminal::Clear(ClearType::All),
+            cursor::MoveTo(0, 0)
+        )?;
+
+        if size.cols == 0 || size.rows == 0 {
+            return writer.flush();
+        }
+
+        for (row, line) in frame.lines.iter().enumerate() {
+            queue!(writer, cursor::MoveTo(0, row as u16), Print(line))?;
+        }
+
+        let modeline_row = size.rows.saturating_sub(1);
+        queue!(
+            writer,
+            cursor::MoveTo(0, modeline_row),
+            SetAttribute(Attribute::Reverse),
+            Print(frame.modeline),
+            SetAttribute(Attribute::Reset),
+            cursor::MoveTo(frame.cursor.col, frame.cursor.row),
+            cursor::Show
+        )?;
+        writer.flush()
+    }
+
+    pub fn render_directory_picker<W: Write>(
+        &self,
+        writer: &mut W,
+        picker: &DirectoryPicker,
+        size: TerminalSize,
+    ) -> io::Result<()> {
+        let frame = build_picker_frame(picker, size);
 
         queue!(
             writer,
@@ -126,7 +173,11 @@ fn cursor_position(buffer: &Buffer, view: &View, size: TerminalSize) -> CursorPo
 fn modeline_text(buffer: &Buffer, view: &View, status_message: Option<&str>) -> String {
     let line_idx = buffer.line_for_char(view.point());
     let column = view.point() - buffer.line_start_char(line_idx);
-    let dirty_state = if buffer.is_dirty() { "modified" } else { "clean" };
+    let dirty_state = if buffer.is_dirty() {
+        "modified"
+    } else {
+        "clean"
+    };
     let file_name = buffer
         .path()
         .file_name()
@@ -142,6 +193,89 @@ fn modeline_text(buffer: &Buffer, view: &View, status_message: Option<&str>) -> 
     );
 
     if let Some(message) = status_message.filter(|message| !message.is_empty()) {
+        text.push_str(" | ");
+        text.push_str(message);
+        text.push(' ');
+    }
+
+    text
+}
+
+fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFrame {
+    let width = size.cols as usize;
+    let viewport_height = size.rows.saturating_sub(1) as usize;
+    let mut lines = Vec::with_capacity(viewport_height);
+
+    if viewport_height > 0 {
+        lines.push(fit_line_cells(
+            &format!(" Open file in {}", picker.directory().display()),
+            width,
+        ));
+    }
+
+    if viewport_height > 1 {
+        lines.push(String::new());
+    }
+
+    let entry_rows = viewport_height.saturating_sub(2);
+    let first_entry = if entry_rows == 0 {
+        0
+    } else {
+        picker
+            .selected()
+            .saturating_add(1)
+            .saturating_sub(entry_rows)
+    };
+
+    if picker.entries().is_empty() && lines.len() < viewport_height {
+        lines.push(fit_line_cells("  No visible files", width));
+    } else {
+        for entry in picker.entries().iter().skip(first_entry).take(entry_rows) {
+            let selected = picker.selected_entry() == Some(entry);
+            lines.push(fit_line_cells(&picker_entry_text(entry, selected), width));
+        }
+    }
+
+    while lines.len() < viewport_height {
+        lines.push(String::new());
+    }
+
+    let cursor_row = if picker.entries().is_empty() {
+        0
+    } else {
+        2 + picker.selected().saturating_sub(first_entry)
+    }
+    .min(viewport_height.saturating_sub(1)) as u16;
+
+    PickerFrame {
+        lines,
+        modeline: fit_status_line(&picker_modeline_text(picker), width),
+        cursor: CursorPosition {
+            col: 0,
+            row: cursor_row,
+        },
+    }
+}
+
+fn picker_entry_text(entry: &DirectoryEntry, selected: bool) -> String {
+    let marker = if selected { ">" } else { " " };
+    let suffix = if entry.is_directory() { "/" } else { "" };
+    let kind = match entry.kind() {
+        DirectoryEntryKind::File => "file",
+        DirectoryEntryKind::Directory => "dir ",
+        DirectoryEntryKind::Other => "item",
+    };
+
+    format!("{marker} {kind} {}{suffix}", entry.name())
+}
+
+fn picker_modeline_text(picker: &DirectoryPicker) -> String {
+    let mut text = " Enter open  C-n/C-p move  Esc/C-x C-c quit ".to_string();
+
+    if let Some(message) = picker
+        .status_message()
+        .filter(|message| !message.is_empty())
+    {
         text.push_str(" | ");
         text.push_str(message);
         text.push(' ');
@@ -253,9 +387,14 @@ fn is_wide(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_frame, fit_line_cells, fit_status_line, measure_cells, CursorPosition, TerminalSize,
+        build_frame, build_picker_frame, fit_line_cells, fit_status_line, measure_cells,
+        CursorPosition, TerminalSize,
     };
-    use crate::{buffer::Buffer, view::View};
+    use crate::{
+        buffer::Buffer,
+        picker::{DirectoryEntry, DirectoryEntryKind, DirectoryPicker},
+        view::View,
+    };
     use std::{
         fs,
         path::PathBuf,
@@ -299,7 +438,12 @@ mod tests {
         let mut buffer = buffer_with_text("notes.txt", "alpha\n");
 
         buffer.insert(0, "z");
-        let frame = build_frame(&buffer, &View::new(), TerminalSize { cols: 40, rows: 3 }, None);
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 40, rows: 3 },
+            None,
+        );
 
         assert!(frame.modeline.contains("modified"));
     }
@@ -325,7 +469,12 @@ mod tests {
         let mut buffer = buffer_with_text("notes.txt", "abcdef");
         buffer.insert(0, "z");
 
-        let frame = build_frame(&buffer, &View::new(), TerminalSize { cols: 4, rows: 2 }, None);
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 4, rows: 2 },
+            None,
+        );
 
         assert_eq!(frame.lines, vec!["zabc"]);
         assert_eq!(frame.modeline.chars().count(), 4);
@@ -374,6 +523,55 @@ mod tests {
         assert!(frame.modeline.contains("Save failed"));
     }
 
+    #[test]
+    fn picker_frame_marks_selection_and_labels_entry_kinds() {
+        let picker = DirectoryPicker::new(
+            PathBuf::from("/tmp/project"),
+            vec![
+                DirectoryEntry::new(
+                    "src".to_string(),
+                    PathBuf::from("/tmp/project/src"),
+                    DirectoryEntryKind::Directory,
+                ),
+                DirectoryEntry::new(
+                    "main.rs".to_string(),
+                    PathBuf::from("/tmp/project/main.rs"),
+                    DirectoryEntryKind::File,
+                ),
+            ],
+        );
+
+        let frame = build_picker_frame(&picker, TerminalSize { cols: 80, rows: 6 });
+
+        assert!(frame.lines[0].contains("/tmp/project"));
+        assert_eq!(frame.lines[2], "> dir  src/");
+        assert_eq!(frame.lines[3], "  file main.rs");
+        assert!(frame.modeline.contains("Enter open"));
+        assert_eq!(frame.cursor, CursorPosition { col: 0, row: 2 });
+    }
+
+    #[test]
+    fn picker_frame_keeps_selected_entry_visible() {
+        let mut picker = DirectoryPicker::new(
+            PathBuf::from("/tmp/project"),
+            vec![
+                picker_entry("a.txt"),
+                picker_entry("b.txt"),
+                picker_entry("c.txt"),
+                picker_entry("d.txt"),
+            ],
+        );
+
+        picker.handle_key(crate::input::Key::Down);
+        picker.handle_key(crate::input::Key::Down);
+        picker.handle_key(crate::input::Key::Down);
+        let frame = build_picker_frame(&picker, TerminalSize { cols: 80, rows: 5 });
+
+        assert_eq!(frame.lines[2], "  file c.txt");
+        assert_eq!(frame.lines[3], "> file d.txt");
+        assert_eq!(frame.cursor, CursorPosition { col: 0, row: 3 });
+    }
+
     fn buffer_with_text(file_name: &str, text: &str) -> Buffer {
         let dir = test_dir("renderer");
         let path = dir.join(file_name);
@@ -381,6 +579,14 @@ mod tests {
         let buffer = Buffer::open(&path).unwrap();
         fs::remove_dir_all(dir).unwrap();
         buffer
+    }
+
+    fn picker_entry(name: &str) -> DirectoryEntry {
+        DirectoryEntry::new(
+            name.to_string(),
+            PathBuf::from("/tmp/project").join(name),
+            DirectoryEntryKind::File,
+        )
     }
 
     fn test_dir(name: &str) -> PathBuf {
