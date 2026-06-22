@@ -1,5 +1,6 @@
 use crate::{
     buffer::Buffer,
+    highlighter::{HighlightKind, HighlightSpan, SyntaxHighlighter},
     picker::{DirectoryEntry, DirectoryEntryKind, DirectoryPicker},
     view::View,
 };
@@ -11,7 +12,10 @@ use crossterm::{
     },
     terminal::{self, ClearType},
 };
-use std::io::{self, Write};
+use std::{
+    cell::RefCell,
+    io::{self, Write},
+};
 
 const TAB_WIDTH: usize = 4;
 const EMPTY_SPACE_MARKER: &str = " ~";
@@ -92,6 +96,86 @@ const THEME: Theme = Theme {
         g: 75,
         b: 83,
     },
+    syntax_attribute: Color::Rgb {
+        r: 213,
+        g: 164,
+        b: 111,
+    },
+    syntax_boolean: Color::Rgb {
+        r: 238,
+        g: 126,
+        b: 126,
+    },
+    syntax_comment: Color::Rgb {
+        r: 112,
+        g: 124,
+        b: 128,
+    },
+    syntax_constant: Color::Rgb {
+        r: 238,
+        g: 126,
+        b: 126,
+    },
+    syntax_constructor: Color::Rgb {
+        r: 137,
+        g: 203,
+        b: 187,
+    },
+    syntax_function: Color::Rgb {
+        r: 236,
+        g: 211,
+        b: 124,
+    },
+    syntax_keyword: Color::Rgb {
+        r: 142,
+        g: 190,
+        b: 241,
+    },
+    syntax_markup: Color::Rgb {
+        r: 189,
+        g: 174,
+        b: 232,
+    },
+    syntax_number: Color::Rgb {
+        r: 244,
+        g: 191,
+        b: 117,
+    },
+    syntax_operator: Color::Rgb {
+        r: 176,
+        g: 184,
+        b: 187,
+    },
+    syntax_property: Color::Rgb {
+        r: 151,
+        g: 202,
+        b: 222,
+    },
+    syntax_punctuation: Color::Rgb {
+        r: 150,
+        g: 159,
+        b: 163,
+    },
+    syntax_string: Color::Rgb {
+        r: 132,
+        g: 204,
+        b: 159,
+    },
+    syntax_tag: Color::Rgb {
+        r: 142,
+        g: 190,
+        b: 241,
+    },
+    syntax_type: Color::Rgb {
+        r: 137,
+        g: 203,
+        b: 187,
+    },
+    syntax_variable: Color::Rgb {
+        r: 214,
+        g: 219,
+        b: 220,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,8 +193,10 @@ pub enum StatusKind {
     Prompt,
 }
 
-#[derive(Debug, Default)]
-pub struct Renderer;
+#[derive(Default)]
+pub struct Renderer {
+    highlighter: RefCell<SyntaxHighlighter>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Frame {
@@ -138,6 +224,13 @@ struct PickerFrame {
 struct ScreenLine {
     text: String,
     kind: ScreenLineKind,
+    segments: Vec<StyledSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StyledSegment {
+    text: String,
+    highlight: Option<HighlightKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,12 +274,28 @@ struct Theme {
     picker_fg: Color,
     picker_selected_fg: Color,
     picker_selected_bg: Color,
+    syntax_attribute: Color,
+    syntax_boolean: Color,
+    syntax_comment: Color,
+    syntax_constant: Color,
+    syntax_constructor: Color,
+    syntax_function: Color,
+    syntax_keyword: Color,
+    syntax_markup: Color,
+    syntax_number: Color,
+    syntax_operator: Color,
+    syntax_property: Color,
+    syntax_punctuation: Color,
+    syntax_string: Color,
+    syntax_tag: Color,
+    syntax_type: Color,
+    syntax_variable: Color,
 }
 
 impl Renderer {
     pub fn new() -> Self {
         force_color_output(true);
-        Self
+        Self::default()
     }
 
     pub fn viewport_height(&self, size: TerminalSize) -> usize {
@@ -203,13 +312,20 @@ impl Renderer {
         status_kind: Option<StatusKind>,
         command_line: Option<&str>,
     ) -> io::Result<()> {
-        let frame = build_frame(
+        let viewport_height = self.viewport_height(size);
+        let visible_lines = visible_lines(buffer, view, size.cols as usize, viewport_height);
+        let highlighted_lines =
+            self.highlighter
+                .borrow_mut()
+                .highlight_visible_lines(buffer.path(), &visible_lines);
+        let frame = build_frame_with_highlights(
             buffer,
             view,
             size,
             status_message,
             status_kind,
             command_line,
+            &highlighted_lines,
         );
 
         queue!(
@@ -269,6 +385,7 @@ impl Renderer {
     }
 }
 
+#[cfg(test)]
 fn build_frame(
     buffer: &Buffer,
     view: &View,
@@ -277,6 +394,26 @@ fn build_frame(
     status_kind: Option<StatusKind>,
     command_line: Option<&str>,
 ) -> Frame {
+    build_frame_with_highlights(
+        buffer,
+        view,
+        size,
+        status_message,
+        status_kind,
+        command_line,
+        &[],
+    )
+}
+
+fn build_frame_with_highlights(
+    buffer: &Buffer,
+    view: &View,
+    size: TerminalSize,
+    status_message: Option<&str>,
+    status_kind: Option<StatusKind>,
+    command_line: Option<&str>,
+    highlighted_lines: &[Vec<HighlightSpan>],
+) -> Frame {
     let width = size.cols as usize;
     let viewport_height = size.rows.saturating_sub(1) as usize;
     let mut lines = Vec::with_capacity(viewport_height);
@@ -284,13 +421,26 @@ fn build_frame(
     for screen_row in 0..viewport_height {
         let line_idx = view.scroll_line().saturating_add(screen_row);
         let screen_line = if line_idx < buffer.len_lines() {
+            let raw_text = buffer.line_prefix_text(line_idx, width);
+            let spans = highlighted_lines
+                .get(screen_row)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let segments = fit_line_segments(&raw_text, spans, width);
+            let text = segments_text(&segments);
             ScreenLine {
-                text: fit_line_cells(&buffer.line_prefix_text(line_idx, width), width),
+                text,
                 kind: ScreenLineKind::Text,
+                segments,
             }
         } else {
+            let text = empty_space_line(width);
             ScreenLine {
-                text: empty_space_line(width),
+                segments: vec![StyledSegment {
+                    text: text.clone(),
+                    highlight: None,
+                }],
+                text,
                 kind: ScreenLineKind::EmptySpace,
             }
         };
@@ -319,6 +469,19 @@ fn build_frame(
         cursor,
         modeline_style,
     }
+}
+
+fn visible_lines(
+    buffer: &Buffer,
+    view: &View,
+    width: usize,
+    viewport_height: usize,
+) -> Vec<String> {
+    (0..viewport_height)
+        .map(|screen_row| view.scroll_line().saturating_add(screen_row))
+        .take_while(|line_idx| *line_idx < buffer.len_lines())
+        .map(|line_idx| buffer.line_prefix_text(line_idx, width))
+        .collect()
 }
 
 fn command_line_text(input: &str) -> String {
@@ -473,10 +636,24 @@ fn render_editor_line<W: Write>(
         writer,
         cursor::MoveTo(0, row),
         SetForegroundColor(foreground),
-        SetBackgroundColor(THEME.editor_bg),
-        Print(fit_status_line(&line.text, width)),
-        ResetColor
-    )
+        SetBackgroundColor(THEME.editor_bg)
+    )?;
+
+    for segment in &line.segments {
+        let color = segment.highlight.map_or(foreground, highlight_color);
+        queue!(writer, SetForegroundColor(color), Print(&segment.text))?;
+    }
+
+    let remaining_width = width.saturating_sub(measure_cells(&line.text, width));
+    if remaining_width > 0 {
+        queue!(
+            writer,
+            SetForegroundColor(foreground),
+            Print(" ".repeat(remaining_width))
+        )?;
+    }
+
+    queue!(writer, ResetColor)
 }
 
 fn render_picker_line<W: Write>(
@@ -592,6 +769,110 @@ fn picker_modeline_text(picker: &DirectoryPicker) -> String {
     }
 
     text
+}
+
+fn fit_line_segments(
+    line: &str,
+    highlight_spans: &[HighlightSpan],
+    width: usize,
+) -> Vec<StyledSegment> {
+    let mut segments = Vec::new();
+    let mut cells = 0;
+
+    for (byte_idx, ch) in line.char_indices() {
+        if cells >= width {
+            break;
+        }
+
+        let highlight = highlight_for_byte(highlight_spans, byte_idx);
+        if ch == '\t' {
+            let spaces = tab_spaces(cells).min(width - cells);
+            push_segment(
+                &mut segments,
+                &std::iter::repeat(' ').take(spaces).collect::<String>(),
+                highlight,
+            );
+            cells += spaces;
+            continue;
+        }
+
+        let char_width = char_cell_width(ch);
+        if char_width == 0 {
+            continue;
+        }
+
+        if cells + char_width > width {
+            break;
+        }
+
+        let display_char = if ch.is_control() { ' ' } else { ch };
+        push_segment(&mut segments, &display_char.to_string(), highlight);
+        cells += char_width;
+    }
+
+    segments
+}
+
+fn push_segment(
+    segments: &mut Vec<StyledSegment>,
+    text: &str,
+    highlight: Option<HighlightKind>,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    if let Some(segment) = segments
+        .last_mut()
+        .filter(|segment| segment.highlight == highlight)
+    {
+        segment.text.push_str(text);
+        return;
+    }
+
+    segments.push(StyledSegment {
+        text: text.to_string(),
+        highlight,
+    });
+}
+
+fn highlight_for_byte(
+    highlight_spans: &[HighlightSpan],
+    byte_idx: usize,
+) -> Option<HighlightKind> {
+    highlight_spans
+        .iter()
+        .rev()
+        .find(|span| span.range.contains(&byte_idx))
+        .map(|span| span.kind)
+}
+
+fn segments_text(segments: &[StyledSegment]) -> String {
+    segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect()
+}
+
+fn highlight_color(kind: HighlightKind) -> Color {
+    match kind {
+        HighlightKind::Attribute => THEME.syntax_attribute,
+        HighlightKind::Boolean => THEME.syntax_boolean,
+        HighlightKind::Comment => THEME.syntax_comment,
+        HighlightKind::Constant => THEME.syntax_constant,
+        HighlightKind::Constructor => THEME.syntax_constructor,
+        HighlightKind::Function => THEME.syntax_function,
+        HighlightKind::Keyword => THEME.syntax_keyword,
+        HighlightKind::Markup => THEME.syntax_markup,
+        HighlightKind::Number => THEME.syntax_number,
+        HighlightKind::Operator => THEME.syntax_operator,
+        HighlightKind::Property => THEME.syntax_property,
+        HighlightKind::Punctuation => THEME.syntax_punctuation,
+        HighlightKind::String => THEME.syntax_string,
+        HighlightKind::Tag => THEME.syntax_tag,
+        HighlightKind::Type => THEME.syntax_type,
+        HighlightKind::Variable => THEME.syntax_variable,
+    }
 }
 
 fn fit_line_cells(line: &str, width: usize) -> String {
@@ -956,6 +1237,28 @@ mod tests {
 
         assert!(output.contains("\x1b[38;2;"));
         assert!(output.contains("\x1b[48;2;"));
+    }
+
+    #[test]
+    fn render_emits_syntax_highlight_colors_for_known_file_types() {
+        let buffer = buffer_with_text("main.rs", "fn main() {}\n");
+        let renderer = super::Renderer::new();
+        let mut output = Vec::new();
+
+        renderer
+            .render(
+                &mut output,
+                &buffer,
+                &View::new(),
+                TerminalSize { cols: 40, rows: 3 },
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(output.contains("\x1b[38;2;142;190;241m"));
     }
 
     #[test]
