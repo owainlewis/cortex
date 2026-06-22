@@ -22,6 +22,10 @@ impl Keymap {
         Self::default()
     }
 
+    pub fn has_pending_prefix(&self) -> bool {
+        self.pending_prefix.is_some()
+    }
+
     pub fn resolve(&mut self, key: Key) -> KeymapResult {
         if let Some(prefix) = self.pending_prefix.take() {
             return resolve_prefixed(prefix, key);
@@ -166,5 +170,16 @@ mod tests {
             keymap.resolve(Key::Char('a')),
             KeymapResult::Command(Command::Insert('a'))
         );
+    }
+
+    #[test]
+    fn reports_pending_prefix_state() {
+        let mut keymap = Keymap::new();
+
+        assert!(!keymap.has_pending_prefix());
+        assert_eq!(keymap.resolve(Key::Ctrl('x')), KeymapResult::PendingPrefix);
+        assert!(keymap.has_pending_prefix());
+        assert_eq!(keymap.resolve(Key::Unhandled), KeymapResult::Unbound);
+        assert!(!keymap.has_pending_prefix());
     }
 }

@@ -57,8 +57,9 @@ impl Renderer {
         view: &View,
         size: TerminalSize,
         status_message: Option<&str>,
+        command_line: Option<&str>,
     ) -> io::Result<()> {
-        let frame = build_frame(buffer, view, size, status_message);
+        let frame = build_frame(buffer, view, size, status_message, command_line);
 
         queue!(
             writer,
@@ -130,6 +131,7 @@ fn build_frame(
     view: &View,
     size: TerminalSize,
     status_message: Option<&str>,
+    command_line: Option<&str>,
 ) -> Frame {
     let width = size.cols as usize;
     let viewport_height = size.rows.saturating_sub(1) as usize;
@@ -145,10 +147,36 @@ fn build_frame(
         lines.push(line);
     }
 
+    let modeline = command_line
+        .map(command_line_text)
+        .unwrap_or_else(|| modeline_text(buffer, view, status_message));
+    let cursor = command_line
+        .map(|input| command_line_cursor(input, size))
+        .unwrap_or_else(|| cursor_position(buffer, view, size));
+
     Frame {
         lines,
-        modeline: fit_status_line(&modeline_text(buffer, view, status_message), width),
-        cursor: cursor_position(buffer, view, size),
+        modeline: fit_status_line(&modeline, width),
+        cursor,
+    }
+}
+
+fn command_line_text(input: &str) -> String {
+    format!(" {input}")
+}
+
+fn command_line_cursor(input: &str, size: TerminalSize) -> CursorPosition {
+    if size.cols == 0 || size.rows == 0 {
+        return CursorPosition { col: 0, row: 0 };
+    }
+
+    let text_before_cursor = command_line_text(input);
+    let col = measure_cells(&text_before_cursor, size.cols as usize)
+        .min(size.cols.saturating_sub(1) as usize) as u16;
+
+    CursorPosition {
+        col,
+        row: size.rows.saturating_sub(1),
     }
 }
 
@@ -424,7 +452,13 @@ mod tests {
         let buffer = buffer_with_text("notes.txt", "alpha\nbeta\n");
         let view = View::new();
 
-        let frame = build_frame(&buffer, &view, TerminalSize { cols: 40, rows: 3 }, None);
+        let frame = build_frame(
+            &buffer,
+            &view,
+            TerminalSize { cols: 40, rows: 3 },
+            None,
+            None,
+        );
 
         assert_eq!(frame.lines, vec!["alpha", "beta"]);
         assert!(frame.modeline.contains("notes.txt"));
@@ -443,6 +477,7 @@ mod tests {
             &View::new(),
             TerminalSize { cols: 40, rows: 3 },
             None,
+            None,
         );
 
         assert!(frame.modeline.contains("modified"));
@@ -457,7 +492,13 @@ mod tests {
         view.move_next_line(&buffer);
         view.ensure_point_visible(&buffer, 2);
 
-        let frame = build_frame(&buffer, &view, TerminalSize { cols: 40, rows: 3 }, None);
+        let frame = build_frame(
+            &buffer,
+            &view,
+            TerminalSize { cols: 40, rows: 3 },
+            None,
+            None,
+        );
 
         assert_eq!(frame.lines, vec!["two", "three"]);
         assert_eq!(frame.cursor, CursorPosition { col: 0, row: 1 });
@@ -474,6 +515,7 @@ mod tests {
             &View::new(),
             TerminalSize { cols: 4, rows: 2 },
             None,
+            None,
         );
 
         assert_eq!(frame.lines, vec!["zabc"]);
@@ -487,7 +529,13 @@ mod tests {
         let mut view = View::new();
 
         view.move_forward_char(&buffer);
-        let frame = build_frame(&buffer, &view, TerminalSize { cols: 10, rows: 3 }, None);
+        let frame = build_frame(
+            &buffer,
+            &view,
+            TerminalSize { cols: 10, rows: 3 },
+            None,
+            None,
+        );
 
         assert_eq!(frame.lines, vec!["    ab", ""]);
         assert_eq!(frame.cursor, CursorPosition { col: 4, row: 0 });
@@ -498,8 +546,20 @@ mod tests {
         let buffer = buffer_with_text("notes.txt", "abcdef");
         let view = View::new();
 
-        let zero = build_frame(&buffer, &view, TerminalSize { cols: 0, rows: 0 }, None);
-        let modeline_only = build_frame(&buffer, &view, TerminalSize { cols: 8, rows: 1 }, None);
+        let zero = build_frame(
+            &buffer,
+            &view,
+            TerminalSize { cols: 0, rows: 0 },
+            None,
+            None,
+        );
+        let modeline_only = build_frame(
+            &buffer,
+            &view,
+            TerminalSize { cols: 8, rows: 1 },
+            None,
+            None,
+        );
 
         assert!(zero.lines.is_empty());
         assert_eq!(zero.modeline, "");
@@ -517,10 +577,28 @@ mod tests {
             &View::new(),
             TerminalSize { cols: 80, rows: 3 },
             Some("Save failed: parent directory does not exist"),
+            None,
         );
 
         assert!(frame.modeline.contains("notes.txt"));
         assert!(frame.modeline.contains("Save failed"));
+    }
+
+    #[test]
+    fn frame_modeline_shows_active_command_line_and_moves_cursor_to_it() {
+        let buffer = buffer_with_text("notes.txt", "alpha\n");
+
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 80, rows: 3 },
+            Some("old status"),
+            Some("/save"),
+        );
+
+        assert!(frame.modeline.starts_with(" /save"));
+        assert!(!frame.modeline.contains("old status"));
+        assert_eq!(frame.cursor, CursorPosition { col: 6, row: 2 });
     }
 
     #[test]
