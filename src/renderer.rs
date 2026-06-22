@@ -19,6 +19,18 @@ use std::{
 
 const TAB_WIDTH: usize = 4;
 const EMPTY_SPACE_MARKER: &str = " ~";
+const MODELINE_BRAND_BADGE: &str = " [Cortex] ";
+const BRAND_WORDMARK: &[(&str, BrandLineTone)] = &[
+    ("   ______           __           ", BrandLineTone::Accent),
+    ("  / ____/___  _____/ /____  _  __", BrandLineTone::Bright),
+    (" / /   / __ \\/ ___/ __/ _ \\| |/_/", BrandLineTone::Muted),
+    ("/ /___/ /_/ / /  / /_/  __/>  <  ", BrandLineTone::Bright),
+    ("\\____/\\____/_/   \\__/\\___/_/|_|  ", BrandLineTone::Accent),
+];
+const COMPACT_BRAND_WORDMARK: &[(&str, BrandLineTone)] = &[
+    (" .-- Cortex --. ", BrandLineTone::Accent),
+    (" '------------' ", BrandLineTone::Muted),
+];
 
 const THEME: Theme = Theme {
     editor_fg: Color::Rgb {
@@ -30,6 +42,21 @@ const THEME: Theme = Theme {
         r: 80,
         g: 88,
         b: 92,
+    },
+    brand_accent_fg: Color::Rgb {
+        r: 137,
+        g: 203,
+        b: 187,
+    },
+    brand_bright_fg: Color::Rgb {
+        r: 245,
+        g: 247,
+        b: 248,
+    },
+    brand_muted_fg: Color::Rgb {
+        r: 112,
+        g: 124,
+        b: 128,
     },
     modeline_fg: Color::Rgb {
         r: 225,
@@ -267,12 +294,20 @@ struct StyledSegment {
 enum ScreenLineKind {
     Text,
     EmptySpace,
+    Brand(BrandLineTone),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PickerLine {
     text: String,
     selected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrandLineTone {
+    Accent,
+    Bright,
+    Muted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,6 +326,9 @@ enum ModelineStyle {
 struct Theme {
     editor_fg: Color,
     empty_fg: Color,
+    brand_accent_fg: Color,
+    brand_bright_fg: Color,
+    brand_muted_fg: Color,
     modeline_fg: Color,
     modeline_bg: Color,
     dirty_fg: Color,
@@ -462,6 +500,10 @@ fn build_frame_with_highlights(
 ) -> Frame {
     let width = size.cols as usize;
     let viewport_height = size.rows.saturating_sub(1) as usize;
+    let visible_buffer_rows = buffer
+        .len_lines()
+        .saturating_sub(view.scroll_line())
+        .min(viewport_height);
     let mut lines = Vec::with_capacity(viewport_height);
 
     for screen_row in 0..viewport_height {
@@ -480,14 +522,18 @@ fn build_frame_with_highlights(
                 segments,
             }
         } else {
-            let text = empty_space_line(width);
+            let (text, kind) = brand_line(screen_row, visible_buffer_rows, viewport_height, width)
+                .map_or_else(
+                    || (empty_space_line(width), ScreenLineKind::EmptySpace),
+                    |line| line,
+                );
             ScreenLine {
                 segments: vec![StyledSegment {
                     text: text.clone(),
                     highlight: None,
                 }],
                 text,
-                kind: ScreenLineKind::EmptySpace,
+                kind,
             }
         };
         lines.push(screen_line);
@@ -509,9 +555,15 @@ fn build_frame_with_highlights(
         ModelineStyle::Clean
     };
 
+    let modeline = if command_line.is_some() {
+        fit_status_line(&modeline, width)
+    } else {
+        fit_branded_status_line(&modeline, width)
+    };
+
     Frame {
         lines,
-        modeline: fit_status_line(&modeline, width),
+        modeline,
         cursor,
         modeline_style,
     }
@@ -658,7 +710,7 @@ fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFra
 
     PickerFrame {
         lines,
-        modeline: fit_status_line(&picker_modeline_text(picker), width),
+        modeline: fit_branded_status_line(&picker_modeline_text(picker), width),
         cursor: CursorPosition {
             col: 0,
             row: cursor_row,
@@ -676,6 +728,7 @@ fn render_editor_line<W: Write>(
     let foreground = match line.kind {
         ScreenLineKind::Text => THEME.editor_fg,
         ScreenLineKind::EmptySpace => THEME.empty_fg,
+        ScreenLineKind::Brand(tone) => brand_color(tone),
     };
 
     queue!(
@@ -690,6 +743,9 @@ fn render_editor_line<W: Write>(
             .highlight
             .map_or_else(|| plain_style(foreground), highlight_style);
         queue!(writer, SetAttribute(Attribute::Reset), ResetColor)?;
+        if matches!(line.kind, ScreenLineKind::Brand(_)) {
+            queue!(writer, SetAttribute(Attribute::Bold))?;
+        }
         apply_text_style(writer, style)?;
         queue!(writer, Print(&segment.text))?;
     }
@@ -706,6 +762,47 @@ fn render_editor_line<W: Write>(
     }
 
     queue!(writer, SetAttribute(Attribute::Reset), ResetColor)
+}
+
+fn brand_line(
+    screen_row: usize,
+    first_empty_row: usize,
+    viewport_height: usize,
+    width: usize,
+) -> Option<(String, ScreenLineKind)> {
+    let wordmark = if width >= 38 && viewport_height >= 8 {
+        BRAND_WORDMARK
+    } else if width >= 18 && viewport_height >= 4 {
+        COMPACT_BRAND_WORDMARK
+    } else {
+        return None;
+    };
+    let empty_rows = viewport_height.saturating_sub(first_empty_row);
+
+    if empty_rows < wordmark.len() {
+        return None;
+    }
+
+    let start_row =
+        first_empty_row + empty_rows.saturating_sub(wordmark.len()).saturating_div(2);
+    let wordmark_row = screen_row.checked_sub(start_row)?;
+    let (text, tone) = wordmark.get(wordmark_row)?;
+
+    Some((center_line(text, width), ScreenLineKind::Brand(*tone)))
+}
+
+fn center_line(line: &str, width: usize) -> String {
+    let line_width = measure_cells(line, width);
+    let padding = width.saturating_sub(line_width) / 2;
+    fit_line_cells(&format!("{}{}", " ".repeat(padding), line), width)
+}
+
+fn brand_color(tone: BrandLineTone) -> Color {
+    match tone {
+        BrandLineTone::Accent => THEME.brand_accent_fg,
+        BrandLineTone::Bright => THEME.brand_bright_fg,
+        BrandLineTone::Muted => THEME.brand_muted_fg,
+    }
 }
 
 fn render_picker_line<W: Write>(
@@ -1027,6 +1124,19 @@ fn fit_status_line(line: &str, width: usize) -> String {
     fitted
 }
 
+fn fit_branded_status_line(line: &str, width: usize) -> String {
+    let badge_width = measure_cells(MODELINE_BRAND_BADGE, width);
+
+    if width < badge_width + 8 {
+        return fit_status_line(line, width);
+    }
+
+    let left_width = width - badge_width;
+    let mut fitted = fit_status_line(line, left_width);
+    fitted.push_str(MODELINE_BRAND_BADGE);
+    fitted
+}
+
 fn empty_space_line(width: usize) -> String {
     fit_line_cells(EMPTY_SPACE_MARKER, width)
 }
@@ -1142,11 +1252,29 @@ mod tests {
         );
 
         assert_eq!(line_texts(&frame), vec!["alpha", "beta"]);
+        assert!(frame.modeline.contains("Cortex"));
         assert!(frame.modeline.contains("notes.txt"));
         assert!(frame.modeline.contains("clean"));
         assert!(frame.modeline.contains("Ln 1, Col 1"));
         assert_eq!(frame.modeline_style, ModelineStyle::Clean);
         assert_eq!(frame.cursor, CursorPosition { col: 0, row: 0 });
+    }
+
+    #[test]
+    fn frame_modeline_keeps_brand_visible_when_viewport_is_full() {
+        let buffer = buffer_with_text("notes.txt", "alpha\nbeta\n");
+
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 40, rows: 3 },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(brand_line_count(&frame), 0);
+        assert!(frame.modeline.ends_with(" [Cortex] "));
     }
 
     #[test]
@@ -1246,6 +1374,64 @@ mod tests {
         assert_eq!(frame.lines[1].kind, ScreenLineKind::EmptySpace);
         assert_eq!(frame.lines[1].text, " ~");
         assert_eq!(frame.lines[2].kind, ScreenLineKind::EmptySpace);
+    }
+
+    #[test]
+    fn frame_renders_cortex_wordmark_in_open_empty_space() {
+        let buffer = buffer_with_text("notes.txt", "alpha");
+
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 48, rows: 10 },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(brand_line_count(&frame), 5);
+        assert!(frame
+            .lines
+            .iter()
+            .any(|line| line.text.contains("/ ____/___")));
+        assert!(frame
+            .lines
+            .iter()
+            .any(|line| line.text.contains("\\____/\\____")));
+    }
+
+    #[test]
+    fn frame_uses_compact_brand_when_space_is_narrow() {
+        let buffer = buffer_with_text("notes.txt", "alpha");
+
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 20, rows: 6 },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(brand_line_count(&frame), 2);
+        assert!(frame.lines.iter().any(|line| line.text.contains("Cortex")));
+    }
+
+    #[test]
+    fn frame_skips_brand_when_empty_space_is_too_short() {
+        let buffer = buffer_with_text("notes.txt", "one\ntwo\nthree");
+
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 48, rows: 5 },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(brand_line_count(&frame), 0);
+        assert_eq!(frame.lines[3].kind, ScreenLineKind::EmptySpace);
     }
 
     #[test]
@@ -1415,6 +1601,7 @@ mod tests {
         );
 
         assert!(frame.modeline.starts_with(" /save"));
+        assert!(!frame.modeline.contains("Cortex"));
         assert!(!frame.modeline.contains("old status"));
         assert_eq!(frame.modeline_style, ModelineStyle::CommandLine);
         assert_eq!(frame.cursor, CursorPosition { col: 6, row: 2 });
@@ -1473,6 +1660,14 @@ mod tests {
 
     fn line_texts(frame: &Frame) -> Vec<&str> {
         frame.lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    fn brand_line_count(frame: &Frame) -> usize {
+        frame
+            .lines
+            .iter()
+            .filter(|line| matches!(line.kind, ScreenLineKind::Brand(_)))
+            .count()
     }
 
     fn buffer_with_text(file_name: &str, text: &str) -> Buffer {
