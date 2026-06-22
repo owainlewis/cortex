@@ -4,7 +4,7 @@ use crate::{
     input::key_from_event,
     keymap::{Keymap, KeymapResult},
     picker::{DirectoryPicker, DirectoryPickerAction},
-    renderer::{Renderer, TerminalSize},
+    renderer::{Renderer, StatusKind, TerminalSize},
     terminal::TerminalSession,
     view::View,
 };
@@ -23,6 +23,7 @@ const COMMAND_HELP: &str = "Commands: /open <path>, /save, /quit, /quit!";
 #[derive(Debug, Default, PartialEq, Eq)]
 struct AppState {
     status_message: Option<String>,
+    status_kind: Option<StatusKind>,
     dirty_quit_prompt: bool,
     command_line: Option<String>,
 }
@@ -161,7 +162,7 @@ impl AppState {
 
         if key == crate::input::Key::Char('/') && !keymap.has_pending_prefix() {
             self.command_line = Some("/".to_string());
-            self.status_message = None;
+            self.clear_status();
             return AppAction::Continue;
         }
 
@@ -171,11 +172,11 @@ impl AppState {
                 self.apply_outcome(outcome)
             }
             KeymapResult::PendingPrefix => {
-                self.status_message = Some("C-x".to_string());
+                self.set_status("C-x", StatusKind::Prefix);
                 AppAction::Continue
             }
             KeymapResult::Unbound => {
-                self.status_message = None;
+                self.clear_status();
                 AppAction::Continue
             }
         }
@@ -206,7 +207,7 @@ impl AppState {
             }
             crate::input::Key::Escape => {
                 self.command_line = None;
-                self.status_message = Some("Command canceled".to_string());
+                self.set_status("Command canceled", StatusKind::Info);
                 AppAction::Continue
             }
             _ => AppAction::Continue,
@@ -221,14 +222,14 @@ impl AppState {
     ) -> AppAction {
         let trimmed = input.trim();
         let Some(command_text) = trimmed.strip_prefix('/') else {
-            self.status_message = Some("Commands must start with /".to_string());
+            self.set_status("Commands must start with /", StatusKind::Error);
             return AppAction::Continue;
         };
         let command_text = command_text.trim();
 
         match command_text {
             "" => {
-                self.status_message = Some("No command entered".to_string());
+                self.set_status("No command entered", StatusKind::Error);
                 AppAction::Continue
             }
             "save" => {
@@ -241,14 +242,14 @@ impl AppState {
             }
             "quit!" => AppAction::Quit,
             "help" => {
-                self.status_message = Some(COMMAND_HELP.to_string());
+                self.set_status(COMMAND_HELP, StatusKind::Info);
                 AppAction::Continue
             }
             command if command == "open" || command.starts_with("open ") => {
                 self.run_open_command(command, buffer, view)
             }
             command => {
-                self.status_message = Some(format!("Unknown command: /{command}"));
+                self.set_status(format!("Unknown command: /{command}"), StatusKind::Error);
                 AppAction::Continue
             }
         }
@@ -266,37 +267,41 @@ impl AppState {
             .unwrap_or_default();
 
         if path_text.is_empty() {
-            self.status_message = Some("Usage: /open <path>".to_string());
+            self.set_status("Usage: /open <path>", StatusKind::Error);
             return AppAction::Continue;
         }
 
         if buffer.is_dirty() {
-            self.status_message =
-                Some("Open canceled: current buffer has unsaved changes".to_string());
+            self.set_status(
+                "Open canceled: current buffer has unsaved changes",
+                StatusKind::Prompt,
+            );
             return AppAction::Continue;
         }
 
         let path = PathBuf::from(path_text);
         match is_directory_path(&path) {
             Ok(true) => {
-                self.status_message =
-                    Some(format!("Open failed: {} is a directory", path.display()));
+                self.set_status(
+                    format!("Open failed: {} is a directory", path.display()),
+                    StatusKind::Error,
+                );
                 AppAction::Continue
             }
             Ok(false) => match Buffer::open(&path) {
                 Ok(opened) => {
                     *buffer = opened;
                     *view = View::new();
-                    self.status_message = Some(format!("Opened {}", path.display()));
+                    self.set_status(format!("Opened {}", path.display()), StatusKind::Success);
                     AppAction::Continue
                 }
                 Err(error) => {
-                    self.status_message = Some(format!("Open failed: {error}"));
+                    self.set_status(format!("Open failed: {error}"), StatusKind::Error);
                     AppAction::Continue
                 }
             },
             Err(error) => {
-                self.status_message = Some(format!("Open failed: {error}"));
+                self.set_status(format!("Open failed: {error}"), StatusKind::Error);
                 AppAction::Continue
             }
         }
@@ -307,11 +312,11 @@ impl AppState {
             crate::input::Key::Char('y') => AppAction::Quit,
             crate::input::Key::Char('n') | crate::input::Key::Escape => {
                 self.dirty_quit_prompt = false;
-                self.status_message = Some("Quit canceled".to_string());
+                self.set_status("Quit canceled", StatusKind::Info);
                 AppAction::Continue
             }
             _ => {
-                self.status_message = Some(DIRTY_QUIT_PROMPT.to_string());
+                self.set_status(DIRTY_QUIT_PROMPT, StatusKind::Prompt);
                 AppAction::Continue
             }
         }
@@ -324,12 +329,29 @@ impl AppState {
 
         if outcome.dirty_quit_blocked {
             self.dirty_quit_prompt = true;
-            self.status_message = Some(DIRTY_QUIT_PROMPT.to_string());
+            self.set_status(DIRTY_QUIT_PROMPT, StatusKind::Prompt);
             return AppAction::Continue;
         }
 
+        self.status_kind = outcome.status_message.as_ref().map(|_| {
+            if outcome.save_failed {
+                StatusKind::Error
+            } else {
+                StatusKind::Success
+            }
+        });
         self.status_message = outcome.status_message;
         AppAction::Continue
+    }
+
+    fn set_status(&mut self, message: impl Into<String>, kind: StatusKind) {
+        self.status_message = Some(message.into());
+        self.status_kind = Some(kind);
+    }
+
+    fn clear_status(&mut self) {
+        self.status_message = None;
+        self.status_kind = None;
     }
 }
 
@@ -349,6 +371,7 @@ fn render<W: io::Write>(
         view,
         size,
         app_state.status_message.as_deref(),
+        app_state.status_kind,
         app_state.command_line.as_deref(),
     )
 }
@@ -366,7 +389,7 @@ fn render_directory_picker<W: io::Write>(
 #[cfg(test)]
 mod tests {
     use super::{AppAction, AppState, DIRTY_QUIT_PROMPT};
-    use crate::{buffer::Buffer, input::Key, keymap::Keymap, view::View};
+    use crate::{buffer::Buffer, input::Key, keymap::Keymap, renderer::StatusKind, view::View};
     use std::{
         fs,
         path::PathBuf,
@@ -399,6 +422,7 @@ mod tests {
             .status_message
             .as_deref()
             .is_some_and(|message| message.contains("Wrote")));
+        assert_eq!(app.status_kind, Some(StatusKind::Success));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -421,6 +445,7 @@ mod tests {
             .status_message
             .as_deref()
             .is_some_and(|message| message.contains("Save failed")));
+        assert_eq!(app.status_kind, Some(StatusKind::Error));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -452,6 +477,7 @@ mod tests {
         assert_eq!(action, AppAction::Continue);
         assert!(app.dirty_quit_prompt);
         assert_eq!(app.status_message.as_deref(), Some(DIRTY_QUIT_PROMPT));
+        assert_eq!(app.status_kind, Some(StatusKind::Prompt));
     }
 
     #[test]
@@ -535,6 +561,20 @@ mod tests {
 
         app.handle_key(Key::Char('a'), &mut keymap, &mut buffer, &mut view);
         assert_eq!(buffer.text(), "aold");
+    }
+
+    #[test]
+    fn prefix_status_is_classified_for_rendering() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        let action = app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(app.status_message.as_deref(), Some("C-x"));
+        assert_eq!(app.status_kind, Some(StatusKind::Prefix));
     }
 
     #[test]
