@@ -64,10 +64,9 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
             }
             CommandOutcome::default()
         }
-        Command::KillLine
-        | Command::KillRegion
-        | Command::SetMark
-        | Command::Yank => CommandOutcome::default(),
+        Command::KillLine | Command::KillRegion | Command::SetMark | Command::Yank => {
+            CommandOutcome::default()
+        }
         Command::Undo => {
             if let Some(point) = buffer.undo() {
                 view.set_point(point, buffer);
@@ -273,12 +272,10 @@ mod tests {
 
         assert!(!outcome.quit);
         assert!(!outcome.save_failed);
-        assert!(
-            outcome
-                .status_message
-                .as_deref()
-                .is_some_and(|message| message.contains("Wrote"))
-        );
+        assert!(outcome
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Wrote")));
         assert!(!buffer.is_dirty());
         assert_eq!(fs::read_to_string(&path).unwrap(), "!old");
         fs::remove_dir_all(dir).unwrap();
@@ -293,12 +290,10 @@ mod tests {
 
         assert!(outcome.save_failed);
         assert!(!outcome.quit);
-        assert!(
-            outcome
-                .status_message
-                .as_deref()
-                .is_some_and(|message| message.contains("Save failed"))
-        );
+        assert!(outcome
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Save failed")));
         assert!(buffer.is_dirty());
         fs::remove_dir_all(dir).unwrap();
     }

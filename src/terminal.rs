@@ -1,6 +1,5 @@
 use crossterm::{
-    cursor,
-    execute,
+    cursor, execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::io::{self, Write};
@@ -139,7 +138,10 @@ mod tests {
 
         assert_eq!(
             state.cleanup_steps(),
-            vec![CleanupStep::LeaveAlternateScreen, CleanupStep::DisableRawMode]
+            vec![
+                CleanupStep::LeaveAlternateScreen,
+                CleanupStep::DisableRawMode
+            ]
         );
     }
 }

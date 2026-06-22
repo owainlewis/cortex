@@ -17,9 +17,7 @@ pub enum Key {
 }
 
 pub fn key_from_event(event: KeyEvent) -> Key {
-    if event.modifiers.contains(KeyModifiers::ALT)
-        || event.modifiers.contains(KeyModifiers::META)
-    {
+    if event.modifiers.contains(KeyModifiers::ALT) || event.modifiers.contains(KeyModifiers::META) {
         return Key::Unhandled;
     }
 

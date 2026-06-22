@@ -74,7 +74,9 @@ impl View {
         let target_line = if direction.is_negative() {
             current_line.saturating_sub(direction.unsigned_abs())
         } else {
-            current_line.saturating_add(direction as usize).min(last_line)
+            current_line
+                .saturating_add(direction as usize)
+                .min(last_line)
         };
         let preferred_column = self
             .preferred_column

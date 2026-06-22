@@ -381,6 +381,7 @@ impl Renderer {
         size.rows.saturating_sub(1) as usize
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render<W: Write>(
         &self,
         writer: &mut W,
@@ -397,10 +398,10 @@ impl Renderer {
         let width = size.cols as usize;
         let text_width = width.saturating_sub(editor_gutter_width(buffer, width));
         let visible_lines = visible_lines(buffer, view, text_width, viewport_height);
-        let highlighted_lines =
-            self.highlighter
-                .borrow_mut()
-                .highlight_visible_lines(buffer.path(), &visible_lines);
+        let highlighted_lines = self
+            .highlighter
+            .borrow_mut()
+            .highlight_visible_lines(buffer.path(), &visible_lines);
         let frame = build_frame_with_highlights(
             buffer,
             view,
@@ -435,7 +436,11 @@ impl Renderer {
 
         let modeline_row = size.rows.saturating_sub(1);
         render_modeline(writer, modeline_row, &frame.modeline, frame.modeline_style)?;
-        queue!(writer, cursor::MoveTo(frame.cursor.col, frame.cursor.row), cursor::Show)?;
+        queue!(
+            writer,
+            cursor::MoveTo(frame.cursor.col, frame.cursor.row),
+            cursor::Show
+        )?;
         writer.flush()
     }
 
@@ -469,7 +474,11 @@ impl Renderer {
             .map(modeline_style_for_status)
             .unwrap_or(ModelineStyle::Info);
         render_modeline(writer, modeline_row, &frame.modeline, modeline_style)?;
-        queue!(writer, cursor::MoveTo(frame.cursor.col, frame.cursor.row), cursor::Show)?;
+        queue!(
+            writer,
+            cursor::MoveTo(frame.cursor.col, frame.cursor.row),
+            cursor::Show
+        )?;
         writer.flush()
     }
 }
@@ -517,6 +526,7 @@ fn build_frame_with_selection(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_frame_with_highlights(
     buffer: &Buffer,
     view: &View,
@@ -1006,7 +1016,10 @@ fn status_kind_for_message(message: &str) -> StatusKind {
 fn picker_header_text(picker: &DirectoryPicker) -> String {
     let count = picker.entries().len();
     let noun = if count == 1 { "item" } else { "items" };
-    format!(" CORTEX FIND  {}  {count} {noun}", picker.directory().display())
+    format!(
+        " CORTEX FIND  {}  {count} {noun}",
+        picker.directory().display()
+    )
 }
 
 fn picker_entry_text(entry: &DirectoryEntry, selected: bool) -> String {
@@ -1018,7 +1031,10 @@ fn picker_entry_text(entry: &DirectoryEntry, selected: bool) -> String {
         DirectoryEntryKind::Other => "ITEM",
     };
 
-    format!("{marker} {:<42} {kind}", format!("{}{suffix}", entry.name()))
+    format!(
+        "{marker} {:<42} {kind}",
+        format!("{}{suffix}", entry.name())
+    )
 }
 
 fn picker_modeline_text(picker: &DirectoryPicker) -> String {
@@ -1057,12 +1073,7 @@ fn fit_line_segments(
         let selected = selection_range.is_some_and(|range| range.contains(&char_idx));
         if ch == '\t' {
             let spaces = tab_spaces(cells).min(width - cells);
-            push_segment(
-                &mut segments,
-                &std::iter::repeat(' ').take(spaces).collect::<String>(),
-                highlight,
-                selected,
-            );
+            push_segment(&mut segments, &" ".repeat(spaces), highlight, selected);
             cells += spaces;
             continue;
         }
@@ -1077,7 +1088,12 @@ fn fit_line_segments(
         }
 
         let display_char = if ch.is_control() { ' ' } else { ch };
-        push_segment(&mut segments, &display_char.to_string(), highlight, selected);
+        push_segment(
+            &mut segments,
+            &display_char.to_string(),
+            highlight,
+            selected,
+        );
         cells += char_width;
     }
 
@@ -1109,10 +1125,7 @@ fn push_segment(
     });
 }
 
-fn highlight_for_byte(
-    highlight_spans: &[HighlightSpan],
-    byte_idx: usize,
-) -> Option<HighlightKind> {
+fn highlight_for_byte(highlight_spans: &[HighlightSpan], byte_idx: usize) -> Option<HighlightKind> {
     highlight_spans
         .iter()
         .rev()
@@ -1220,7 +1233,7 @@ fn fit_line_cells(line: &str, width: usize) -> String {
 
         if ch == '\t' {
             let spaces = tab_spaces(cells).min(width - cells);
-            fitted.extend(std::iter::repeat(' ').take(spaces));
+            fitted.push_str(&" ".repeat(spaces));
             cells += spaces;
             continue;
         }
@@ -1244,7 +1257,7 @@ fn fit_line_cells(line: &str, width: usize) -> String {
 fn fit_status_line(line: &str, width: usize) -> String {
     let mut fitted = fit_line_cells(line, width);
     let remaining_width = width.saturating_sub(measure_cells(&fitted, width));
-    fitted.extend(std::iter::repeat(' ').take(remaining_width));
+    fitted.push_str(&" ".repeat(remaining_width));
     fitted
 }
 
@@ -1506,9 +1519,10 @@ mod tests {
             None,
         );
 
-        assert!(frame.lines[0].segments.iter().any(|segment| {
-            segment.selected && segment.text.contains("lpha")
-        }));
+        assert!(frame.lines[0]
+            .segments
+            .iter()
+            .any(|segment| { segment.selected && segment.text.contains("lpha") }));
         assert!(frame.lines[1]
             .segments
             .iter()
