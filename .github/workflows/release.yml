@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v*.*.*
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    name: macOS release
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package binary
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            arm64) target_triple="aarch64-apple-darwin" ;;
+            x86_64) target_triple="x86_64-apple-darwin" ;;
+            *)
+              echo "Unsupported macOS architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+
+          archive="cortex-${TAG_NAME}-${target_triple}.tar.gz"
+          mkdir -p dist
+          cp target/release/cortex dist/cortex
+          tar -czf "${archive}" -C dist cortex
+          shasum -a 256 "${archive}" > "${archive}.sha256"
+
+          {
+            echo "archive=${archive}"
+            echo "checksum=${archive}.sha256"
+          } >> "${GITHUB_ENV}"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            echo "Release ${TAG_NAME} already exists; refusing to overwrite assets." >&2
+            exit 1
+          fi
+
+          gh release create "${TAG_NAME}" "${archive}" "${checksum}" \
+            --title "${TAG_NAME}" \
+            --notes "Cortex ${TAG_NAME}"
