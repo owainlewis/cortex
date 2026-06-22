@@ -13,7 +13,9 @@ pub enum Command {
     MoveToLineStart,
     MoveToLineEnd,
     OpenFile,
+    Redo,
     SaveBuffer,
+    Undo,
     Quit,
 }
 
@@ -44,7 +46,7 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
         Command::DeleteBackward => {
             let point = view.point();
             if point > 0 {
-                buffer.delete(point - 1..point);
+                buffer.delete_with_points(point - 1..point, point, point - 1);
                 view.set_point(point - 1, buffer);
             }
             CommandOutcome::default()
@@ -52,7 +54,19 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
         Command::DeleteForward => {
             let point = view.point();
             if point < buffer.len_chars() {
-                buffer.delete(point..point + 1);
+                buffer.delete_with_points(point..point + 1, point, point);
+                view.set_point(point, buffer);
+            }
+            CommandOutcome::default()
+        }
+        Command::Undo => {
+            if let Some(point) = buffer.undo() {
+                view.set_point(point, buffer);
+            }
+            CommandOutcome::default()
+        }
+        Command::Redo => {
+            if let Some(point) = buffer.redo() {
                 view.set_point(point, buffer);
             }
             CommandOutcome::default()
@@ -153,6 +167,53 @@ mod tests {
 
         dispatch(Command::DeleteForward, &mut buffer, &mut view);
         assert_eq!(buffer.text(), "ad");
+        assert_eq!(view.point(), 1);
+    }
+
+    #[test]
+    fn undo_and_redo_commands_restore_text_and_point() {
+        let mut buffer = buffer_with_text("notes.txt", "ac");
+        let mut view = View::new();
+        view.move_forward_char(&buffer);
+
+        dispatch(Command::Insert('b'), &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "abc");
+        assert_eq!(view.point(), 2);
+
+        dispatch(Command::Undo, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "ac");
+        assert_eq!(view.point(), 1);
+
+        dispatch(Command::Redo, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "abc");
+        assert_eq!(view.point(), 2);
+    }
+
+    #[test]
+    fn undo_commands_restore_newline_and_deletes() {
+        let mut buffer = buffer_with_text("notes.txt", "ab");
+        let mut view = View::new();
+        view.move_forward_char(&buffer);
+
+        dispatch(Command::InsertNewline, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "a\nb");
+        assert_eq!(view.point(), 2);
+        dispatch(Command::Undo, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "ab");
+        assert_eq!(view.point(), 1);
+
+        dispatch(Command::DeleteBackward, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "b");
+        assert_eq!(view.point(), 0);
+        dispatch(Command::Undo, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "ab");
+        assert_eq!(view.point(), 1);
+
+        dispatch(Command::DeleteForward, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "a");
+        assert_eq!(view.point(), 1);
+        dispatch(Command::Undo, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "ab");
         assert_eq!(view.point(), 1);
     }
 

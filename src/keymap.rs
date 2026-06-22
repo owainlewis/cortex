@@ -46,6 +46,7 @@ impl Keymap {
             Key::Up | Key::Ctrl('p') => KeymapResult::Command(Command::MovePreviousLine),
             Key::Ctrl('a') => KeymapResult::Command(Command::MoveToLineStart),
             Key::Ctrl('e') => KeymapResult::Command(Command::MoveToLineEnd),
+            Key::Ctrl('/') | Key::Ctrl('_') => KeymapResult::Command(Command::Undo),
             _ => KeymapResult::Unbound,
         }
     }
@@ -130,6 +131,14 @@ mod tests {
         assert_eq!(
             keymap.resolve(Key::Ctrl('e')),
             KeymapResult::Command(Command::MoveToLineEnd)
+        );
+        assert_eq!(
+            keymap.resolve(Key::Ctrl('/')),
+            KeymapResult::Command(Command::Undo)
+        );
+        assert_eq!(
+            keymap.resolve(Key::Ctrl('_')),
+            KeymapResult::Command(Command::Undo)
         );
     }
 

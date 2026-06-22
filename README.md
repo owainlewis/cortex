@@ -2,7 +2,7 @@
 
 A small macOS-only terminal code editor written in Rust.
 
-Cortex is currently in v0.2 development.
+Cortex is currently in v0.3 development.
 The current goal is one fast editing loop: open a file or directory, edit one buffer, save it, and quit cleanly.
 
 ## Platform
@@ -60,6 +60,7 @@ It includes a directory picker, a slash command line, visual theme and modeline 
 | Down or `C-n` | Move to next line |
 | `C-a` | Move to start of line |
 | `C-e` | Move to end of line |
+| `C-/` or `C-_` | Undo the last edit |
 | `C-x C-s` | Save the file |
 | `C-x C-c` | Quit |
 | `/` | Open the slash command line |
@@ -73,6 +74,8 @@ Press `n` or Escape to cancel.
 | Command | Action |
 | --- | --- |
 | `/save` | Save the current file |
+| `/undo` | Undo the last edit |
+| `/redo` | Redo the last undone edit |
 | `/quit` | Quit, using the same dirty-buffer prompt as `C-x C-c` |
 | `/quit!` | Quit without saving |
 | `/open <path>` | Open a file path when the current buffer is clean |
@@ -100,10 +103,11 @@ JavaScript and TypeScript highlighting are not implemented yet.
 
 ## Known Limitations
 
+Redo is available from the slash command line, but does not have a dedicated keybinding yet.
 Cortex has one active buffer at a time.
 The directory picker opens regular files only and does not navigate into directories.
 The slash command `/open <path>` opens files only, not directories.
-There are no splits, tabs, minibuffer, search, kill ring, undo, config, plugins, LSP, AI integration, or embedded terminal pane yet.
+There are no splits, tabs, minibuffer, search, kill ring, config, plugins, LSP, AI integration, or embedded terminal pane yet.
 Long lines are clipped to the terminal width instead of wrapped.
 The renderer uses a simple full-screen redraw rather than diffed rendering.
 External file changes are not watched or reloaded.

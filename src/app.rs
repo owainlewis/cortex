@@ -18,7 +18,7 @@ use std::{
 };
 
 const DIRTY_QUIT_PROMPT: &str = "Buffer modified; quit without saving? (y or n)";
-const COMMAND_HELP: &str = "Commands: /open <path>, /save, /quit, /quit!";
+const COMMAND_HELP: &str = "Commands: /open <path>, /save, /undo, /redo, /quit, /quit!";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct AppState {
@@ -300,6 +300,14 @@ impl AppState {
             }
             "save" => {
                 let outcome = commands::dispatch(commands::Command::SaveBuffer, buffer, view);
+                self.apply_outcome(outcome)
+            }
+            "undo" => {
+                let outcome = commands::dispatch(commands::Command::Undo, buffer, view);
+                self.apply_outcome(outcome)
+            }
+            "redo" => {
+                let outcome = commands::dispatch(commands::Command::Redo, buffer, view);
                 self.apply_outcome(outcome)
             }
             "quit" => {
@@ -742,6 +750,43 @@ mod tests {
             .as_deref()
             .is_some_and(|message| message.contains("Wrote")));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn undo_key_reverses_the_last_edit() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        app.handle_key(Key::Char('x'), &mut keymap, &mut buffer, &mut view);
+        let action = app.handle_key(Key::Ctrl('/'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(buffer.text(), "old");
+        assert_eq!(view.point(), 0);
+        assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn slash_undo_and_redo_reuse_edit_history() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        app.handle_key(Key::Char('x'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "xold");
+
+        let action = run_slash_command("/undo", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(buffer.text(), "old");
+        assert!(!buffer.is_dirty());
+
+        let action = run_slash_command("/redo", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(buffer.text(), "xold");
+        assert!(buffer.is_dirty());
     }
 
     #[test]

@@ -12,6 +12,18 @@ pub struct Buffer {
     text: Rope,
     path: PathBuf,
     dirty: bool,
+    clean_text: String,
+    undo_stack: Vec<Edit>,
+    redo_stack: Vec<Edit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Edit {
+    start: usize,
+    deleted: String,
+    inserted: String,
+    point_before: usize,
+    point_after: usize,
 }
 
 impl Buffer {
@@ -22,11 +34,15 @@ impl Buffer {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Rope::new(),
             Err(error) => return Err(error),
         };
+        let clean_text = text.to_string();
 
         Ok(Self {
             text,
             path,
             dirty: false,
+            clean_text,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         })
     }
 
@@ -87,28 +103,100 @@ impl Buffer {
             return;
         }
 
-        self.text.insert(char_idx, text);
-        self.dirty = true;
+        let point_after = char_idx + text.chars().count();
+        self.replace_with_points(char_idx..char_idx, text, char_idx, point_after);
     }
 
     pub fn delete(&mut self, char_range: Range<usize>) {
+        self.delete_with_points(char_range.clone(), char_range.start, char_range.start);
+    }
+
+    pub fn delete_with_points(
+        &mut self,
+        char_range: Range<usize>,
+        point_before: usize,
+        point_after: usize,
+    ) {
         if char_range.is_empty() {
             return;
         }
 
-        self.text.remove(char_range);
-        self.dirty = true;
+        self.replace_with_points(char_range, "", point_before, point_after);
+    }
+
+    pub fn undo(&mut self) -> Option<usize> {
+        let edit = self.undo_stack.pop()?;
+        self.apply_inverse_edit(&edit);
+        let point = edit.point_before.min(self.len_chars());
+        self.redo_stack.push(edit);
+        self.update_dirty();
+        Some(point)
+    }
+
+    pub fn redo(&mut self) -> Option<usize> {
+        let edit = self.redo_stack.pop()?;
+        self.apply_edit(&edit);
+        let point = edit.point_after.min(self.len_chars());
+        self.undo_stack.push(edit);
+        self.update_dirty();
+        Some(point)
     }
 
     pub fn save(&mut self) -> io::Result<()> {
         ensure_parent_directory_exists(&self.path)?;
         write_atomically(&self.path, &self.text)?;
+        self.clean_text = self.text.to_string();
         self.dirty = false;
         Ok(())
     }
 
     fn clamp_line_idx(&self, line_idx: usize) -> usize {
         line_idx.min(self.len_lines().saturating_sub(1))
+    }
+
+    fn replace_with_points(
+        &mut self,
+        char_range: Range<usize>,
+        inserted: &str,
+        point_before: usize,
+        point_after: usize,
+    ) {
+        let deleted = self.text.slice(char_range.clone()).to_string();
+        let edit = Edit {
+            start: char_range.start,
+            deleted,
+            inserted: inserted.to_string(),
+            point_before,
+            point_after,
+        };
+
+        self.apply_edit(&edit);
+        self.undo_stack.push(edit);
+        self.redo_stack.clear();
+        self.update_dirty();
+    }
+
+    fn apply_edit(&mut self, edit: &Edit) {
+        let deleted_len = edit.deleted.chars().count();
+        self.apply_change(edit.start, deleted_len, &edit.inserted);
+    }
+
+    fn apply_inverse_edit(&mut self, edit: &Edit) {
+        let inserted_len = edit.inserted.chars().count();
+        self.apply_change(edit.start, inserted_len, &edit.deleted);
+    }
+
+    fn apply_change(&mut self, start: usize, remove_len: usize, inserted: &str) {
+        if remove_len > 0 {
+            self.text.remove(start..start + remove_len);
+        }
+        if !inserted.is_empty() {
+            self.text.insert(start, inserted);
+        }
+    }
+
+    fn update_dirty(&mut self) {
+        self.dirty = self.text.to_string() != self.clean_text;
     }
 }
 
@@ -240,6 +328,82 @@ mod tests {
 
         assert_eq!(buffer.text(), "hello");
         assert!(buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn undo_and_redo_reverse_insertions() {
+        let dir = test_dir("undo-redo-insert");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "ac").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(1, "b");
+
+        assert_eq!(buffer.undo(), Some(1));
+        assert_eq!(buffer.text(), "ac");
+        assert!(!buffer.is_dirty());
+
+        assert_eq!(buffer.redo(), Some(2));
+        assert_eq!(buffer.text(), "abc");
+        assert!(buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn undo_and_redo_reverse_deletions() {
+        let dir = test_dir("undo-redo-delete");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "abc").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.delete_with_points(1..2, 2, 1);
+
+        assert_eq!(buffer.text(), "ac");
+        assert_eq!(buffer.undo(), Some(2));
+        assert_eq!(buffer.text(), "abc");
+        assert!(!buffer.is_dirty());
+
+        assert_eq!(buffer.redo(), Some(1));
+        assert_eq!(buffer.text(), "ac");
+        assert!(buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn new_edit_after_undo_clears_redo_history() {
+        let dir = test_dir("undo-clears-redo");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "a").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(1, "b");
+        assert_eq!(buffer.undo(), Some(1));
+        buffer.insert(1, "c");
+
+        assert_eq!(buffer.redo(), None);
+        assert_eq!(buffer.text(), "ac");
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_resets_the_clean_undo_baseline() {
+        let dir = test_dir("undo-save-baseline");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "a").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(1, "b");
+        buffer.save().unwrap();
+        assert!(!buffer.is_dirty());
+
+        assert_eq!(buffer.undo(), Some(1));
+        assert_eq!(buffer.text(), "a");
+        assert!(buffer.is_dirty());
+
+        assert_eq!(buffer.redo(), Some(2));
+        assert_eq!(buffer.text(), "ab");
+        assert!(!buffer.is_dirty());
         remove_dir(dir);
     }
 

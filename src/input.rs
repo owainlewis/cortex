@@ -68,6 +68,14 @@ mod tests {
             key_from_event(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::CONTROL)),
             Key::Ctrl('x')
         );
+        assert_eq!(
+            key_from_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL)),
+            Key::Ctrl('/')
+        );
+        assert_eq!(
+            key_from_event(KeyEvent::new(KeyCode::Char('_'), KeyModifiers::CONTROL)),
+            Key::Ctrl('_')
+        );
     }
 
     #[test]
