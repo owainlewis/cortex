@@ -94,8 +94,36 @@ impl Buffer {
         line.slice(..content_len.min(max_chars)).to_string()
     }
 
+    pub fn line_changed(&self, line_idx: usize) -> bool {
+        self.line_prefix_text(line_idx, usize::MAX) != clean_line_text(&self.clean_text, line_idx)
+    }
+
+    pub fn find_forward(&self, query: &str, start_char: usize) -> Option<usize> {
+        if query.is_empty() {
+            return None;
+        }
+
+        let text = self.text.to_string();
+        let start_byte = char_to_byte_idx(&text, start_char.min(self.len_chars()));
+
+        find_byte_from(&text, query, start_byte)
+            .or_else(|| find_byte_from(&text, query, 0))
+            .map(|byte_idx| text[..byte_idx].chars().count())
+    }
+
     pub fn text(&self) -> String {
         self.text.to_string()
+    }
+
+    pub fn text_range(&self, char_range: Range<usize>) -> String {
+        let start = char_range.start.min(self.len_chars());
+        let end = char_range.end.min(self.len_chars());
+
+        if start >= end {
+            return String::new();
+        }
+
+        self.text.slice(start..end).to_string()
     }
 
     pub fn insert(&mut self, char_idx: usize, text: &str) {
@@ -214,6 +242,35 @@ fn line_content_len_chars(line: RopeSlice<'_>) -> usize {
     }
 }
 
+fn clean_line_text(text: &str, line_idx: usize) -> String {
+    let mut lines = text.split_inclusive('\n');
+
+    for idx in 0..=line_idx {
+        let Some(line) = lines.next() else {
+            return String::new();
+        };
+
+        if idx == line_idx {
+            return line.trim_end_matches(&['\r', '\n']).to_string();
+        }
+    }
+
+    String::new()
+}
+
+fn char_to_byte_idx(text: &str, char_idx: usize) -> usize {
+    text.char_indices()
+        .nth(char_idx)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(text.len())
+}
+
+fn find_byte_from(text: &str, query: &str, start_byte: usize) -> Option<usize> {
+    text.get(start_byte..)
+        .and_then(|suffix| suffix.find(query))
+        .map(|offset| start_byte + offset)
+}
+
 /// Writes `text` to `path` without ever truncating the existing file in place.
 ///
 /// The contents are written to a temporary sibling file, flushed and fsynced,
@@ -328,6 +385,41 @@ mod tests {
 
         assert_eq!(buffer.text(), "hello");
         assert!(buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn line_changed_compares_current_text_to_the_saved_baseline() {
+        let dir = test_dir("line-changed");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\nbeta\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        assert!(!buffer.line_changed(0));
+        assert!(!buffer.line_changed(1));
+
+        buffer.insert(0, "x");
+
+        assert!(buffer.line_changed(0));
+        assert!(!buffer.line_changed(1));
+
+        buffer.save().unwrap();
+
+        assert!(!buffer.line_changed(0));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn find_forward_searches_from_point_and_wraps_once() {
+        let dir = test_dir("find-forward");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha beta alpha").unwrap();
+        let buffer = Buffer::open(&path).unwrap();
+
+        assert_eq!(buffer.find_forward("alpha", 1), Some(11));
+        assert_eq!(buffer.find_forward("alpha", 12), Some(0));
+        assert_eq!(buffer.find_forward("missing", 0), None);
+        assert_eq!(buffer.find_forward("", 0), None);
         remove_dir(dir);
     }
 
@@ -525,6 +617,19 @@ mod tests {
     }
 
     fn remove_dir(dir: PathBuf) {
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn text_range_returns_the_requested_chars() {
+        let dir = test_dir("text-range");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "aλcde").unwrap();
+        let buffer = Buffer::open(&path).unwrap();
+
+        assert_eq!(buffer.text_range(1..4), "λcd");
+        assert_eq!(buffer.text_range(4..99), "e");
+        assert_eq!(buffer.text_range(4..2), "");
         fs::remove_dir_all(dir).unwrap();
     }
 }

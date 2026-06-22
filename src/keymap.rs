@@ -39,13 +39,19 @@ impl Keymap {
             Key::Char(ch) => KeymapResult::Command(Command::Insert(ch)),
             Key::Enter => KeymapResult::Command(Command::InsertNewline),
             Key::Backspace => KeymapResult::Command(Command::DeleteBackward),
-            Key::Delete => KeymapResult::Command(Command::DeleteForward),
+            Key::Delete | Key::Ctrl('d') => KeymapResult::Command(Command::DeleteForward),
+            Key::Ctrl('k') => KeymapResult::Command(Command::KillLine),
+            Key::Ctrl('w') => KeymapResult::Command(Command::KillRegion),
+            Key::Ctrl('y') => KeymapResult::Command(Command::Yank),
             Key::Right | Key::Ctrl('f') => KeymapResult::Command(Command::MoveForwardChar),
             Key::Left | Key::Ctrl('b') => KeymapResult::Command(Command::MoveBackwardChar),
             Key::Down | Key::Ctrl('n') => KeymapResult::Command(Command::MoveNextLine),
             Key::Up | Key::Ctrl('p') => KeymapResult::Command(Command::MovePreviousLine),
             Key::Ctrl('a') => KeymapResult::Command(Command::MoveToLineStart),
             Key::Ctrl('e') => KeymapResult::Command(Command::MoveToLineEnd),
+            Key::Ctrl('s') => KeymapResult::Command(Command::RepeatSearch),
+            Key::Ctrl(' ') => KeymapResult::Command(Command::SetMark),
+            Key::Command('z') => KeymapResult::Command(Command::Undo),
             Key::Ctrl('/') | Key::Ctrl('_') => KeymapResult::Command(Command::Undo),
             _ => KeymapResult::Unbound,
         }
@@ -57,6 +63,7 @@ fn resolve_prefixed(prefix: Prefix, key: Key) -> KeymapResult {
         (Prefix::CtrlX, Key::Ctrl('s')) => KeymapResult::Command(Command::SaveBuffer),
         (Prefix::CtrlX, Key::Ctrl('c')) => KeymapResult::Command(Command::Quit),
         (Prefix::CtrlX, Key::Ctrl('f')) => KeymapResult::Command(Command::OpenFile),
+        (Prefix::CtrlX, Key::Char('u')) => KeymapResult::Command(Command::Undo),
         _ => KeymapResult::Unbound,
     }
 }
@@ -85,6 +92,22 @@ mod tests {
         assert_eq!(
             keymap.resolve(Key::Delete),
             KeymapResult::Command(Command::DeleteForward)
+        );
+        assert_eq!(
+            keymap.resolve(Key::Ctrl('d')),
+            KeymapResult::Command(Command::DeleteForward)
+        );
+        assert_eq!(
+            keymap.resolve(Key::Ctrl('k')),
+            KeymapResult::Command(Command::KillLine)
+        );
+        assert_eq!(
+            keymap.resolve(Key::Ctrl('w')),
+            KeymapResult::Command(Command::KillRegion)
+        );
+        assert_eq!(
+            keymap.resolve(Key::Ctrl('y')),
+            KeymapResult::Command(Command::Yank)
         );
     }
 
@@ -133,6 +156,18 @@ mod tests {
             KeymapResult::Command(Command::MoveToLineEnd)
         );
         assert_eq!(
+            keymap.resolve(Key::Ctrl('s')),
+            KeymapResult::Command(Command::RepeatSearch)
+        );
+        assert_eq!(
+            keymap.resolve(Key::Ctrl(' ')),
+            KeymapResult::Command(Command::SetMark)
+        );
+        assert_eq!(
+            keymap.resolve(Key::Command('z')),
+            KeymapResult::Command(Command::Undo)
+        );
+        assert_eq!(
             keymap.resolve(Key::Ctrl('/')),
             KeymapResult::Command(Command::Undo)
         );
@@ -162,6 +197,12 @@ mod tests {
         assert_eq!(
             keymap.resolve(Key::Ctrl('f')),
             KeymapResult::Command(Command::OpenFile)
+        );
+
+        assert_eq!(keymap.resolve(Key::Ctrl('x')), KeymapResult::PendingPrefix);
+        assert_eq!(
+            keymap.resolve(Key::Char('u')),
+            KeymapResult::Command(Command::Undo)
         );
     }
 

@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum Key {
     Char(char),
     Ctrl(char),
+    Command(char),
     Enter,
     Escape,
     Backspace,
@@ -17,13 +18,16 @@ pub enum Key {
 
 pub fn key_from_event(event: KeyEvent) -> Key {
     if event.modifiers.contains(KeyModifiers::ALT)
-        || event.modifiers.contains(KeyModifiers::SUPER)
         || event.modifiers.contains(KeyModifiers::META)
     {
         return Key::Unhandled;
     }
 
     match event.code {
+        KeyCode::Null => Key::Ctrl(' '),
+        KeyCode::Char(ch) if event.modifiers.contains(KeyModifiers::SUPER) => {
+            Key::Command(ch.to_ascii_lowercase())
+        }
         KeyCode::Char(ch) if event.modifiers.contains(KeyModifiers::CONTROL) => {
             Key::Ctrl(ch.to_ascii_lowercase())
         }
@@ -76,16 +80,35 @@ mod tests {
             key_from_event(KeyEvent::new(KeyCode::Char('_'), KeyModifiers::CONTROL)),
             Key::Ctrl('_')
         );
+        assert_eq!(
+            key_from_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)),
+            Key::Ctrl(' ')
+        );
+        assert_eq!(
+            key_from_event(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)),
+            Key::Ctrl(' ')
+        );
+    }
+
+    #[test]
+    fn maps_command_characters_case_insensitively() {
+        assert_eq!(
+            key_from_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::SUPER)),
+            Key::Command('z')
+        );
+        assert_eq!(
+            key_from_event(KeyEvent::new(
+                KeyCode::Char('Z'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT
+            )),
+            Key::Command('z')
+        );
     }
 
     #[test]
     fn maps_invalid_keys_to_unhandled_so_prefixes_can_reset() {
         assert_eq!(
             key_from_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)),
-            Key::Unhandled
-        );
-        assert_eq!(
-            key_from_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SUPER)),
             Key::Unhandled
         );
     }

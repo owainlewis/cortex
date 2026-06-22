@@ -14,11 +14,13 @@ use crossterm::{
 };
 use std::{
     fs, io,
+    ops::Range,
     path::{Path, PathBuf},
 };
 
 const DIRTY_QUIT_PROMPT: &str = "Buffer modified; quit without saving? (y or n)";
-const COMMAND_HELP: &str = "Commands: /open <path>, /save, /undo, /redo, /quit, /quit!";
+const COMMAND_HELP: &str =
+    "Commands: /help, /commands, /open <path>, /search <text>, /next, /save, /undo, /redo, /quit, /quit!";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct AppState {
@@ -26,6 +28,10 @@ struct AppState {
     status_kind: Option<StatusKind>,
     dirty_quit_prompt: bool,
     command_line: Option<String>,
+    keycast: Option<String>,
+    last_search: Option<String>,
+    mark: Option<usize>,
+    kill_ring: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +198,7 @@ fn open_file_from_picker<W: io::Write>(
         Ok(opened) => {
             *buffer = opened;
             *view = View::new();
+            app_state.mark = None;
             app_state.set_status(format!("Opened {}", path.display()), StatusKind::Success);
         }
         Err(error) => {
@@ -218,6 +225,8 @@ impl AppState {
         buffer: &mut Buffer,
         view: &mut View,
     ) -> AppAction {
+        self.keycast = keycast_text(key);
+
         if self.dirty_quit_prompt {
             return self.handle_dirty_quit_key(key);
         }
@@ -233,6 +242,15 @@ impl AppState {
         }
 
         match keymap.resolve(key) {
+            KeymapResult::Command(commands::Command::SetMark) => self.set_mark(view),
+            KeymapResult::Command(commands::Command::KillRegion) => {
+                self.kill_region(buffer, view)
+            }
+            KeymapResult::Command(commands::Command::KillLine) => self.kill_line(buffer, view),
+            KeymapResult::Command(commands::Command::Yank) => self.yank(buffer, view),
+            KeymapResult::Command(commands::Command::RepeatSearch) => {
+                self.repeat_search(buffer, view)
+            }
             KeymapResult::Command(command) => {
                 let outcome = commands::dispatch(command, buffer, view);
                 self.apply_outcome(outcome)
@@ -246,6 +264,68 @@ impl AppState {
                 AppAction::Continue
             }
         }
+    }
+
+    fn active_region(&self, view: &View) -> Option<Range<usize>> {
+        let mark = self.mark?;
+        let point = view.point();
+
+        if mark == point {
+            return None;
+        }
+
+        Some(mark.min(point)..mark.max(point))
+    }
+
+    fn set_mark(&mut self, view: &View) -> AppAction {
+        self.mark = Some(view.point());
+        self.set_status("Mark set", StatusKind::Info);
+        AppAction::Continue
+    }
+
+    fn kill_region(&mut self, buffer: &mut Buffer, view: &mut View) -> AppAction {
+        let Some(region) = self.active_region(view) else {
+            self.set_status("No active region", StatusKind::Error);
+            return AppAction::Continue;
+        };
+
+        let text = buffer.text_range(region.clone());
+        buffer.delete_with_points(region.clone(), view.point(), region.start);
+        view.set_point(region.start, buffer);
+        self.kill_ring = Some(text);
+        self.mark = None;
+        self.set_status("Cut region", StatusKind::Success);
+        AppAction::Continue
+    }
+
+    fn kill_line(&mut self, buffer: &mut Buffer, view: &mut View) -> AppAction {
+        let point = view.point();
+        let Some(region) = kill_line_range(buffer, point) else {
+            self.set_status("Nothing to cut", StatusKind::Error);
+            return AppAction::Continue;
+        };
+
+        let text = buffer.text_range(region.clone());
+        buffer.delete_with_points(region, point, point);
+        view.set_point(point, buffer);
+        self.kill_ring = Some(text);
+        self.mark = None;
+        self.set_status("Cut line", StatusKind::Success);
+        AppAction::Continue
+    }
+
+    fn yank(&mut self, buffer: &mut Buffer, view: &mut View) -> AppAction {
+        let Some(text) = self.kill_ring.clone().filter(|text| !text.is_empty()) else {
+            self.set_status("No cut text", StatusKind::Error);
+            return AppAction::Continue;
+        };
+
+        let point = view.point();
+        buffer.insert(point, &text);
+        view.set_point(point + text.chars().count(), buffer);
+        self.mark = None;
+        self.set_status("Yanked", StatusKind::Success);
+        AppAction::Continue
     }
 
     fn handle_command_line_key(
@@ -294,8 +374,8 @@ impl AppState {
         let command_text = command_text.trim();
 
         match command_text {
-            "" => {
-                self.set_status("No command entered", StatusKind::Error);
+            "" | "help" | "commands" => {
+                self.set_status(COMMAND_HELP, StatusKind::Info);
                 AppAction::Continue
             }
             "save" => {
@@ -315,10 +395,10 @@ impl AppState {
                 self.apply_outcome(outcome)
             }
             "quit!" => AppAction::Quit,
-            "help" => {
-                self.set_status(COMMAND_HELP, StatusKind::Info);
-                AppAction::Continue
+            command if command == "search" || command.starts_with("search ") => {
+                self.run_search_command(command, buffer, view)
             }
+            "next" => self.repeat_search(buffer, view),
             command if command == "open" || command.starts_with("open ") => {
                 self.run_open_command(command, buffer, view)
             }
@@ -327,6 +407,46 @@ impl AppState {
                 AppAction::Continue
             }
         }
+    }
+
+    fn run_search_command(
+        &mut self,
+        command: &str,
+        buffer: &Buffer,
+        view: &mut View,
+    ) -> AppAction {
+        let query = command
+            .strip_prefix("search")
+            .map(str::trim)
+            .unwrap_or_default();
+
+        if query.is_empty() {
+            self.set_status("Usage: /search <text>", StatusKind::Error);
+            return AppAction::Continue;
+        }
+
+        self.last_search = Some(query.to_string());
+        self.repeat_search(buffer, view)
+    }
+
+    fn repeat_search(&mut self, buffer: &Buffer, view: &mut View) -> AppAction {
+        let Some(query) = self.last_search.clone() else {
+            self.set_status("No previous search", StatusKind::Error);
+            return AppAction::Continue;
+        };
+
+        let start = view.point().saturating_add(1).min(buffer.len_chars());
+        match buffer.find_forward(&query, start) {
+            Some(point) => {
+                view.set_point(point, buffer);
+                self.set_status(format!("Found: {query}"), StatusKind::Success);
+            }
+            None => {
+                self.set_status(format!("Not found: {query}"), StatusKind::Error);
+            }
+        }
+
+        AppAction::Continue
     }
 
     fn run_open_command(
@@ -366,6 +486,7 @@ impl AppState {
                 Ok(opened) => {
                     *buffer = opened;
                     *view = View::new();
+                    self.mark = None;
                     self.set_status(format!("Opened {}", path.display()), StatusKind::Success);
                     AppAction::Continue
                 }
@@ -457,7 +578,9 @@ fn render<W: io::Write>(
         size,
         app_state.status_message.as_deref(),
         app_state.status_kind,
+        app_state.active_region(view),
         app_state.command_line.as_deref(),
+        app_state.keycast.as_deref(),
     )
 }
 
@@ -471,9 +594,42 @@ fn render_directory_picker<W: io::Write>(
     renderer.render_directory_picker(writer, picker, size)
 }
 
+fn keycast_text(key: crate::input::Key) -> Option<String> {
+    match key {
+        crate::input::Key::Char(ch) => Some(ch.to_string()),
+        crate::input::Key::Ctrl(' ') => Some("C-Space".to_string()),
+        crate::input::Key::Ctrl(ch) => Some(format!("C-{ch}")),
+        crate::input::Key::Command(ch) => Some(format!("Cmd-{ch}")),
+        crate::input::Key::Enter => Some("Enter".to_string()),
+        crate::input::Key::Escape => Some("Esc".to_string()),
+        crate::input::Key::Backspace => Some("Backspace".to_string()),
+        crate::input::Key::Delete => Some("Delete".to_string()),
+        crate::input::Key::Left => Some("Left".to_string()),
+        crate::input::Key::Right => Some("Right".to_string()),
+        crate::input::Key::Up => Some("Up".to_string()),
+        crate::input::Key::Down => Some("Down".to_string()),
+        crate::input::Key::Unhandled => None,
+    }
+}
+
+fn kill_line_range(buffer: &Buffer, point: usize) -> Option<Range<usize>> {
+    if point >= buffer.len_chars() {
+        return None;
+    }
+
+    let line_idx = buffer.line_for_char(point);
+    let line_end = buffer.line_end_char(line_idx);
+
+    if point < line_end {
+        Some(point..line_end)
+    } else {
+        Some(point..point + 1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{picker_directory, AppAction, AppState, DIRTY_QUIT_PROMPT};
+    use super::{picker_directory, AppAction, AppState, COMMAND_HELP, DIRTY_QUIT_PROMPT};
     use crate::{buffer::Buffer, input::Key, keymap::Keymap, renderer::StatusKind, view::View};
     use std::{
         fs,
@@ -630,6 +786,25 @@ mod tests {
     }
 
     #[test]
+    fn bare_slash_and_help_commands_list_available_commands() {
+        for command in ["/", "/help", "/commands"] {
+            let mut app = AppState::default();
+            let mut keymap = Keymap::new();
+            let mut buffer = buffer_with_text("notes.txt", "old");
+            let mut view = View::new();
+
+            let action = run_slash_command(command, &mut app, &mut keymap, &mut buffer, &mut view);
+
+            assert_eq!(action, AppAction::Continue);
+            assert_eq!(app.command_line, None);
+            assert_eq!(app.status_message.as_deref(), Some(COMMAND_HELP));
+            assert_eq!(app.status_kind, Some(StatusKind::Info));
+            assert_eq!(buffer.text(), "old");
+            assert!(!buffer.is_dirty());
+        }
+    }
+
+    #[test]
     fn slash_after_ctrl_x_resets_prefix_without_starting_command_line() {
         let mut app = AppState::default();
         let mut keymap = Keymap::new();
@@ -660,6 +835,83 @@ mod tests {
         assert_eq!(action, AppAction::Continue);
         assert_eq!(app.status_message.as_deref(), Some("C-x"));
         assert_eq!(app.status_kind, Some(StatusKind::Prefix));
+    }
+
+    #[test]
+    fn keypress_updates_the_keycast_display() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.keycast.as_deref(), Some("C-x"));
+
+        app.handle_key(Key::Enter, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.keycast.as_deref(), Some("Enter"));
+    }
+
+    #[test]
+    fn ctrl_space_marks_region_and_ctrl_w_cuts_it() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "abcd");
+        let mut view = View::new();
+
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl(' '), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.active_region(&view), Some(1..3));
+
+        let action = app.handle_key(Key::Ctrl('w'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(buffer.text(), "ad");
+        assert_eq!(view.point(), 1);
+        assert_eq!(app.kill_ring.as_deref(), Some("bc"));
+        assert_eq!(app.mark, None);
+        assert_eq!(app.status_message.as_deref(), Some("Cut region"));
+    }
+
+    #[test]
+    fn ctrl_k_cuts_to_line_end_and_ctrl_y_yanks_it() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "alpha\nbeta");
+        let mut view = View::new();
+
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        let action = app.handle_key(Key::Ctrl('k'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(buffer.text(), "al\nbeta");
+        assert_eq!(view.point(), 2);
+        assert_eq!(app.kill_ring.as_deref(), Some("pha"));
+
+        let action = app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(buffer.text(), "alpha\nbeta");
+        assert_eq!(view.point(), 5);
+        assert_eq!(app.status_message.as_deref(), Some("Yanked"));
+    }
+
+    #[test]
+    fn ctrl_k_at_line_end_cuts_the_newline() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "alpha\nbeta");
+        let mut view = View::new();
+
+        view.move_to_line_end(&buffer);
+        let action = app.handle_key(Key::Ctrl('k'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(buffer.text(), "alphabeta");
+        assert_eq!(view.point(), 5);
+        assert_eq!(app.kill_ring.as_deref(), Some("\n"));
     }
 
     #[test]
@@ -765,6 +1017,23 @@ mod tests {
         assert_eq!(action, AppAction::Continue);
         assert_eq!(buffer.text(), "old");
         assert_eq!(view.point(), 0);
+        assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn command_z_reverses_the_last_edit() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        app.handle_key(Key::Char('x'), &mut keymap, &mut buffer, &mut view);
+        let action = app.handle_key(Key::Command('z'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(buffer.text(), "old");
+        assert_eq!(view.point(), 0);
+        assert_eq!(app.keycast.as_deref(), Some("Cmd-z"));
         assert!(!buffer.is_dirty());
     }
 
@@ -899,6 +1168,63 @@ mod tests {
             Some("Open canceled: current buffer has unsaved changes")
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn slash_search_moves_point_to_next_match_and_remembers_query() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "alpha beta alpha");
+        let mut view = View::new();
+
+        view.move_forward_char(&buffer);
+        let action = run_slash_command(
+            "/search alpha",
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+        );
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(view.point(), 11);
+        assert_eq!(app.last_search.as_deref(), Some("alpha"));
+        assert_eq!(app.status_message.as_deref(), Some("Found: alpha"));
+        assert_eq!(app.status_kind, Some(StatusKind::Success));
+    }
+
+    #[test]
+    fn ctrl_s_repeats_the_previous_search_and_wraps() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "alpha beta alpha");
+        let mut view = View::new();
+
+        run_slash_command("/search alpha", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(view.point(), 11);
+
+        let action = app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(view.point(), 0);
+        assert_eq!(app.status_message.as_deref(), Some("Found: alpha"));
+    }
+
+    #[test]
+    fn search_reports_missing_and_empty_queries() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "alpha beta");
+        let mut view = View::new();
+
+        run_slash_command("/search", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.status_message.as_deref(), Some("Usage: /search <text>"));
+        assert_eq!(app.status_kind, Some(StatusKind::Error));
+
+        run_slash_command("/search missing", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(view.point(), 0);
+        assert_eq!(app.status_message.as_deref(), Some("Not found: missing"));
+        assert_eq!(app.status_kind, Some(StatusKind::Error));
     }
 
     #[test]

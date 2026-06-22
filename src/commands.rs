@@ -6,6 +6,8 @@ pub enum Command {
     InsertNewline,
     DeleteBackward,
     DeleteForward,
+    KillLine,
+    KillRegion,
     MoveForwardChar,
     MoveBackwardChar,
     MoveNextLine,
@@ -14,8 +16,11 @@ pub enum Command {
     MoveToLineEnd,
     OpenFile,
     Redo,
+    RepeatSearch,
     SaveBuffer,
+    SetMark,
     Undo,
+    Yank,
     Quit,
 }
 
@@ -59,6 +64,10 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
             }
             CommandOutcome::default()
         }
+        Command::KillLine
+        | Command::KillRegion
+        | Command::SetMark
+        | Command::Yank => CommandOutcome::default(),
         Command::Undo => {
             if let Some(point) = buffer.undo() {
                 view.set_point(point, buffer);
@@ -71,6 +80,7 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
             }
             CommandOutcome::default()
         }
+        Command::RepeatSearch => CommandOutcome::default(),
         Command::MoveForwardChar => {
             view.move_forward_char(buffer);
             CommandOutcome::default()

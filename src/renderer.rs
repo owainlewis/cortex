@@ -15,223 +15,221 @@ use crossterm::{
 use std::{
     cell::RefCell,
     io::{self, Write},
+    ops::Range,
 };
 
 const TAB_WIDTH: usize = 4;
 const EMPTY_SPACE_MARKER: &str = " ~";
-const MODELINE_BRAND_BADGE: &str = " [Cortex] ";
-const BRAND_WORDMARK: &[(&str, BrandLineTone)] = &[
-    ("   ______           __           ", BrandLineTone::Accent),
-    ("  / ____/___  _____/ /____  _  __", BrandLineTone::Bright),
-    (" / /   / __ \\/ ___/ __/ _ \\| |/_/", BrandLineTone::Muted),
-    ("/ /___/ /_/ / /  / /_/  __/>  <  ", BrandLineTone::Bright),
-    ("\\____/\\____/_/   \\__/\\___/_/|_|  ", BrandLineTone::Accent),
-];
-const COMPACT_BRAND_WORDMARK: &[(&str, BrandLineTone)] = &[
-    (" .-- Cortex --. ", BrandLineTone::Accent),
-    (" '------------' ", BrandLineTone::Muted),
-];
+const MODELINE_BRAND: &str = "CORTEX";
+const MIN_GUTTER_TOTAL_WIDTH: usize = 12;
+const COMMAND_LINE_HINT: &str =
+    "/help  /commands  /open <path>  /search <text>  /next  /save  /undo  /redo  /quit  /quit!";
 
 const THEME: Theme = Theme {
     editor_fg: Color::Rgb {
-        r: 214,
-        g: 219,
-        b: 220,
+        r: 205,
+        g: 214,
+        b: 244,
     },
     empty_fg: Color::Rgb {
-        r: 80,
-        g: 88,
-        b: 92,
+        r: 69,
+        g: 71,
+        b: 90,
     },
-    brand_accent_fg: Color::Rgb {
-        r: 137,
-        g: 203,
-        b: 187,
+    gutter_fg: Color::Rgb {
+        r: 127,
+        g: 132,
+        b: 156,
     },
-    brand_bright_fg: Color::Rgb {
-        r: 245,
-        g: 247,
-        b: 248,
-    },
-    brand_muted_fg: Color::Rgb {
-        r: 112,
-        g: 124,
-        b: 128,
+    gutter_current_fg: Color::Rgb {
+        r: 203,
+        g: 166,
+        b: 247,
     },
     modeline_fg: Color::Rgb {
-        r: 225,
-        g: 230,
-        b: 232,
+        r: 205,
+        g: 214,
+        b: 244,
     },
     modeline_bg: Color::Rgb {
-        r: 42,
-        g: 48,
-        b: 52,
+        r: 30,
+        g: 30,
+        b: 46,
+    },
+    modeline_brand_fg: Color::Rgb {
+        r: 17,
+        g: 17,
+        b: 27,
+    },
+    modeline_brand_bg: Color::Rgb {
+        r: 203,
+        g: 166,
+        b: 247,
     },
     dirty_fg: Color::Rgb {
-        r: 244,
-        g: 191,
-        b: 117,
+        r: 250,
+        g: 179,
+        b: 135,
     },
     success_fg: Color::Rgb {
-        r: 132,
-        g: 204,
-        b: 159,
+        r: 166,
+        g: 227,
+        b: 161,
     },
     error_fg: Color::Rgb {
-        r: 238,
-        g: 126,
-        b: 126,
+        r: 243,
+        g: 139,
+        b: 168,
     },
     prefix_fg: Color::Rgb {
-        r: 142,
-        g: 190,
-        b: 241,
+        r: 137,
+        g: 180,
+        b: 250,
     },
     prompt_fg: Color::Rgb {
-        r: 236,
-        g: 211,
-        b: 124,
+        r: 249,
+        g: 226,
+        b: 175,
     },
     command_fg: Color::Rgb {
-        r: 245,
-        g: 247,
-        b: 248,
+        r: 205,
+        g: 214,
+        b: 244,
     },
     command_bg: Color::Rgb {
-        r: 38,
-        g: 55,
-        b: 63,
+        r: 49,
+        g: 50,
+        b: 68,
+    },
+    selection_bg: Color::Rgb {
+        r: 69,
+        g: 71,
+        b: 90,
     },
     picker_fg: Color::Rgb {
-        r: 222,
-        g: 226,
-        b: 227,
+        r: 205,
+        g: 214,
+        b: 244,
     },
     picker_selected_fg: Color::Rgb {
         r: 245,
-        g: 247,
-        b: 248,
+        g: 224,
+        b: 220,
     },
     picker_selected_bg: Color::Rgb {
-        r: 57,
-        g: 75,
-        b: 83,
+        r: 49,
+        g: 50,
+        b: 68,
     },
     syntax_attribute: Color::Rgb {
-        r: 213,
-        g: 164,
-        b: 111,
+        r: 250,
+        g: 179,
+        b: 135,
     },
     syntax_boolean: Color::Rgb {
-        r: 238,
-        g: 126,
-        b: 126,
+        r: 243,
+        g: 139,
+        b: 168,
     },
     syntax_comment: Color::Rgb {
-        r: 112,
-        g: 124,
-        b: 128,
+        r: 127,
+        g: 132,
+        b: 156,
     },
     syntax_constant: Color::Rgb {
-        r: 238,
-        g: 126,
-        b: 126,
+        r: 243,
+        g: 139,
+        b: 168,
     },
     syntax_constructor: Color::Rgb {
-        r: 137,
-        g: 203,
-        b: 187,
+        r: 148,
+        g: 226,
+        b: 213,
     },
     syntax_function: Color::Rgb {
-        r: 236,
-        g: 211,
-        b: 124,
+        r: 249,
+        g: 226,
+        b: 175,
     },
     syntax_keyword: Color::Rgb {
-        r: 142,
-        g: 190,
-        b: 241,
+        r: 137,
+        g: 180,
+        b: 250,
     },
     syntax_markup: Color::Rgb {
-        r: 189,
-        g: 174,
-        b: 232,
+        r: 203,
+        g: 166,
+        b: 247,
     },
     markdown_heading: Color::Rgb {
-        r: 245,
-        g: 203,
-        b: 128,
+        r: 250,
+        g: 179,
+        b: 135,
     },
     markdown_link: Color::Rgb {
-        r: 151,
-        g: 202,
-        b: 222,
+        r: 137,
+        g: 180,
+        b: 250,
     },
     markdown_uri: Color::Rgb {
-        r: 132,
-        g: 204,
-        b: 159,
+        r: 166,
+        g: 227,
+        b: 161,
     },
     markdown_code: Color::Rgb {
-        r: 244,
-        g: 191,
-        b: 117,
-    },
-    markdown_code_bg: Color::Rgb {
-        r: 34,
-        g: 42,
-        b: 46,
+        r: 250,
+        g: 179,
+        b: 135,
     },
     markdown_marker: Color::Rgb {
-        r: 112,
-        g: 124,
-        b: 128,
+        r: 127,
+        g: 132,
+        b: 156,
     },
     markdown_quote: Color::Rgb {
-        r: 189,
-        g: 174,
-        b: 232,
+        r: 203,
+        g: 166,
+        b: 247,
     },
     syntax_number: Color::Rgb {
-        r: 244,
-        g: 191,
-        b: 117,
+        r: 250,
+        g: 179,
+        b: 135,
     },
     syntax_operator: Color::Rgb {
-        r: 176,
-        g: 184,
-        b: 187,
-    },
-    syntax_property: Color::Rgb {
-        r: 151,
-        g: 202,
+        r: 186,
+        g: 194,
         b: 222,
     },
+    syntax_property: Color::Rgb {
+        r: 116,
+        g: 199,
+        b: 236,
+    },
     syntax_punctuation: Color::Rgb {
-        r: 150,
-        g: 159,
-        b: 163,
+        r: 147,
+        g: 153,
+        b: 178,
     },
     syntax_string: Color::Rgb {
-        r: 132,
-        g: 204,
-        b: 159,
+        r: 166,
+        g: 227,
+        b: 161,
     },
     syntax_tag: Color::Rgb {
-        r: 142,
-        g: 190,
-        b: 241,
+        r: 137,
+        g: 180,
+        b: 250,
     },
     syntax_type: Color::Rgb {
-        r: 137,
-        g: 203,
-        b: 187,
+        r: 148,
+        g: 226,
+        b: 213,
     },
     syntax_variable: Color::Rgb {
-        r: 214,
-        g: 219,
-        b: 220,
+        r: 205,
+        g: 214,
+        b: 244,
     },
 };
 
@@ -259,6 +257,7 @@ pub struct Renderer {
 struct Frame {
     lines: Vec<ScreenLine>,
     modeline: String,
+    keycast: Option<String>,
     cursor: CursorPosition,
     modeline_style: ModelineStyle,
 }
@@ -281,6 +280,8 @@ struct PickerFrame {
 struct ScreenLine {
     text: String,
     kind: ScreenLineKind,
+    gutter: String,
+    current: bool,
     segments: Vec<StyledSegment>,
 }
 
@@ -288,26 +289,19 @@ struct ScreenLine {
 struct StyledSegment {
     text: String,
     highlight: Option<HighlightKind>,
+    selected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenLineKind {
     Text,
     EmptySpace,
-    Brand(BrandLineTone),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PickerLine {
     text: String,
     selected: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrandLineTone {
-    Accent,
-    Bright,
-    Muted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,11 +320,12 @@ enum ModelineStyle {
 struct Theme {
     editor_fg: Color,
     empty_fg: Color,
-    brand_accent_fg: Color,
-    brand_bright_fg: Color,
-    brand_muted_fg: Color,
+    gutter_fg: Color,
+    gutter_current_fg: Color,
     modeline_fg: Color,
     modeline_bg: Color,
+    modeline_brand_fg: Color,
+    modeline_brand_bg: Color,
     dirty_fg: Color,
     success_fg: Color,
     error_fg: Color,
@@ -338,6 +333,7 @@ struct Theme {
     prompt_fg: Color,
     command_fg: Color,
     command_bg: Color,
+    selection_bg: Color,
     picker_fg: Color,
     picker_selected_fg: Color,
     picker_selected_bg: Color,
@@ -353,7 +349,6 @@ struct Theme {
     markdown_link: Color,
     markdown_uri: Color,
     markdown_code: Color,
-    markdown_code_bg: Color,
     markdown_marker: Color,
     markdown_quote: Color,
     syntax_number: Color,
@@ -394,10 +389,14 @@ impl Renderer {
         size: TerminalSize,
         status_message: Option<&str>,
         status_kind: Option<StatusKind>,
+        selection_range: Option<Range<usize>>,
         command_line: Option<&str>,
+        keycast: Option<&str>,
     ) -> io::Result<()> {
         let viewport_height = self.viewport_height(size);
-        let visible_lines = visible_lines(buffer, view, size.cols as usize, viewport_height);
+        let width = size.cols as usize;
+        let text_width = width.saturating_sub(editor_gutter_width(buffer, width));
+        let visible_lines = visible_lines(buffer, view, text_width, viewport_height);
         let highlighted_lines =
             self.highlighter
                 .borrow_mut()
@@ -408,7 +407,9 @@ impl Renderer {
             size,
             status_message,
             status_kind,
+            selection_range,
             command_line,
+            keycast,
             &highlighted_lines,
         );
 
@@ -426,6 +427,10 @@ impl Renderer {
 
         for (row, line) in frame.lines.iter().enumerate() {
             render_editor_line(writer, row as u16, line, size.cols as usize)?;
+        }
+
+        if let Some(keycast) = frame.keycast.as_deref() {
+            render_keycast(writer, keycast, size.cols as usize)?;
         }
 
         let modeline_row = size.rows.saturating_sub(1);
@@ -478,13 +483,36 @@ fn build_frame(
     status_kind: Option<StatusKind>,
     command_line: Option<&str>,
 ) -> Frame {
+    build_frame_with_selection(
+        buffer,
+        view,
+        size,
+        status_message,
+        status_kind,
+        None,
+        command_line,
+    )
+}
+
+#[cfg(test)]
+fn build_frame_with_selection(
+    buffer: &Buffer,
+    view: &View,
+    size: TerminalSize,
+    status_message: Option<&str>,
+    status_kind: Option<StatusKind>,
+    selection_range: Option<Range<usize>>,
+    command_line: Option<&str>,
+) -> Frame {
     build_frame_with_highlights(
         buffer,
         view,
         size,
         status_message,
         status_kind,
+        selection_range,
         command_line,
+        None,
         &[],
     )
 }
@@ -495,45 +523,59 @@ fn build_frame_with_highlights(
     size: TerminalSize,
     status_message: Option<&str>,
     status_kind: Option<StatusKind>,
+    selection_range: Option<Range<usize>>,
     command_line: Option<&str>,
+    keycast: Option<&str>,
     highlighted_lines: &[Vec<HighlightSpan>],
 ) -> Frame {
     let width = size.cols as usize;
     let viewport_height = size.rows.saturating_sub(1) as usize;
-    let visible_buffer_rows = buffer
-        .len_lines()
-        .saturating_sub(view.scroll_line())
-        .min(viewport_height);
+    let gutter_width = editor_gutter_width(buffer, width);
+    let text_width = width.saturating_sub(gutter_width);
+    let point_line = buffer.line_for_char(view.point());
     let mut lines = Vec::with_capacity(viewport_height);
 
     for screen_row in 0..viewport_height {
         let line_idx = view.scroll_line().saturating_add(screen_row);
         let screen_line = if line_idx < buffer.len_lines() {
-            let raw_text = buffer.line_prefix_text(line_idx, width);
+            let raw_text = buffer.line_prefix_text(line_idx, text_width);
+            let line_start = buffer.line_start_char(line_idx);
             let spans = highlighted_lines
                 .get(screen_row)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let segments = fit_line_segments(&raw_text, spans, width);
+            let segments = fit_line_segments(
+                &raw_text,
+                spans,
+                text_width,
+                line_start,
+                selection_range.as_ref(),
+            );
             let text = segments_text(&segments);
             ScreenLine {
                 text,
                 kind: ScreenLineKind::Text,
+                gutter: line_gutter(
+                    line_idx,
+                    point_line,
+                    buffer.line_changed(line_idx),
+                    gutter_width,
+                ),
+                current: line_idx == point_line,
                 segments,
             }
         } else {
-            let (text, kind) = brand_line(screen_row, visible_buffer_rows, viewport_height, width)
-                .map_or_else(
-                    || (empty_space_line(width), ScreenLineKind::EmptySpace),
-                    |line| line,
-                );
+            let text = empty_space_line(text_width);
             ScreenLine {
                 segments: vec![StyledSegment {
                     text: text.clone(),
                     highlight: None,
+                    selected: false,
                 }],
                 text,
-                kind,
+                kind: ScreenLineKind::EmptySpace,
+                gutter: empty_gutter(gutter_width),
+                current: false,
             }
         };
         lines.push(screen_line);
@@ -544,7 +586,7 @@ fn build_frame_with_highlights(
         .unwrap_or_else(|| modeline_text(buffer, view, status_message));
     let cursor = command_line
         .map(|input| command_line_cursor(input, size))
-        .unwrap_or_else(|| cursor_position(buffer, view, size));
+        .unwrap_or_else(|| cursor_position(buffer, view, size, gutter_width));
     let modeline_style = if command_line.is_some() {
         ModelineStyle::CommandLine
     } else if let Some(status_kind) = status_kind {
@@ -555,15 +597,10 @@ fn build_frame_with_highlights(
         ModelineStyle::Clean
     };
 
-    let modeline = if command_line.is_some() {
-        fit_status_line(&modeline, width)
-    } else {
-        fit_branded_status_line(&modeline, width)
-    };
-
     Frame {
         lines,
-        modeline,
+        modeline: fit_status_line(&modeline, width),
+        keycast: keycast.map(keycast_text),
         cursor,
         modeline_style,
     }
@@ -582,7 +619,44 @@ fn visible_lines(
         .collect()
 }
 
+fn editor_gutter_width(buffer: &Buffer, terminal_width: usize) -> usize {
+    if terminal_width < MIN_GUTTER_TOTAL_WIDTH {
+        return 0;
+    }
+
+    line_number_width(buffer).saturating_add(3)
+}
+
+fn line_number_width(buffer: &Buffer) -> usize {
+    buffer.len_lines().max(1).to_string().len().max(3)
+}
+
+fn line_gutter(line_idx: usize, point_line: usize, changed: bool, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let number_width = width.saturating_sub(3);
+    let change_marker = if changed { "+" } else { " " };
+    let point_marker = if line_idx == point_line { ">" } else { " " };
+    let number = if line_idx == point_line {
+        line_idx + 1
+    } else {
+        line_idx.abs_diff(point_line)
+    };
+
+    format!("{change_marker}{point_marker}{number:>number_width$} ")
+}
+
+fn empty_gutter(width: usize) -> String {
+    " ".repeat(width)
+}
+
 fn command_line_text(input: &str) -> String {
+    if input == "/" {
+        return format!(" /  {COMMAND_LINE_HINT}");
+    }
+
     format!(" {input}")
 }
 
@@ -591,7 +665,7 @@ fn command_line_cursor(input: &str, size: TerminalSize) -> CursorPosition {
         return CursorPosition { col: 0, row: 0 };
     }
 
-    let text_before_cursor = command_line_text(input);
+    let text_before_cursor = format!(" {input}");
     let col = measure_cells(&text_before_cursor, size.cols as usize)
         .min(size.cols.saturating_sub(1) as usize) as u16;
 
@@ -601,20 +675,28 @@ fn command_line_cursor(input: &str, size: TerminalSize) -> CursorPosition {
     }
 }
 
-fn cursor_position(buffer: &Buffer, view: &View, size: TerminalSize) -> CursorPosition {
+fn cursor_position(
+    buffer: &Buffer,
+    view: &View,
+    size: TerminalSize,
+    gutter_width: usize,
+) -> CursorPosition {
     if size.cols == 0 || size.rows == 0 {
         return CursorPosition { col: 0, row: 0 };
     }
 
     let point_line = buffer.line_for_char(view.point());
     let point_col = view.point() - buffer.line_start_char(point_line);
-    let line_prefix = buffer.line_prefix_text(point_line, point_col.min(size.cols as usize));
-    let point_cell_col = measure_cells(&line_prefix, size.cols as usize);
+    let text_width = (size.cols as usize).saturating_sub(gutter_width);
+    let line_prefix = buffer.line_prefix_text(point_line, point_col.min(text_width));
+    let point_cell_col = measure_cells(&line_prefix, text_width);
     let viewport_height = size.rows.saturating_sub(1) as usize;
     let row = point_line
         .saturating_sub(view.scroll_line())
         .min(viewport_height.saturating_sub(1)) as u16;
-    let col = point_cell_col.min(size.cols.saturating_sub(1) as usize) as u16;
+    let col = gutter_width
+        .saturating_add(point_cell_col)
+        .min(size.cols.saturating_sub(1) as usize) as u16;
 
     CursorPosition { col, row }
 }
@@ -623,9 +705,9 @@ fn modeline_text(buffer: &Buffer, view: &View, status_message: Option<&str>) -> 
     let line_idx = buffer.line_for_char(view.point());
     let column = view.point() - buffer.line_start_char(line_idx);
     let dirty_state = if buffer.is_dirty() {
-        "modified"
+        "MODIFIED"
     } else {
-        "clean"
+        "CLEAN"
     };
     let file_name = buffer
         .path()
@@ -634,12 +716,18 @@ fn modeline_text(buffer: &Buffer, view: &View, status_message: Option<&str>) -> 
         .map_or_else(|| buffer.path().display().to_string(), ToOwned::to_owned);
 
     let mut text = format!(
-        " {}  {}  Ln {}, Col {} ",
+        " {MODELINE_BRAND}  {}  {}  Ln {}, Col {} ",
         file_name,
         dirty_state,
         line_idx + 1,
         column + 1
     );
+
+    if let Some(language) = file_language_label(buffer.path()) {
+        text.push_str(" | ");
+        text.push_str(language);
+        text.push(' ');
+    }
 
     if let Some(message) = status_message.filter(|message| !message.is_empty()) {
         text.push_str(" | ");
@@ -650,6 +738,17 @@ fn modeline_text(buffer: &Buffer, view: &View, status_message: Option<&str>) -> 
     text
 }
 
+fn file_language_label(path: &std::path::Path) -> Option<&'static str> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("rs") => Some("RUST"),
+        Some("md") | Some("markdown") => Some("MARKDOWN"),
+        Some("toml") => Some("TOML"),
+        Some("json") => Some("JSON"),
+        Some("txt") => Some("TEXT"),
+        _ => None,
+    }
+}
+
 fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFrame {
     let width = size.cols as usize;
     let viewport_height = size.rows.saturating_sub(1) as usize;
@@ -657,14 +756,14 @@ fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFra
 
     if viewport_height > 0 {
         lines.push(PickerLine {
-            text: fit_line_cells(&format!(" Open file in {}", picker.directory().display()), width),
+            text: fit_line_cells(&picker_header_text(picker), width),
             selected: false,
         });
     }
 
     if viewport_height > 1 {
         lines.push(PickerLine {
-            text: String::new(),
+            text: fit_line_cells(" Name                                        Kind", width),
             selected: false,
         });
     }
@@ -710,7 +809,7 @@ fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFra
 
     PickerFrame {
         lines,
-        modeline: fit_branded_status_line(&picker_modeline_text(picker), width),
+        modeline: fit_status_line(&picker_modeline_text(picker), width),
         cursor: CursorPosition {
             col: 0,
             row: cursor_row,
@@ -728,9 +827,7 @@ fn render_editor_line<W: Write>(
     let foreground = match line.kind {
         ScreenLineKind::Text => THEME.editor_fg,
         ScreenLineKind::EmptySpace => THEME.empty_fg,
-        ScreenLineKind::Brand(tone) => brand_color(tone),
     };
-
     queue!(
         writer,
         cursor::MoveTo(0, row),
@@ -738,71 +835,63 @@ fn render_editor_line<W: Write>(
         SetForegroundColor(foreground)
     )?;
 
+    if !line.gutter.is_empty() {
+        let gutter_foreground = if line.current {
+            THEME.gutter_current_fg
+        } else {
+            THEME.gutter_fg
+        };
+        queue!(writer, SetForegroundColor(gutter_foreground))?;
+        queue!(writer, Print(&line.gutter), ResetColor)?;
+    }
+
     for segment in &line.segments {
-        let style = segment
+        let mut style = segment
             .highlight
             .map_or_else(|| plain_style(foreground), highlight_style);
-        queue!(writer, SetAttribute(Attribute::Reset), ResetColor)?;
-        if matches!(line.kind, ScreenLineKind::Brand(_)) {
-            queue!(writer, SetAttribute(Attribute::Bold))?;
+        if segment.selected {
+            style.background = Some(THEME.selection_bg);
         }
+        queue!(writer, SetAttribute(Attribute::Reset), ResetColor)?;
         apply_text_style(writer, style)?;
         queue!(writer, Print(&segment.text))?;
     }
 
-    let remaining_width = width.saturating_sub(measure_cells(&line.text, width));
+    let gutter_width = measure_cells(&line.gutter, width);
+    let content_width = width.saturating_sub(gutter_width);
+    let remaining_width = content_width.saturating_sub(measure_cells(&line.text, content_width));
     if remaining_width > 0 {
         queue!(
             writer,
             SetAttribute(Attribute::Reset),
             ResetColor,
-            SetForegroundColor(foreground),
-            Print(" ".repeat(remaining_width))
+            SetForegroundColor(foreground)
         )?;
+        queue!(writer, Print(" ".repeat(remaining_width)))?;
     }
 
     queue!(writer, SetAttribute(Attribute::Reset), ResetColor)
 }
 
-fn brand_line(
-    screen_row: usize,
-    first_empty_row: usize,
-    viewport_height: usize,
-    width: usize,
-) -> Option<(String, ScreenLineKind)> {
-    let wordmark = if width >= 38 && viewport_height >= 8 {
-        BRAND_WORDMARK
-    } else if width >= 18 && viewport_height >= 4 {
-        COMPACT_BRAND_WORDMARK
-    } else {
-        return None;
-    };
-    let empty_rows = viewport_height.saturating_sub(first_empty_row);
-
-    if empty_rows < wordmark.len() {
-        return None;
+fn render_keycast<W: Write>(writer: &mut W, keycast: &str, width: usize) -> io::Result<()> {
+    if width < 18 {
+        return Ok(());
     }
 
-    let start_row =
-        first_empty_row + empty_rows.saturating_sub(wordmark.len()).saturating_div(2);
-    let wordmark_row = screen_row.checked_sub(start_row)?;
-    let (text, tone) = wordmark.get(wordmark_row)?;
+    let text = fit_line_cells(keycast, width);
+    let text_width = measure_cells(&text, width);
+    let col = width.saturating_sub(text_width).saturating_sub(1) as u16;
 
-    Some((center_line(text, width), ScreenLineKind::Brand(*tone)))
-}
-
-fn center_line(line: &str, width: usize) -> String {
-    let line_width = measure_cells(line, width);
-    let padding = width.saturating_sub(line_width) / 2;
-    fit_line_cells(&format!("{}{}", " ".repeat(padding), line), width)
-}
-
-fn brand_color(tone: BrandLineTone) -> Color {
-    match tone {
-        BrandLineTone::Accent => THEME.brand_accent_fg,
-        BrandLineTone::Bright => THEME.brand_bright_fg,
-        BrandLineTone::Muted => THEME.brand_muted_fg,
-    }
+    queue!(
+        writer,
+        cursor::MoveTo(col, 0),
+        SetAttribute(Attribute::Bold),
+        SetForegroundColor(THEME.modeline_brand_fg),
+        SetBackgroundColor(THEME.modeline_brand_bg),
+        Print(text),
+        SetAttribute(Attribute::Reset),
+        ResetColor
+    )
 }
 
 fn render_picker_line<W: Write>(
@@ -837,16 +926,39 @@ fn render_modeline<W: Write>(
     style: ModelineStyle,
 ) -> io::Result<()> {
     let (foreground, background) = modeline_colors(style);
+    let brand = format!(" {MODELINE_BRAND} ");
     queue!(
         writer,
         cursor::MoveTo(0, row),
         SetAttribute(Attribute::Bold),
-        SetForegroundColor(foreground),
-        SetBackgroundColor(background),
-        Print(modeline),
-        SetAttribute(Attribute::Reset),
-        ResetColor
-    )
+    )?;
+
+    if let Some(rest) = modeline.strip_prefix(&brand) {
+        queue!(
+            writer,
+            SetForegroundColor(THEME.modeline_brand_fg),
+            SetBackgroundColor(THEME.modeline_brand_bg),
+            Print(&brand),
+            SetForegroundColor(foreground),
+            SetBackgroundColor(background),
+            Print(rest),
+            SetAttribute(Attribute::Reset),
+            ResetColor
+        )
+    } else {
+        queue!(
+            writer,
+            SetForegroundColor(foreground),
+            SetBackgroundColor(background),
+            Print(modeline),
+            SetAttribute(Attribute::Reset),
+            ResetColor
+        )
+    }
+}
+
+fn keycast_text(keycast: &str) -> String {
+    format!(" KEYS {keycast} ")
 }
 
 fn modeline_colors(style: ModelineStyle) -> (Color, Color) {
@@ -891,20 +1003,27 @@ fn status_kind_for_message(message: &str) -> StatusKind {
     }
 }
 
+fn picker_header_text(picker: &DirectoryPicker) -> String {
+    let count = picker.entries().len();
+    let noun = if count == 1 { "item" } else { "items" };
+    format!(" CORTEX FIND  {}  {count} {noun}", picker.directory().display())
+}
+
 fn picker_entry_text(entry: &DirectoryEntry, selected: bool) -> String {
     let marker = if selected { ">" } else { " " };
     let suffix = if entry.is_directory() { "/" } else { "" };
     let kind = match entry.kind() {
-        DirectoryEntryKind::File => "file",
-        DirectoryEntryKind::Directory => "dir ",
-        DirectoryEntryKind::Other => "item",
+        DirectoryEntryKind::File => "FILE",
+        DirectoryEntryKind::Directory => "DIR ",
+        DirectoryEntryKind::Other => "ITEM",
     };
 
-    format!("{marker} {kind} {}{suffix}", entry.name())
+    format!("{marker} {:<42} {kind}", format!("{}{suffix}", entry.name()))
 }
 
 fn picker_modeline_text(picker: &DirectoryPicker) -> String {
-    let mut text = " Enter open/browse  C-n/C-p move  Esc/C-x C-c quit ".to_string();
+    let mut text =
+        format!(" {MODELINE_BRAND}  PICKER  Enter open/browse  C-n/C-p move  Esc/C-x C-c quit ");
 
     if let Some(message) = picker
         .status_message()
@@ -922,22 +1041,27 @@ fn fit_line_segments(
     line: &str,
     highlight_spans: &[HighlightSpan],
     width: usize,
+    line_start: usize,
+    selection_range: Option<&Range<usize>>,
 ) -> Vec<StyledSegment> {
     let mut segments = Vec::new();
     let mut cells = 0;
 
-    for (byte_idx, ch) in line.char_indices() {
+    for (line_char_idx, (byte_idx, ch)) in line.char_indices().enumerate() {
         if cells >= width {
             break;
         }
 
+        let char_idx = line_start + line_char_idx;
         let highlight = highlight_for_byte(highlight_spans, byte_idx);
+        let selected = selection_range.is_some_and(|range| range.contains(&char_idx));
         if ch == '\t' {
             let spaces = tab_spaces(cells).min(width - cells);
             push_segment(
                 &mut segments,
                 &std::iter::repeat(' ').take(spaces).collect::<String>(),
                 highlight,
+                selected,
             );
             cells += spaces;
             continue;
@@ -953,7 +1077,7 @@ fn fit_line_segments(
         }
 
         let display_char = if ch.is_control() { ' ' } else { ch };
-        push_segment(&mut segments, &display_char.to_string(), highlight);
+        push_segment(&mut segments, &display_char.to_string(), highlight, selected);
         cells += char_width;
     }
 
@@ -964,6 +1088,7 @@ fn push_segment(
     segments: &mut Vec<StyledSegment>,
     text: &str,
     highlight: Option<HighlightKind>,
+    selected: bool,
 ) {
     if text.is_empty() {
         return;
@@ -971,7 +1096,7 @@ fn push_segment(
 
     if let Some(segment) = segments
         .last_mut()
-        .filter(|segment| segment.highlight == highlight)
+        .filter(|segment| segment.highlight == highlight && segment.selected == selected)
     {
         segment.text.push_str(text);
         return;
@@ -980,6 +1105,7 @@ fn push_segment(
     segments.push(StyledSegment {
         text: text.to_string(),
         highlight,
+        selected,
     });
 }
 
@@ -1051,9 +1177,7 @@ fn highlight_style(kind: HighlightKind) -> TextStyle {
         HighlightKind::MarkupLinkUrl => style.underlined = true,
         HighlightKind::MarkupRaw
         | HighlightKind::MarkupRawBlock
-        | HighlightKind::MarkupRawInline => {
-            style.background = Some(THEME.markdown_code_bg);
-        }
+        | HighlightKind::MarkupRawInline => style.bold = true,
         HighlightKind::Comment
         | HighlightKind::PunctuationDelimiter
         | HighlightKind::PunctuationSpecial => style.dim = true,
@@ -1121,19 +1245,6 @@ fn fit_status_line(line: &str, width: usize) -> String {
     let mut fitted = fit_line_cells(line, width);
     let remaining_width = width.saturating_sub(measure_cells(&fitted, width));
     fitted.extend(std::iter::repeat(' ').take(remaining_width));
-    fitted
-}
-
-fn fit_branded_status_line(line: &str, width: usize) -> String {
-    let badge_width = measure_cells(MODELINE_BRAND_BADGE, width);
-
-    if width < badge_width + 8 {
-        return fit_status_line(line, width);
-    }
-
-    let left_width = width - badge_width;
-    let mut fitted = fit_status_line(line, left_width);
-    fitted.push_str(MODELINE_BRAND_BADGE);
     fitted
 }
 
@@ -1205,8 +1316,9 @@ fn is_wide(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_frame, build_picker_frame, fit_line_cells, fit_status_line, measure_cells,
-        CursorPosition, Frame, ModelineStyle, ScreenLineKind, StatusKind, TerminalSize,
+        build_frame, build_frame_with_selection, build_picker_frame, fit_line_cells,
+        fit_status_line, measure_cells, CursorPosition, Frame, ModelineStyle, ScreenLineKind,
+        StatusKind, TerminalSize, COMMAND_LINE_HINT,
     };
     use crate::{
         buffer::Buffer,
@@ -1252,12 +1364,16 @@ mod tests {
         );
 
         assert_eq!(line_texts(&frame), vec!["alpha", "beta"]);
-        assert!(frame.modeline.contains("Cortex"));
+        assert!(frame.modeline.contains("CORTEX"));
         assert!(frame.modeline.contains("notes.txt"));
-        assert!(frame.modeline.contains("clean"));
+        assert!(frame.modeline.contains("CLEAN"));
         assert!(frame.modeline.contains("Ln 1, Col 1"));
         assert_eq!(frame.modeline_style, ModelineStyle::Clean);
-        assert_eq!(frame.cursor, CursorPosition { col: 0, row: 0 });
+        assert_eq!(frame.lines[0].gutter, " >  1 ");
+        assert!(frame.lines[0].current);
+        assert_eq!(frame.lines[1].gutter, "    1 ");
+        assert!(!frame.lines[1].current);
+        assert_eq!(frame.cursor, CursorPosition { col: 6, row: 0 });
     }
 
     #[test]
@@ -1273,8 +1389,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(brand_line_count(&frame), 0);
-        assert!(frame.modeline.ends_with(" [Cortex] "));
+        assert!(frame.modeline.starts_with(" CORTEX "));
     }
 
     #[test]
@@ -1291,8 +1406,9 @@ mod tests {
             None,
         );
 
-        assert!(frame.modeline.contains("modified"));
+        assert!(frame.modeline.contains("MODIFIED"));
         assert_eq!(frame.modeline_style, ModelineStyle::Dirty);
+        assert!(frame.lines[0].gutter.starts_with("+>"));
     }
 
     #[test]
@@ -1314,7 +1430,7 @@ mod tests {
         );
 
         assert_eq!(line_texts(&frame), vec!["two", "three"]);
-        assert_eq!(frame.cursor, CursorPosition { col: 0, row: 1 });
+        assert_eq!(frame.cursor, CursorPosition { col: 6, row: 1 });
         assert!(frame.modeline.contains("Ln 3, Col 1"));
     }
 
@@ -1377,61 +1493,26 @@ mod tests {
     }
 
     #[test]
-    fn frame_renders_cortex_wordmark_in_open_empty_space() {
-        let buffer = buffer_with_text("notes.txt", "alpha");
+    fn frame_marks_active_selection_segments() {
+        let buffer = buffer_with_text("notes.txt", "alpha\nbeta\n");
 
-        let frame = build_frame(
+        let frame = build_frame_with_selection(
             &buffer,
             &View::new(),
-            TerminalSize { cols: 48, rows: 10 },
+            TerminalSize { cols: 40, rows: 3 },
             None,
             None,
+            Some(1..7),
             None,
         );
 
-        assert_eq!(brand_line_count(&frame), 5);
-        assert!(frame
-            .lines
+        assert!(frame.lines[0].segments.iter().any(|segment| {
+            segment.selected && segment.text.contains("lpha")
+        }));
+        assert!(frame.lines[1]
+            .segments
             .iter()
-            .any(|line| line.text.contains("/ ____/___")));
-        assert!(frame
-            .lines
-            .iter()
-            .any(|line| line.text.contains("\\____/\\____")));
-    }
-
-    #[test]
-    fn frame_uses_compact_brand_when_space_is_narrow() {
-        let buffer = buffer_with_text("notes.txt", "alpha");
-
-        let frame = build_frame(
-            &buffer,
-            &View::new(),
-            TerminalSize { cols: 20, rows: 6 },
-            None,
-            None,
-            None,
-        );
-
-        assert_eq!(brand_line_count(&frame), 2);
-        assert!(frame.lines.iter().any(|line| line.text.contains("Cortex")));
-    }
-
-    #[test]
-    fn frame_skips_brand_when_empty_space_is_too_short() {
-        let buffer = buffer_with_text("notes.txt", "one\ntwo\nthree");
-
-        let frame = build_frame(
-            &buffer,
-            &View::new(),
-            TerminalSize { cols: 48, rows: 5 },
-            None,
-            None,
-            None,
-        );
-
-        assert_eq!(brand_line_count(&frame), 0);
-        assert_eq!(frame.lines[3].kind, ScreenLineKind::EmptySpace);
+            .any(|segment| segment.selected && segment.text.contains("b")));
     }
 
     #[test]
@@ -1530,6 +1611,8 @@ mod tests {
                 Some("Wrote notes.txt"),
                 Some(StatusKind::Success),
                 None,
+                None,
+                None,
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
@@ -1553,11 +1636,13 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
 
-        assert!(output.contains("\x1b[38;2;142;190;241m"));
+        assert!(output.contains("\x1b[38;2;137;180;250m"));
     }
 
     #[test]
@@ -1578,13 +1663,38 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
 
-        assert!(output.contains("\x1b[38;2;245;203;128m"));
-        assert!(output.contains("\x1b[48;2;34;42;46m"));
+        assert!(output.contains("\x1b[38;2;250;179;135m"));
         assert!(output.contains("\x1b[4m"));
+    }
+
+    #[test]
+    fn render_emits_keycast_badge_when_present() {
+        let buffer = buffer_with_text("notes.txt", "alpha\n");
+        let renderer = super::Renderer::new();
+        let mut output = Vec::new();
+
+        renderer
+            .render(
+                &mut output,
+                &buffer,
+                &View::new(),
+                TerminalSize { cols: 40, rows: 3 },
+                None,
+                None,
+                None,
+                None,
+                Some("C-x"),
+            )
+            .unwrap();
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(output.contains("KEYS C-x"));
     }
 
     #[test]
@@ -1601,10 +1711,29 @@ mod tests {
         );
 
         assert!(frame.modeline.starts_with(" /save"));
-        assert!(!frame.modeline.contains("Cortex"));
+        assert!(!frame.modeline.contains("CORTEX"));
         assert!(!frame.modeline.contains("old status"));
         assert_eq!(frame.modeline_style, ModelineStyle::CommandLine);
         assert_eq!(frame.cursor, CursorPosition { col: 6, row: 2 });
+    }
+
+    #[test]
+    fn frame_modeline_lists_commands_when_slash_prompt_opens() {
+        let buffer = buffer_with_text("notes.txt", "alpha\n");
+
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 120, rows: 3 },
+            None,
+            None,
+            Some("/"),
+        );
+
+        assert!(frame.modeline.contains(COMMAND_LINE_HINT));
+        assert!(frame.modeline.contains("/open <path>"));
+        assert!(frame.modeline.contains("/search <text>"));
+        assert_eq!(frame.cursor, CursorPosition { col: 2, row: 2 });
     }
 
     #[test]
@@ -1627,10 +1756,13 @@ mod tests {
 
         let frame = build_picker_frame(&picker, TerminalSize { cols: 80, rows: 6 });
 
+        assert!(frame.lines[0].text.contains("CORTEX FIND"));
         assert!(frame.lines[0].text.contains("/tmp/project"));
-        assert_eq!(frame.lines[2].text, "> dir  src/");
+        assert!(frame.lines[2].text.contains("> src/"));
+        assert!(frame.lines[2].text.contains("DIR"));
         assert!(frame.lines[2].selected);
-        assert_eq!(frame.lines[3].text, "  file main.rs");
+        assert!(frame.lines[3].text.contains("main.rs"));
+        assert!(frame.lines[3].text.contains("FILE"));
         assert!(frame.modeline.contains("Enter open"));
         assert_eq!(frame.cursor, CursorPosition { col: 0, row: 2 });
     }
@@ -1652,22 +1784,14 @@ mod tests {
         picker.handle_key(crate::input::Key::Down);
         let frame = build_picker_frame(&picker, TerminalSize { cols: 80, rows: 5 });
 
-        assert_eq!(frame.lines[2].text, "  file c.txt");
-        assert_eq!(frame.lines[3].text, "> file d.txt");
+        assert!(frame.lines[2].text.contains("c.txt"));
+        assert!(frame.lines[3].text.contains("> d.txt"));
         assert!(frame.lines[3].selected);
         assert_eq!(frame.cursor, CursorPosition { col: 0, row: 3 });
     }
 
     fn line_texts(frame: &Frame) -> Vec<&str> {
         frame.lines.iter().map(|line| line.text.as_str()).collect()
-    }
-
-    fn brand_line_count(frame: &Frame) -> usize {
-        frame
-            .lines
-            .iter()
-            .filter(|line| matches!(line.kind, ScreenLineKind::Brand(_)))
-            .count()
     }
 
     fn buffer_with_text(file_name: &str, text: &str) -> Buffer {
