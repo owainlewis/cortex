@@ -131,6 +131,41 @@ const THEME: Theme = Theme {
         g: 174,
         b: 232,
     },
+    markdown_heading: Color::Rgb {
+        r: 245,
+        g: 203,
+        b: 128,
+    },
+    markdown_link: Color::Rgb {
+        r: 151,
+        g: 202,
+        b: 222,
+    },
+    markdown_uri: Color::Rgb {
+        r: 132,
+        g: 204,
+        b: 159,
+    },
+    markdown_code: Color::Rgb {
+        r: 244,
+        g: 191,
+        b: 117,
+    },
+    markdown_code_bg: Color::Rgb {
+        r: 34,
+        g: 42,
+        b: 46,
+    },
+    markdown_marker: Color::Rgb {
+        r: 112,
+        g: 124,
+        b: 128,
+    },
+    markdown_quote: Color::Rgb {
+        r: 189,
+        g: 174,
+        b: 232,
+    },
     syntax_number: Color::Rgb {
         r: 244,
         g: 191,
@@ -276,6 +311,13 @@ struct Theme {
     syntax_function: Color,
     syntax_keyword: Color,
     syntax_markup: Color,
+    markdown_heading: Color,
+    markdown_link: Color,
+    markdown_uri: Color,
+    markdown_code: Color,
+    markdown_code_bg: Color,
+    markdown_marker: Color,
+    markdown_quote: Color,
     syntax_number: Color,
     syntax_operator: Color,
     syntax_property: Color,
@@ -284,6 +326,16 @@ struct Theme {
     syntax_tag: Color,
     syntax_type: Color,
     syntax_variable: Color,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextStyle {
+    foreground: Color,
+    background: Option<Color>,
+    bold: bool,
+    italic: bool,
+    underlined: bool,
+    dim: bool,
 }
 
 impl Renderer {
@@ -634,20 +686,26 @@ fn render_editor_line<W: Write>(
     )?;
 
     for segment in &line.segments {
-        let color = segment.highlight.map_or(foreground, highlight_color);
-        queue!(writer, SetForegroundColor(color), Print(&segment.text))?;
+        let style = segment
+            .highlight
+            .map_or_else(|| plain_style(foreground), highlight_style);
+        queue!(writer, SetAttribute(Attribute::Reset), ResetColor)?;
+        apply_text_style(writer, style)?;
+        queue!(writer, Print(&segment.text))?;
     }
 
     let remaining_width = width.saturating_sub(measure_cells(&line.text, width));
     if remaining_width > 0 {
         queue!(
             writer,
+            SetAttribute(Attribute::Reset),
+            ResetColor,
             SetForegroundColor(foreground),
             Print(" ".repeat(remaining_width))
         )?;
     }
 
-    queue!(writer, ResetColor)
+    queue!(writer, SetAttribute(Attribute::Reset), ResetColor)
 }
 
 fn render_picker_line<W: Write>(
@@ -846,8 +904,19 @@ fn segments_text(segments: &[StyledSegment]) -> String {
         .collect()
 }
 
-fn highlight_color(kind: HighlightKind) -> Color {
-    match kind {
+fn plain_style(foreground: Color) -> TextStyle {
+    TextStyle {
+        foreground,
+        background: None,
+        bold: false,
+        italic: false,
+        underlined: false,
+        dim: false,
+    }
+}
+
+fn highlight_style(kind: HighlightKind) -> TextStyle {
+    let mut style = plain_style(match kind {
         HighlightKind::Attribute => THEME.syntax_attribute,
         HighlightKind::Boolean => THEME.syntax_boolean,
         HighlightKind::Comment => THEME.syntax_comment,
@@ -856,15 +925,67 @@ fn highlight_color(kind: HighlightKind) -> Color {
         HighlightKind::Function => THEME.syntax_function,
         HighlightKind::Keyword => THEME.syntax_keyword,
         HighlightKind::Markup => THEME.syntax_markup,
+        HighlightKind::MarkupBold => THEME.editor_fg,
+        HighlightKind::MarkupHeading => THEME.markdown_heading,
+        HighlightKind::MarkupItalic => THEME.editor_fg,
+        HighlightKind::MarkupLink => THEME.markdown_link,
+        HighlightKind::MarkupLinkUrl => THEME.markdown_uri,
+        HighlightKind::MarkupList => THEME.markdown_marker,
+        HighlightKind::MarkupQuote => THEME.markdown_quote,
+        HighlightKind::MarkupRaw
+        | HighlightKind::MarkupRawBlock
+        | HighlightKind::MarkupRawInline => THEME.markdown_code,
         HighlightKind::Number => THEME.syntax_number,
         HighlightKind::Operator => THEME.syntax_operator,
         HighlightKind::Property => THEME.syntax_property,
         HighlightKind::Punctuation => THEME.syntax_punctuation,
+        HighlightKind::PunctuationDelimiter => THEME.markdown_marker,
+        HighlightKind::PunctuationSpecial => THEME.markdown_marker,
         HighlightKind::String => THEME.syntax_string,
+        HighlightKind::StringEscape => THEME.syntax_operator,
         HighlightKind::Tag => THEME.syntax_tag,
         HighlightKind::Type => THEME.syntax_type,
         HighlightKind::Variable => THEME.syntax_variable,
+    });
+
+    match kind {
+        HighlightKind::MarkupBold | HighlightKind::MarkupHeading => style.bold = true,
+        HighlightKind::MarkupItalic => style.italic = true,
+        HighlightKind::MarkupLinkUrl => style.underlined = true,
+        HighlightKind::MarkupRaw
+        | HighlightKind::MarkupRawBlock
+        | HighlightKind::MarkupRawInline => {
+            style.background = Some(THEME.markdown_code_bg);
+        }
+        HighlightKind::Comment
+        | HighlightKind::PunctuationDelimiter
+        | HighlightKind::PunctuationSpecial => style.dim = true,
+        _ => {}
     }
+
+    style
+}
+
+fn apply_text_style<W: Write>(writer: &mut W, style: TextStyle) -> io::Result<()> {
+    queue!(writer, SetForegroundColor(style.foreground))?;
+
+    if let Some(background) = style.background {
+        queue!(writer, SetBackgroundColor(background))?;
+    }
+    if style.bold {
+        queue!(writer, SetAttribute(Attribute::Bold))?;
+    }
+    if style.italic {
+        queue!(writer, SetAttribute(Attribute::Italic))?;
+    }
+    if style.underlined {
+        queue!(writer, SetAttribute(Attribute::Underlined))?;
+    }
+    if style.dim {
+        queue!(writer, SetAttribute(Attribute::Dim))?;
+    }
+
+    Ok(())
 }
 
 fn fit_line_cells(line: &str, width: usize) -> String {
@@ -1251,6 +1372,33 @@ mod tests {
         let output = String::from_utf8_lossy(&output);
 
         assert!(output.contains("\x1b[38;2;142;190;241m"));
+    }
+
+    #[test]
+    fn render_emits_markdown_document_styles() {
+        let buffer = buffer_with_text(
+            "notes.md",
+            "## Heading\nUse **bold**, `code`, and [link](https://example.com).\n",
+        );
+        let renderer = super::Renderer::new();
+        let mut output = Vec::new();
+
+        renderer
+            .render(
+                &mut output,
+                &buffer,
+                &View::new(),
+                TerminalSize { cols: 100, rows: 4 },
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(output.contains("\x1b[38;2;245;203;128m"));
+        assert!(output.contains("\x1b[48;2;34;42;46m"));
+        assert!(output.contains("\x1b[4m"));
     }
 
     #[test]

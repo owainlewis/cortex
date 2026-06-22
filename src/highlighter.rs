@@ -12,12 +12,31 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "function",
     "keyword",
     "markup",
+    "markup.bold",
+    "markup.heading",
+    "markup.italic",
+    "markup.link",
+    "markup.link.url",
+    "markup.list",
+    "markup.quote",
+    "markup.raw",
+    "markup.raw.block",
+    "markup.raw.inline",
     "number",
     "operator",
     "property",
     "punctuation",
+    "punctuation.delimiter",
+    "punctuation.special",
     "string",
+    "string.escape",
     "tag",
+    "text.emphasis",
+    "text.literal",
+    "text.reference",
+    "text.strong",
+    "text.title",
+    "text.uri",
     "type",
     "variable",
 ];
@@ -32,11 +51,24 @@ pub enum HighlightKind {
     Function,
     Keyword,
     Markup,
+    MarkupBold,
+    MarkupHeading,
+    MarkupItalic,
+    MarkupLink,
+    MarkupLinkUrl,
+    MarkupList,
+    MarkupQuote,
+    MarkupRaw,
+    MarkupRawBlock,
+    MarkupRawInline,
     Number,
     Operator,
     Property,
     Punctuation,
+    PunctuationDelimiter,
+    PunctuationSpecial,
     String,
+    StringEscape,
     Tag,
     Type,
     Variable,
@@ -63,6 +95,7 @@ impl SyntaxHighlighter {
         let languages = [
             rust_definition(),
             markdown_definition(),
+            markdown_inline_definition(),
             json_definition(),
             toml_definition(),
         ]
@@ -90,35 +123,46 @@ impl SyntaxHighlighter {
             return highlighted_lines;
         }
 
-        let language = &self.languages[language_idx];
+        let languages = &self.languages;
+        let language = &languages[language_idx];
         let line_starts = line_start_offsets(lines);
-        let events = self
-            .highlighter
-            .highlight(&language.config, source.as_bytes(), None, |_| None);
-        let Ok(events) = events else {
-            return highlighted_lines;
-        };
-
-        let mut highlight_stack = Vec::new();
-        for event in events {
-            let Ok(event) = event else {
-                return vec![Vec::new(); lines.len()];
+        {
+            let events = self.highlighter.highlight(
+                &language.config,
+                source.as_bytes(),
+                None,
+                |name| language_config_for_name(languages, name),
+            );
+            let Ok(events) = events else {
+                return highlighted_lines;
             };
 
-            match event {
-                HighlightEvent::Source { start, end } => {
-                    if start < end {
-                        if let Some(kind) = highlight_stack.last().copied().and_then(highlight_kind)
-                        {
-                            push_span(&mut highlighted_lines, &line_starts, start, end, kind);
+            let mut highlight_stack = Vec::new();
+            for event in events {
+                let Ok(event) = event else {
+                    return vec![Vec::new(); lines.len()];
+                };
+
+                match event {
+                    HighlightEvent::Source { start, end } => {
+                        if start < end {
+                            if let Some(kind) =
+                                highlight_stack.last().copied().and_then(highlight_kind)
+                            {
+                                push_span(&mut highlighted_lines, &line_starts, start, end, kind);
+                            }
                         }
                     }
-                }
-                HighlightEvent::HighlightStart(highlight) => highlight_stack.push(highlight.0),
-                HighlightEvent::HighlightEnd => {
-                    highlight_stack.pop();
+                    HighlightEvent::HighlightStart(highlight) => highlight_stack.push(highlight.0),
+                    HighlightEvent::HighlightEnd => {
+                        highlight_stack.pop();
+                    }
                 }
             }
+        }
+
+        if is_markdown_path(path) {
+            self.highlight_markdown_inline_lines(lines, &mut highlighted_lines);
         }
 
         highlighted_lines
@@ -129,6 +173,67 @@ impl SyntaxHighlighter {
         self.languages
             .iter()
             .position(|language| language.extensions.contains(&extension.as_str()))
+    }
+
+    fn language_idx_for_name(&self, name: &str) -> Option<usize> {
+        self.languages
+            .iter()
+            .position(|language| language.config.language_name == name)
+    }
+
+    fn highlight_markdown_inline_lines(
+        &mut self,
+        lines: &[String],
+        highlighted_lines: &mut [Vec<HighlightSpan>],
+    ) {
+        let Some(language_idx) = self.language_idx_for_name("markdown_inline") else {
+            return;
+        };
+
+        let languages = &self.languages;
+        let language = &languages[language_idx];
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+
+            let events = self.highlighter.highlight(
+                &language.config,
+                line.as_bytes(),
+                None,
+                |name| language_config_for_name(languages, name),
+            );
+            let Ok(events) = events else {
+                continue;
+            };
+
+            let mut highlight_stack = Vec::new();
+            for event in events {
+                let Ok(event) = event else {
+                    break;
+                };
+
+                match event {
+                    HighlightEvent::Source { start, end } => {
+                        if start < end {
+                            if let Some(kind) =
+                                highlight_stack.last().copied().and_then(highlight_kind)
+                            {
+                                highlighted_lines[line_idx].push(HighlightSpan {
+                                    range: start..end,
+                                    kind,
+                                });
+                            }
+                        }
+                    }
+                    HighlightEvent::HighlightStart(highlight) => highlight_stack.push(highlight.0),
+                    HighlightEvent::HighlightEnd => {
+                        highlight_stack.pop();
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -155,6 +260,16 @@ fn markdown_definition() -> Option<LanguageDefinition> {
         "markdown",
         tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
         tree_sitter_md::INJECTION_QUERY_BLOCK,
+    )
+}
+
+fn markdown_inline_definition() -> Option<LanguageDefinition> {
+    language_definition(
+        &[],
+        tree_sitter_md::INLINE_LANGUAGE.into(),
+        "markdown_inline",
+        tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
+        tree_sitter_md::INJECTION_QUERY_INLINE,
     )
 }
 
@@ -201,16 +316,46 @@ fn highlight_kind(index: usize) -> Option<HighlightKind> {
         "function" => Some(HighlightKind::Function),
         "keyword" => Some(HighlightKind::Keyword),
         "markup" => Some(HighlightKind::Markup),
+        "markup.bold" | "text.strong" => Some(HighlightKind::MarkupBold),
+        "markup.heading" | "text.title" => Some(HighlightKind::MarkupHeading),
+        "markup.italic" | "text.emphasis" => Some(HighlightKind::MarkupItalic),
+        "markup.link" | "text.reference" => Some(HighlightKind::MarkupLink),
+        "markup.link.url" | "text.uri" => Some(HighlightKind::MarkupLinkUrl),
+        "markup.list" => Some(HighlightKind::MarkupList),
+        "markup.quote" => Some(HighlightKind::MarkupQuote),
+        "markup.raw" | "text.literal" => Some(HighlightKind::MarkupRaw),
+        "markup.raw.block" => Some(HighlightKind::MarkupRawBlock),
+        "markup.raw.inline" => Some(HighlightKind::MarkupRawInline),
         "number" => Some(HighlightKind::Number),
         "operator" => Some(HighlightKind::Operator),
         "property" => Some(HighlightKind::Property),
         "punctuation" => Some(HighlightKind::Punctuation),
+        "punctuation.delimiter" => Some(HighlightKind::PunctuationDelimiter),
+        "punctuation.special" => Some(HighlightKind::PunctuationSpecial),
         "string" => Some(HighlightKind::String),
+        "string.escape" => Some(HighlightKind::StringEscape),
         "tag" => Some(HighlightKind::Tag),
         "type" => Some(HighlightKind::Type),
         "variable" => Some(HighlightKind::Variable),
         _ => None,
     }
+}
+
+fn language_config_for_name<'a>(
+    languages: &'a [LanguageDefinition],
+    name: &str,
+) -> Option<&'a HighlightConfiguration> {
+    languages
+        .iter()
+        .find(|language| language.config.language_name == name)
+        .map(|language| &language.config)
+}
+
+fn is_markdown_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown"))
+        .unwrap_or(false)
 }
 
 fn line_start_offsets(lines: &[String]) -> Vec<usize> {
@@ -296,6 +441,53 @@ mod tests {
     }
 
     #[test]
+    fn highlights_markdown_document_structure() {
+        let mut highlighter = SyntaxHighlighter::new();
+        let lines = vec![
+            "# Heading".to_string(),
+            "> quoted".to_string(),
+            "- item".to_string(),
+        ];
+
+        let highlighted = highlighter.highlight_visible_lines(Path::new("notes.md"), &lines);
+
+        assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupHeading));
+        assert!(line_has_kind(&highlighted[0], HighlightKind::PunctuationSpecial));
+        assert!(line_has_kind(&highlighted[1], HighlightKind::PunctuationSpecial));
+        assert!(line_has_kind(&highlighted[2], HighlightKind::PunctuationSpecial));
+    }
+
+    #[test]
+    fn highlights_markdown_inline_markup() {
+        let mut highlighter = SyntaxHighlighter::new();
+        let lines = vec![
+            "Use **bold**, *em*, `code`, and [link](https://example.com).".to_string(),
+        ];
+
+        let highlighted = highlighter.highlight_visible_lines(Path::new("notes.md"), &lines);
+
+        assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupBold));
+        assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupItalic));
+        assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupRaw));
+        assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupLink));
+        assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupLinkUrl));
+    }
+
+    #[test]
+    fn highlights_markdown_fenced_code_by_language() {
+        let mut highlighter = SyntaxHighlighter::new();
+        let lines = vec![
+            "```rust".to_string(),
+            "fn main() {}".to_string(),
+            "```".to_string(),
+        ];
+
+        let highlighted = highlighter.highlight_visible_lines(Path::new("notes.md"), &lines);
+
+        assert!(line_has_kind(&highlighted[1], HighlightKind::Keyword));
+    }
+
+    #[test]
     fn unknown_extensions_return_plain_lines() {
         let mut highlighter = SyntaxHighlighter::new();
         let lines = vec!["fn main() {}".to_string()];
@@ -325,5 +517,9 @@ mod tests {
         let highlighted = highlighter.highlight_visible_lines(Path::new("large.rs"), &lines);
 
         assert_eq!(highlighted.len(), lines.len());
+    }
+
+    fn line_has_kind(spans: &[super::HighlightSpan], kind: HighlightKind) -> bool {
+        spans.iter().any(|span| span.kind == kind)
     }
 }
