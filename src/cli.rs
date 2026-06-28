@@ -17,11 +17,11 @@ pub const USAGE: &str = "\
 Cortex
 
 Usage:
-  cortex <file>
+  cortex <path>
   cortex --version
   cortex --check-update
 
-Opens one file in the Cortex terminal editor.
+Opens a file or directory in the Cortex terminal editor.
 ";
 
 pub fn parse_args<I, S>(args: I) -> Result<ParseResult, String>

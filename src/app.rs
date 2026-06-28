@@ -238,10 +238,7 @@ impl AppState {
             KeymapResult::Command(commands::Command::RepeatSearch) => {
                 self.repeat_search(buffer, view)
             }
-            KeymapResult::Command(command) => {
-                let outcome = commands::dispatch(command, buffer, view);
-                self.apply_outcome(outcome)
-            }
+            KeymapResult::Command(command) => self.dispatch_command(command, buffer, view),
             KeymapResult::PendingPrefix => {
                 self.set_status("C-x", StatusKind::Prefix);
                 AppAction::Continue
@@ -253,9 +250,10 @@ impl AppState {
         }
     }
 
-    fn active_region(&self, view: &View) -> Option<Range<usize>> {
-        let mark = self.mark?;
-        let point = view.point();
+    fn active_region(&self, buffer: &Buffer, view: &View) -> Option<Range<usize>> {
+        let len_chars = buffer.len_chars();
+        let mark = self.mark?.min(len_chars);
+        let point = view.point().min(len_chars);
 
         if mark == point {
             return None;
@@ -271,7 +269,7 @@ impl AppState {
     }
 
     fn kill_region(&mut self, buffer: &mut Buffer, view: &mut View) -> AppAction {
-        let Some(region) = self.active_region(view) else {
+        let Some(region) = self.active_region(buffer, view) else {
             self.set_status("No active region", StatusKind::Error);
             return AppAction::Continue;
         };
@@ -360,22 +358,10 @@ impl AppState {
                 self.set_status(COMMAND_HELP, StatusKind::Info);
                 AppAction::Continue
             }
-            "save" => {
-                let outcome = commands::dispatch(commands::Command::SaveBuffer, buffer, view);
-                self.apply_outcome(outcome)
-            }
-            "undo" => {
-                let outcome = commands::dispatch(commands::Command::Undo, buffer, view);
-                self.apply_outcome(outcome)
-            }
-            "redo" => {
-                let outcome = commands::dispatch(commands::Command::Redo, buffer, view);
-                self.apply_outcome(outcome)
-            }
-            "quit" => {
-                let outcome = commands::dispatch(commands::Command::Quit, buffer, view);
-                self.apply_outcome(outcome)
-            }
+            "save" => self.dispatch_command(commands::Command::SaveBuffer, buffer, view),
+            "undo" => self.dispatch_command(commands::Command::Undo, buffer, view),
+            "redo" => self.dispatch_command(commands::Command::Redo, buffer, view),
+            "quit" => self.dispatch_command(commands::Command::Quit, buffer, view),
             "quit!" => AppAction::Quit,
             command if command == "search" || command.starts_with("search ") => {
                 self.run_search_command(command, buffer, view)
@@ -403,7 +389,7 @@ impl AppState {
         }
 
         self.last_search = Some(query.to_string());
-        self.repeat_search(buffer, view)
+        self.find_search_match(buffer, view, query, view.point())
     }
 
     fn repeat_search(&mut self, buffer: &Buffer, view: &mut View) -> AppAction {
@@ -413,7 +399,17 @@ impl AppState {
         };
 
         let start = view.point().saturating_add(1).min(buffer.len_chars());
-        match buffer.find_forward(&query, start) {
+        self.find_search_match(buffer, view, &query, start)
+    }
+
+    fn find_search_match(
+        &mut self,
+        buffer: &Buffer,
+        view: &mut View,
+        query: &str,
+        start: usize,
+    ) -> AppAction {
+        match buffer.find_forward(query, start) {
             Some(point) => {
                 view.set_point(point, buffer);
                 self.set_status(format!("Found: {query}"), StatusKind::Success);
@@ -494,6 +490,22 @@ impl AppState {
         }
     }
 
+    fn dispatch_command(
+        &mut self,
+        command: commands::Command,
+        buffer: &mut Buffer,
+        view: &mut View,
+    ) -> AppAction {
+        let clear_mark = command_clears_mark(command);
+        let outcome = commands::dispatch(command, buffer, view);
+
+        if clear_mark {
+            self.mark = None;
+        }
+
+        self.apply_outcome(outcome)
+    }
+
     fn apply_outcome(&mut self, outcome: commands::CommandOutcome) -> AppAction {
         if outcome.quit {
             return AppAction::Quit;
@@ -555,7 +567,7 @@ fn render<W: io::Write>(
         size,
         app_state.status_message.as_deref(),
         app_state.status_kind,
-        app_state.active_region(view),
+        app_state.active_region(buffer, view),
         app_state.command_line.as_deref(),
         app_state.keycast.as_deref(),
     )
@@ -602,6 +614,18 @@ fn kill_line_range(buffer: &Buffer, point: usize) -> Option<Range<usize>> {
     } else {
         Some(point..point + 1)
     }
+}
+
+fn command_clears_mark(command: commands::Command) -> bool {
+    matches!(
+        command,
+        commands::Command::Insert(_)
+            | commands::Command::InsertNewline
+            | commands::Command::DeleteBackward
+            | commands::Command::DeleteForward
+            | commands::Command::Undo
+            | commands::Command::Redo
+    )
 }
 
 #[cfg(test)]
@@ -839,7 +863,7 @@ mod tests {
         app.handle_key(Key::Ctrl(' '), &mut keymap, &mut buffer, &mut view);
         app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
         app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
-        assert_eq!(app.active_region(&view), Some(1..3));
+        assert_eq!(app.active_region(&buffer, &view), Some(1..3));
 
         let action = app.handle_key(Key::Ctrl('w'), &mut keymap, &mut buffer, &mut view);
 
@@ -849,6 +873,39 @@ mod tests {
         assert_eq!(app.kill_ring.as_deref(), Some("bc"));
         assert_eq!(app.mark, None);
         assert_eq!(app.status_message.as_deref(), Some("Cut region"));
+    }
+
+    #[test]
+    fn editing_after_mark_clears_the_region() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "abcd");
+        let mut view = View::new();
+
+        app.handle_key(Key::Ctrl(' '), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Char('x'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(app.mark, None);
+        assert_eq!(app.active_region(&buffer, &view), None);
+    }
+
+    #[test]
+    fn stale_mark_is_clamped_before_cutting_region() {
+        let mut app = AppState {
+            mark: Some(8),
+            ..AppState::default()
+        };
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "abc");
+        let mut view = View::new();
+
+        let action = app.handle_key(Key::Ctrl('w'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(buffer.text(), "");
+        assert_eq!(view.point(), 0);
+        assert_eq!(app.kill_ring.as_deref(), Some("abc"));
+        assert_eq!(app.mark, None);
     }
 
     #[test]
@@ -1174,6 +1231,27 @@ mod tests {
     }
 
     #[test]
+    fn slash_search_finds_match_at_current_point() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "alpha beta alpha");
+        let mut view = View::new();
+
+        let action = run_slash_command(
+            "/search alpha",
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+        );
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(view.point(), 0);
+        assert_eq!(app.last_search.as_deref(), Some("alpha"));
+        assert_eq!(app.status_message.as_deref(), Some("Found: alpha"));
+    }
+
+    #[test]
     fn ctrl_s_repeats_the_previous_search_and_wraps() {
         let mut app = AppState::default();
         let mut keymap = Keymap::new();
@@ -1187,7 +1265,13 @@ mod tests {
             &mut buffer,
             &mut view,
         );
+        assert_eq!(view.point(), 0);
+
+        let action = app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
         assert_eq!(view.point(), 11);
+        assert_eq!(app.status_message.as_deref(), Some("Found: alpha"));
 
         let action = app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
 

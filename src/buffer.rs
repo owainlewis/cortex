@@ -95,6 +95,7 @@ impl Buffer {
     }
 
     pub fn line_changed(&self, line_idx: usize) -> bool {
+        let line_idx = self.clamp_line_idx(line_idx);
         self.line_prefix_text(line_idx, usize::MAX) != clean_line_text(&self.clean_text, line_idx)
     }
 
@@ -224,7 +225,7 @@ impl Buffer {
     }
 
     fn update_dirty(&mut self) {
-        self.dirty = self.text != self.clean_text;
+        self.dirty = self.text != self.clean_text.as_str();
     }
 }
 
@@ -405,6 +406,20 @@ mod tests {
         buffer.save().unwrap();
 
         assert!(!buffer.line_changed(0));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn line_changed_detects_newline_only_changes() {
+        let dir = test_dir("line-changed-newline");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\nbeta\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.delete(5..6);
+
+        assert!(buffer.line_changed(0));
+        assert!(buffer.line_changed(1));
         remove_dir(dir);
     }
 

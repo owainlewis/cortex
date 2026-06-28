@@ -2,9 +2,13 @@
 
 *A macOS-only, Emacs-flavored, terminal-native code editor in Rust.*
 
-**Status:** Ready for v0.1 implementation planning.
+**Status:** Living product and design spec.
 **Audience:** the author (solo build), and any future contributor.
 **One-line pitch:** The best fast lightweight code editor in the world for a macOS terminal workflow: Emacs power without Emacs bloat, with an AI agent running as a real terminal pane when the workflow needs it.
+
+**Release note boundary:** This document is not a changelog and is not proof that a feature shipped.
+Use it for product intent, design direction, and scope decisions.
+For release notes, treat merged PRs, direct commits, and linked issues as the source of shipped behavior.
 
 ---
 
@@ -413,4 +417,4 @@ Net: genuinely daily-drivable in **roughly a month** of focused work. The termin
 
 ---
 
-*End of spec v0.3.*
+*End of living product spec.*

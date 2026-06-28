@@ -1,7 +1,7 @@
 use crate::{
     buffer::Buffer,
-    highlighter::{HighlightKind, HighlightSpan, SyntaxHighlighter},
-    picker::{DirectoryEntry, DirectoryEntryKind, DirectoryPicker},
+    highlighter::{language_label_for_path, HighlightKind, HighlightSpan, SyntaxHighlighter},
+    picker::{DirectoryEntryKind, DirectoryPicker, DirectoryPickerRow},
     view::View,
 };
 use crossterm::{
@@ -22,6 +22,7 @@ const TAB_WIDTH: usize = 4;
 const EMPTY_SPACE_MARKER: &str = " ~";
 const MODELINE_BRAND: &str = "CORTEX";
 const MIN_GUTTER_TOTAL_WIDTH: usize = 12;
+const MAX_PICKER_INDENT_DEPTH: usize = 4;
 const COMMAND_LINE_HINT: &str =
     "/help  /commands  /open <path>  /search <text>  /next  /save  /undo  /redo  /quit  /quit!";
 
@@ -257,7 +258,6 @@ pub struct Renderer {
 struct Frame {
     lines: Vec<ScreenLine>,
     modeline: String,
-    keycast: Option<String>,
     cursor: CursorPosition,
     modeline_style: ModelineStyle,
 }
@@ -430,10 +430,6 @@ impl Renderer {
             render_editor_line(writer, row as u16, line, size.cols as usize)?;
         }
 
-        if let Some(keycast) = frame.keycast.as_deref() {
-            render_keycast(writer, keycast, size.cols as usize)?;
-        }
-
         let modeline_row = size.rows.saturating_sub(1);
         render_modeline(writer, modeline_row, &frame.modeline, frame.modeline_style)?;
         queue!(
@@ -591,9 +587,14 @@ fn build_frame_with_highlights(
         lines.push(screen_line);
     }
 
-    let modeline = command_line
+    let mut modeline = command_line
         .map(command_line_text)
         .unwrap_or_else(|| modeline_text(buffer, view, status_message));
+    if command_line.is_none() {
+        if let Some(keycast) = keycast {
+            modeline = modeline_with_keycast(&modeline, keycast);
+        }
+    }
     let cursor = command_line
         .map(|input| command_line_cursor(input, size))
         .unwrap_or_else(|| cursor_position(buffer, view, size, gutter_width));
@@ -610,7 +611,6 @@ fn build_frame_with_highlights(
     Frame {
         lines,
         modeline: fit_status_line(&modeline, width),
-        keycast: keycast.map(keycast_text),
         cursor,
         modeline_style,
     }
@@ -733,7 +733,7 @@ fn modeline_text(buffer: &Buffer, view: &View, status_message: Option<&str>) -> 
         column + 1
     );
 
-    if let Some(language) = file_language_label(buffer.path()) {
+    if let Some(language) = language_label_for_path(buffer.path()) {
         text.push_str(" | ");
         text.push_str(language);
         text.push(' ');
@@ -748,20 +748,10 @@ fn modeline_text(buffer: &Buffer, view: &View, status_message: Option<&str>) -> 
     text
 }
 
-fn file_language_label(path: &std::path::Path) -> Option<&'static str> {
-    match path.extension().and_then(|extension| extension.to_str()) {
-        Some("rs") => Some("RUST"),
-        Some("md") | Some("markdown") => Some("MARKDOWN"),
-        Some("toml") => Some("TOML"),
-        Some("json") => Some("JSON"),
-        Some("txt") => Some("TEXT"),
-        _ => None,
-    }
-}
-
 fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFrame {
     let width = size.cols as usize;
     let viewport_height = size.rows.saturating_sub(1) as usize;
+    let visible_rows = picker.visible_rows();
     let mut lines = Vec::with_capacity(viewport_height);
 
     if viewport_height > 0 {
@@ -788,17 +778,16 @@ fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFra
             .saturating_sub(entry_rows)
     };
 
-    if picker.entries().is_empty() && lines.len() < viewport_height {
+    if visible_rows.is_empty() && lines.len() < viewport_height {
         lines.push(PickerLine {
             text: fit_line_cells("  No visible files", width),
             selected: false,
         });
     } else {
-        for entry in picker.entries().iter().skip(first_entry).take(entry_rows) {
-            let selected = picker.selected_entry() == Some(entry);
+        for row in visible_rows.iter().skip(first_entry).take(entry_rows) {
             lines.push(PickerLine {
-                text: fit_line_cells(&picker_entry_text(entry, selected), width),
-                selected,
+                text: fit_line_cells(&picker_entry_text(row), width),
+                selected: row.is_selected(),
             });
         }
     }
@@ -810,7 +799,7 @@ fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFra
         });
     }
 
-    let cursor_row = if picker.entries().is_empty() {
+    let cursor_row = if visible_rows.is_empty() {
         0
     } else {
         2 + picker.selected().saturating_sub(first_entry)
@@ -883,27 +872,6 @@ fn render_editor_line<W: Write>(
     queue!(writer, SetAttribute(Attribute::Reset), ResetColor)
 }
 
-fn render_keycast<W: Write>(writer: &mut W, keycast: &str, width: usize) -> io::Result<()> {
-    if width < 18 {
-        return Ok(());
-    }
-
-    let text = fit_line_cells(keycast, width);
-    let text_width = measure_cells(&text, width);
-    let col = width.saturating_sub(text_width).saturating_sub(1) as u16;
-
-    queue!(
-        writer,
-        cursor::MoveTo(col, 0),
-        SetAttribute(Attribute::Bold),
-        SetForegroundColor(THEME.modeline_brand_fg),
-        SetBackgroundColor(THEME.modeline_brand_bg),
-        Print(text),
-        SetAttribute(Attribute::Reset),
-        ResetColor
-    )
-}
-
 fn render_picker_line<W: Write>(
     writer: &mut W,
     row: u16,
@@ -971,6 +939,16 @@ fn keycast_text(keycast: &str) -> String {
     format!(" KEYS {keycast} ")
 }
 
+fn modeline_with_keycast(modeline: &str, keycast: &str) -> String {
+    let brand = format!(" {MODELINE_BRAND} ");
+    let keycast = keycast_text(keycast);
+
+    modeline.strip_prefix(&brand).map_or_else(
+        || format!("{keycast}{modeline}"),
+        |rest| format!("{brand}{keycast}{rest}"),
+    )
+}
+
 fn modeline_colors(style: ModelineStyle) -> (Color, Color) {
     let foreground = match style {
         ModelineStyle::Clean | ModelineStyle::Info => THEME.modeline_fg,
@@ -1014,7 +992,7 @@ fn status_kind_for_message(message: &str) -> StatusKind {
 }
 
 fn picker_header_text(picker: &DirectoryPicker) -> String {
-    let count = picker.entries().len();
+    let count = picker.visible_len();
     let noun = if count == 1 { "item" } else { "items" };
     format!(
         " CORTEX FIND  {}  {count} {noun}",
@@ -1022,24 +1000,35 @@ fn picker_header_text(picker: &DirectoryPicker) -> String {
     )
 }
 
-fn picker_entry_text(entry: &DirectoryEntry, selected: bool) -> String {
-    let marker = if selected { ">" } else { " " };
-    let suffix = if entry.is_directory() { "/" } else { "" };
-    let kind = match entry.kind() {
+fn picker_entry_text(row: &DirectoryPickerRow) -> String {
+    let marker = if row.is_selected() { ">" } else { " " };
+    let indent = "  ".repeat(row.depth().min(MAX_PICKER_INDENT_DEPTH));
+    let suffix = if row.is_directory() { "/" } else { "" };
+    let branch = if row.is_directory() {
+        if row.is_expanded() {
+            "- "
+        } else {
+            "+ "
+        }
+    } else {
+        "  "
+    };
+    let kind = match row.kind() {
         DirectoryEntryKind::File => "FILE",
         DirectoryEntryKind::Directory => "DIR ",
         DirectoryEntryKind::Other => "ITEM",
     };
 
     format!(
-        "{marker} {:<42} {kind}",
-        format!("{}{suffix}", entry.name())
+        "{marker} {indent}{branch}{:<42} {kind}",
+        format!("{}{suffix}", row.name())
     )
 }
 
 fn picker_modeline_text(picker: &DirectoryPicker) -> String {
-    let mut text =
-        format!(" {MODELINE_BRAND}  PICKER  Enter open/browse  C-n/C-p move  Esc/C-x C-c quit ");
+    let mut text = format!(
+        " {MODELINE_BRAND}  PICKER  Enter open/expand  Left collapse  Backspace parent  Esc quit "
+    );
 
     if let Some(message) = picker
         .status_message()
@@ -1772,12 +1761,12 @@ mod tests {
 
         assert!(frame.lines[0].text.contains("CORTEX FIND"));
         assert!(frame.lines[0].text.contains("/tmp/project"));
-        assert!(frame.lines[2].text.contains("> src/"));
+        assert!(frame.lines[2].text.contains("> + src/"));
         assert!(frame.lines[2].text.contains("DIR"));
         assert!(frame.lines[2].selected);
         assert!(frame.lines[3].text.contains("main.rs"));
         assert!(frame.lines[3].text.contains("FILE"));
-        assert!(frame.modeline.contains("Enter open"));
+        assert!(frame.modeline.contains("Enter open/expand"));
         assert_eq!(frame.cursor, CursorPosition { col: 0, row: 2 });
     }
 
@@ -1799,7 +1788,7 @@ mod tests {
         let frame = build_picker_frame(&picker, TerminalSize { cols: 80, rows: 5 });
 
         assert!(frame.lines[2].text.contains("c.txt"));
-        assert!(frame.lines[3].text.contains("> d.txt"));
+        assert!(frame.lines[3].text.contains(">   d.txt"));
         assert!(frame.lines[3].selected);
         assert_eq!(frame.cursor, CursorPosition { col: 0, row: 3 });
     }

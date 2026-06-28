@@ -90,7 +90,7 @@ Saving can create the target file when its parent directory already exists.
 Saving does not create missing parent directories.
 Directories open a picker that lists non-hidden entries.
 The picker can open regular files.
-It does not descend into directories yet.
+The picker can expand and collapse directories.
 
 ## Current Scope
 
@@ -113,7 +113,14 @@ It includes a directory picker, a slash command line, visual theme and modeline 
 | Down or `C-n` | Move to next line |
 | `C-a` | Move to start of line |
 | `C-e` | Move to end of line |
+| `C-s` | Repeat the previous search |
+| `C-Space` | Set the mark |
+| `C-w` | Cut the active region |
+| `C-k` | Cut to the end of the line |
+| `C-y` | Yank the last cut text |
 | `C-/` or `C-_` | Undo the last edit |
+| `Command-z` | Undo the last edit |
+| `C-x C-f` | Open the file picker when the current buffer is clean |
 | `C-x C-s` | Save the file |
 | `C-x C-c` | Quit |
 | `/` | Open the slash command line |
@@ -127,6 +134,8 @@ Press `n` or Escape to cancel.
 | Command | Action |
 | --- | --- |
 | `/save` | Save the current file |
+| `/search <text>` | Search forward for text |
+| `/next` | Repeat the previous search |
 | `/undo` | Undo the last edit |
 | `/redo` | Redo the last undone edit |
 | `/quit` | Quit, using the same dirty-buffer prompt as `C-x C-c` |
@@ -144,13 +153,15 @@ Unknown slash commands leave the editor open and show an error message.
 | --- | --- |
 | Down or `C-n` | Move to next entry |
 | Up or `C-p` | Move to previous entry |
-| Enter | Open the selected regular file |
+| Enter | Open the selected regular file or expand the selected directory |
+| Left | Collapse the selected directory or move to its parent row |
+| Backspace | Browse to the parent directory |
 | Escape | Quit the picker |
 | `C-x C-c` | Quit the picker |
 
 ## Syntax Highlighting
 
-Cortex highlights Rust, Markdown, JSON, TOML, Python, JavaScript, TypeScript, and Ruby files.
+Cortex highlights Rust, Markdown, JSON, TOML, Python, JavaScript, JSX, TypeScript, TSX, and Ruby files.
 Other file types render as plain text.
 
 ## Releases And Nightlies
@@ -167,9 +178,9 @@ See [docs/release.md](docs/release.md) for the release checklist.
 
 Redo is available from the slash command line, but does not have a dedicated keybinding yet.
 Cortex has one active buffer at a time.
-The directory picker opens regular files only and does not navigate into directories.
+The directory picker can expand directories, but it is still a minimal picker.
 The slash command `/open <path>` opens files only, not directories.
-There are no splits, tabs, minibuffer, search, kill ring, config, plugins, LSP, AI integration, or embedded terminal pane yet.
+There are no splits, tabs, minibuffer, config, plugins, LSP, AI integration, or embedded terminal pane yet.
 Long lines are clipped to the terminal width instead of wrapped.
 The renderer uses a simple full-screen redraw rather than diffed rendering.
 External file changes are not watched or reloaded.
