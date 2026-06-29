@@ -17,11 +17,12 @@ pub const USAGE: &str = "\
 Cortex
 
 Usage:
-  cortex <path>
+  cortex [path]
   cortex --version
   cortex --check-update
 
 Opens a file or directory in the Cortex terminal editor.
+Defaults to the current directory when no path is given.
 ";
 
 pub fn parse_args<I, S>(args: I) -> Result<ParseResult, String>
@@ -41,7 +42,9 @@ where
         [path] => Ok(ParseResult::Run(Args {
             path: PathBuf::from(path),
         })),
-        [] => Err(format!("missing file path\n\n{USAGE}")),
+        [] => Ok(ParseResult::Run(Args {
+            path: PathBuf::from("."),
+        })),
         _ => Err(format!("expected exactly one file path\n\n{USAGE}")),
     }
 }
@@ -79,9 +82,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_file_path() {
-        let error = parse_args(std::iter::empty::<&str>()).unwrap_err();
-        assert!(error.contains("missing file path"));
+    fn defaults_to_current_directory() {
+        assert_eq!(
+            parse_args(std::iter::empty::<&str>()),
+            Ok(ParseResult::Run(Args {
+                path: PathBuf::from("."),
+            }))
+        );
     }
 
     #[test]

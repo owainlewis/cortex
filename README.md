@@ -59,7 +59,7 @@ It only reports release status.
 
 ## Developer Run
 
-Install Rust, then run Cortex with exactly one path.
+Install Rust, then run Cortex.
 Pass a file path to open that file directly:
 
 ```sh
@@ -70,6 +70,12 @@ Pass a directory path to open the directory picker:
 
 ```sh
 cargo run -- .
+```
+
+Run Cortex with no path to open the current directory in the picker:
+
+```sh
+cargo run
 ```
 
 For a temporary smoke test file:
@@ -106,7 +112,7 @@ It includes a directory picker, a slash command line, visual theme and modeline 
 | Printable character | Insert character |
 | Enter | Insert newline |
 | Backspace | Delete backward |
-| Delete | Delete forward |
+| Delete or `C-d` | Delete forward |
 | Left or `C-b` | Move backward one character |
 | Right or `C-f` | Move forward one character |
 | Up or `C-p` | Move to previous line |
@@ -119,6 +125,7 @@ It includes a directory picker, a slash command line, visual theme and modeline 
 | `C-k` | Cut to the end of the line |
 | `C-y` | Yank the last cut text |
 | `C-/` or `C-_` | Undo the last edit |
+| `C-x u` | Undo the last edit |
 | `Command-z` | Undo the last edit |
 | `C-x C-f` | Open the file picker when the current buffer is clean |
 | `C-x C-s` | Save the file |
@@ -142,6 +149,7 @@ Press `n` or Escape to cancel.
 | `/quit!` | Quit without saving |
 | `/open <path>` | Open a file path when the current buffer is clean |
 | `/help` | Show the available slash commands |
+| `/commands` | Show the available slash commands (alias for `/help`) |
 
 Escape cancels the command line.
 Unknown slash commands leave the editor open and show an error message.
