@@ -21,7 +21,7 @@ Global instructions still apply unless this file is more specific.
 - Use `ropey` for text storage unless the PRD changes.
 - Keep point and scroll in view/editor state, not only in the buffer.
 - Keep rendering behind a renderer boundary so diffed rendering can replace simple redraw later.
-- Do not add LSP, plugins, scripting, config, splits, tabs, tree-sitter, or AI integration before the roadmap asks for them.
+- Do not add LSP, plugins, scripting, config, splits, tabs, or AI integration before the roadmap asks for them.
 - Add focused tests for pure editor logic whenever behavior changes.
 
 ## Workflow
