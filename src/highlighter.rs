@@ -50,6 +50,8 @@ const JAVASCRIPT_EXTENSIONS: &[&str] = &["js", "jsx", "mjs", "cjs"];
 const TYPESCRIPT_EXTENSIONS: &[&str] = &["ts", "mts", "cts"];
 const TYPESCRIPT_TSX_EXTENSIONS: &[&str] = &["tsx"];
 const RUBY_EXTENSIONS: &[&str] = &["rb", "rake", "gemspec"];
+const OCAML_EXTENSIONS: &[&str] = &["ml"];
+const OCAML_INTERFACE_EXTENSIONS: &[&str] = &["mli"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HighlightKind {
@@ -113,6 +115,8 @@ impl SyntaxHighlighter {
             typescript_definition(),
             typescript_tsx_definition(),
             ruby_definition(),
+            ocaml_definition(),
+            ocaml_interface_definition(),
         ]
         .into_iter()
         .flatten()
@@ -269,6 +273,8 @@ pub fn language_label_for_path(path: &Path) -> Option<&'static str> {
         ("TYPESCRIPT", TYPESCRIPT_EXTENSIONS),
         ("TYPESCRIPT", TYPESCRIPT_TSX_EXTENSIONS),
         ("RUBY", RUBY_EXTENSIONS),
+        ("OCAML", OCAML_EXTENSIONS),
+        ("OCAML", OCAML_INTERFACE_EXTENSIONS),
     ]
     .into_iter()
     .find(|(_, extensions)| extensions.contains(&extension.as_str()))
@@ -377,6 +383,30 @@ fn ruby_definition() -> Option<LanguageDefinition> {
         tree_sitter_ruby::LANGUAGE.into(),
         "ruby",
         tree_sitter_ruby::HIGHLIGHTS_QUERY,
+        "",
+    )
+}
+
+fn ocaml_definition() -> Option<LanguageDefinition> {
+    language_definition(
+        OCAML_EXTENSIONS,
+        tree_sitter_ocaml::LANGUAGE_OCAML.into(),
+        "ocaml",
+        tree_sitter_ocaml::HIGHLIGHTS_QUERY,
+        "",
+    )
+}
+
+fn ocaml_interface_definition() -> Option<LanguageDefinition> {
+    // The shared OCaml highlights query references a `shebang` node that exists
+    // only in the implementation grammar, so strip it for interface (`.mli`) files.
+    let highlights = tree_sitter_ocaml::HIGHLIGHTS_QUERY.replace("(shebang)", "");
+
+    language_definition(
+        OCAML_INTERFACE_EXTENSIONS,
+        tree_sitter_ocaml::LANGUAGE_OCAML_INTERFACE.into(),
+        "ocaml_interface",
+        &highlights,
         "",
     )
 }
@@ -559,6 +589,8 @@ mod tests {
             language_label_for_path(Path::new("task.rake")),
             Some("RUBY")
         );
+        assert_eq!(language_label_for_path(Path::new("lib.ml")), Some("OCAML"));
+        assert_eq!(language_label_for_path(Path::new("lib.mli")), Some("OCAML"));
         assert_eq!(language_label_for_path(Path::new("notes.txt")), None);
     }
 
@@ -608,6 +640,17 @@ mod tests {
                     "  \"hi #{name}\"".to_string(),
                     "end".to_string(),
                 ],
+            ),
+            (
+                Path::new("lib.ml"),
+                vec![
+                    "let greet name =".to_string(),
+                    "  Printf.sprintf \"hi %s\" name".to_string(),
+                ],
+            ),
+            (
+                Path::new("lib.mli"),
+                vec!["val greet : string -> string".to_string()],
             ),
         ];
 
