@@ -169,7 +169,7 @@ Unknown slash commands leave the editor open and show an error message.
 
 ## Syntax Highlighting
 
-Cortex highlights Rust, Markdown, JSON, TOML, Python, JavaScript, JSX, TypeScript, TSX, and Ruby files.
+Cortex highlights Rust, Markdown, JSON, TOML, Python, JavaScript, JSX, TypeScript, TSX, Ruby, and OCaml files.
 Other file types render as plain text.
 
 ## Releases And Nightlies
