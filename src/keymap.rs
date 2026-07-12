@@ -63,6 +63,7 @@ fn resolve_prefixed(prefix: Prefix, key: Key) -> KeymapResult {
         (Prefix::CtrlX, Key::Ctrl('s')) => KeymapResult::Command(Command::SaveBuffer),
         (Prefix::CtrlX, Key::Ctrl('c')) => KeymapResult::Command(Command::Quit),
         (Prefix::CtrlX, Key::Ctrl('f')) => KeymapResult::Command(Command::OpenFile),
+        (Prefix::CtrlX, Key::Char('b')) => KeymapResult::Command(Command::SwitchBuffer),
         (Prefix::CtrlX, Key::Char('u')) => KeymapResult::Command(Command::Undo),
         _ => KeymapResult::Unbound,
     }
@@ -197,6 +198,12 @@ mod tests {
         assert_eq!(
             keymap.resolve(Key::Ctrl('f')),
             KeymapResult::Command(Command::OpenFile)
+        );
+
+        assert_eq!(keymap.resolve(Key::Ctrl('x')), KeymapResult::PendingPrefix);
+        assert_eq!(
+            keymap.resolve(Key::Char('b')),
+            KeymapResult::Command(Command::SwitchBuffer)
         );
 
         assert_eq!(keymap.resolve(Key::Ctrl('x')), KeymapResult::PendingPrefix);

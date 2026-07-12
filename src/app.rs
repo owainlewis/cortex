@@ -1,6 +1,7 @@
 use crate::{
     buffer::Buffer,
     commands,
+    editor::{Editor, OpenResult, SwitchError},
     input::key_from_event,
     keymap::{Keymap, KeymapResult},
     picker::{DirectoryPicker, DirectoryPickerAction},
@@ -18,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const DIRTY_QUIT_PROMPT: &str = "Buffer modified; quit without saving? (y or n)";
+const DIRTY_QUIT_PROMPT: &str = "Buffers modified; quit without saving? (y or n)";
 const COMMAND_HELP: &str =
     "Commands: /help, /commands, /open <path>, /search <text>, /next, /save, /undo, /redo, /quit, /quit!";
 
@@ -28,6 +29,7 @@ struct AppState {
     status_kind: Option<StatusKind>,
     dirty_quit_prompt: bool,
     command_line: Option<String>,
+    prompt_kind: Option<PromptKind>,
     keycast: Option<String>,
     last_search: Option<String>,
     mark: Option<usize>,
@@ -35,9 +37,26 @@ struct AppState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptKind {
+    Command,
+    FindFile,
+    SwitchBuffer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum AppAction {
     Continue,
-    OpenFilePicker,
+    FindFile(PathBuf),
+    OpenFile(PathBuf),
+    SwitchBuffer(String),
+    Quit,
+    ForceQuit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AppControl {
+    Continue,
+    BrowseDirectory(PathBuf),
     Quit,
 }
 
@@ -71,56 +90,142 @@ fn is_directory_path(path: &Path) -> io::Result<bool> {
     }
 }
 
-fn run_editor<W: io::Write>(
-    terminal: &mut TerminalSession<W>,
-    mut buffer: Buffer,
-) -> io::Result<()> {
-    let mut view = View::new();
+fn run_editor<W: io::Write>(terminal: &mut TerminalSession<W>, buffer: Buffer) -> io::Result<()> {
+    let mut editor = Editor::new(buffer)?;
     let mut keymap = Keymap::new();
     let renderer = Renderer::new();
     let mut app_state = AppState::default();
 
-    render(
-        &renderer,
-        terminal.writer_mut(),
-        &buffer,
-        &mut view,
-        &app_state,
-    )?;
+    render_editor(&renderer, terminal.writer_mut(), &mut editor, &app_state)?;
 
     loop {
         match event::read()? {
             Event::Key(key) => {
                 if key.kind == KeyEventKind::Press {
                     let key = key_from_event(key);
-                    match app_state.handle_key(key, &mut keymap, &mut buffer, &mut view) {
-                        AppAction::Continue => {}
-                        AppAction::OpenFilePicker => {
-                            open_file_from_picker(terminal, &mut buffer, &mut view, &mut app_state)?
-                        }
-                        AppAction::Quit => break,
+                    let action = {
+                        let (buffer, view) = editor.active_mut();
+                        app_state.handle_key(key, &mut keymap, buffer, view)
+                    };
+                    match apply_app_action(&mut editor, &mut app_state, action) {
+                        AppControl::Continue => {}
+                        AppControl::BrowseDirectory(path) => browse_directory_in_editor(
+                            terminal,
+                            &mut editor,
+                            &path,
+                            &mut app_state,
+                        )?,
+                        AppControl::Quit => break,
                     }
-                    render(
-                        &renderer,
-                        terminal.writer_mut(),
-                        &buffer,
-                        &mut view,
-                        &app_state,
-                    )?;
+                    render_editor(&renderer, terminal.writer_mut(), &mut editor, &app_state)?;
                 }
             }
-            Event::Resize(_, _) => render(
-                &renderer,
-                terminal.writer_mut(),
-                &buffer,
-                &mut view,
-                &app_state,
-            )?,
+            Event::Resize(_, _) => {
+                render_editor(&renderer, terminal.writer_mut(), &mut editor, &app_state)?
+            }
             _ => {}
         }
     }
 
     Ok(())
+}
+
+fn apply_app_action(
+    editor: &mut Editor,
+    app_state: &mut AppState,
+    action: AppAction,
+) -> AppControl {
+    match action {
+        AppAction::Continue => AppControl::Continue,
+        AppAction::FindFile(path) => match is_directory_path(&path) {
+            Ok(true) => AppControl::BrowseDirectory(path),
+            Ok(false) => {
+                open_file_in_editor(editor, &path, app_state);
+                AppControl::Continue
+            }
+            Err(error) => {
+                app_state.set_status(format!("Open failed: {error}"), StatusKind::Error);
+                AppControl::Continue
+            }
+        },
+        AppAction::OpenFile(path) => {
+            open_file_in_editor(editor, &path, app_state);
+            AppControl::Continue
+        }
+        AppAction::SwitchBuffer(name) => {
+            switch_buffer(editor, &name, app_state);
+            AppControl::Continue
+        }
+        AppAction::Quit if editor.any_dirty() => {
+            app_state.request_dirty_quit();
+            AppControl::Continue
+        }
+        AppAction::Quit | AppAction::ForceQuit => AppControl::Quit,
+    }
+}
+
+fn browse_directory_in_editor<W: io::Write>(
+    terminal: &mut TerminalSession<W>,
+    editor: &mut Editor,
+    path: &Path,
+    app_state: &mut AppState,
+) -> io::Result<()> {
+    let picker = match DirectoryPicker::read(path) {
+        Ok(picker) => picker,
+        Err(error) => {
+            app_state.set_status(format!("Open failed: {error}"), StatusKind::Error);
+            return Ok(());
+        }
+    };
+
+    let Some(path) = run_directory_picker(terminal, picker)? else {
+        app_state.set_status("Open canceled", StatusKind::Info);
+        return Ok(());
+    };
+
+    open_file_in_editor(editor, &path, app_state);
+    Ok(())
+}
+
+fn open_file_in_editor(editor: &mut Editor, path: &Path, app_state: &mut AppState) {
+    match is_directory_path(path) {
+        Ok(true) => app_state.set_status(
+            format!("Open failed: {} is a directory", path.display()),
+            StatusKind::Error,
+        ),
+        Ok(false) => match editor.open(path) {
+            Ok(OpenResult::Opened) => {
+                app_state.mark = None;
+                app_state.set_status(format!("Opened {}", path.display()), StatusKind::Success);
+            }
+            Ok(OpenResult::AlreadyOpen) => {
+                app_state.mark = None;
+                app_state.set_status(
+                    format!("Switched to {}", path.display()),
+                    StatusKind::Success,
+                );
+            }
+            Err(error) => app_state.set_status(format!("Open failed: {error}"), StatusKind::Error),
+        },
+        Err(error) => app_state.set_status(format!("Open failed: {error}"), StatusKind::Error),
+    }
+}
+
+fn switch_buffer(editor: &mut Editor, name: &str, app_state: &mut AppState) {
+    match editor.switch_to(name) {
+        Ok(()) => {
+            app_state.mark = None;
+            let path = editor.active().0.path().display().to_string();
+            app_state.set_status(format!("Switched to {path}"), StatusKind::Success);
+        }
+        Err(SwitchError::Ambiguous) => {
+            app_state.set_status(format!("Ambiguous buffer name: {name}"), StatusKind::Error)
+        }
+        Err(SwitchError::NotFound) => app_state.set_status(
+            format!("No open buffer named {name}. Open: {}", editor.names()),
+            StatusKind::Error,
+        ),
+    }
 }
 
 fn run_directory_picker<W: io::Write>(
@@ -163,49 +268,6 @@ fn run_directory_picker<W: io::Write>(
     }
 }
 
-fn open_file_from_picker<W: io::Write>(
-    terminal: &mut TerminalSession<W>,
-    buffer: &mut Buffer,
-    view: &mut View,
-    app_state: &mut AppState,
-) -> io::Result<()> {
-    let directory = picker_directory(buffer.path());
-    let picker = match DirectoryPicker::read(&directory) {
-        Ok(picker) => picker,
-        Err(error) => {
-            app_state.set_status(format!("Open failed: {error}"), StatusKind::Error);
-            return Ok(());
-        }
-    };
-
-    let Some(path) = run_directory_picker(terminal, picker)? else {
-        app_state.set_status("Open canceled", StatusKind::Info);
-        return Ok(());
-    };
-
-    match Buffer::open(&path) {
-        Ok(opened) => {
-            *buffer = opened;
-            *view = View::new();
-            app_state.mark = None;
-            app_state.set_status(format!("Opened {}", path.display()), StatusKind::Success);
-        }
-        Err(error) => {
-            app_state.set_status(format!("Open failed: {error}"), StatusKind::Error);
-        }
-    }
-
-    Ok(())
-}
-
-fn picker_directory(file_path: &Path) -> PathBuf {
-    file_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf()
-}
-
 impl AppState {
     fn handle_key(
         &mut self,
@@ -226,6 +288,7 @@ impl AppState {
 
         if key == crate::input::Key::Char('/') && !keymap.has_pending_prefix() {
             self.command_line = Some("/".to_string());
+            self.prompt_kind = Some(PromptKind::Command);
             self.clear_status();
             return AppAction::Continue;
         }
@@ -238,6 +301,8 @@ impl AppState {
             KeymapResult::Command(commands::Command::RepeatSearch) => {
                 self.repeat_search(buffer, view)
             }
+            KeymapResult::Command(commands::Command::OpenFile) => self.start_find_file(),
+            KeymapResult::Command(commands::Command::SwitchBuffer) => self.start_switch_buffer(),
             KeymapResult::Command(command) => self.dispatch_command(command, buffer, view),
             KeymapResult::PendingPrefix => {
                 self.set_status("C-x", StatusKind::Prefix);
@@ -248,6 +313,20 @@ impl AppState {
                 AppAction::Continue
             }
         }
+    }
+
+    fn start_find_file(&mut self) -> AppAction {
+        self.command_line = Some(String::new());
+        self.prompt_kind = Some(PromptKind::FindFile);
+        self.clear_status();
+        AppAction::Continue
+    }
+
+    fn start_switch_buffer(&mut self) -> AppAction {
+        self.command_line = Some(String::new());
+        self.prompt_kind = Some(PromptKind::SwitchBuffer);
+        self.clear_status();
+        AppAction::Continue
     }
 
     fn active_region(&self, buffer: &Buffer, view: &View) -> Option<Range<usize>> {
@@ -334,15 +413,51 @@ impl AppState {
             }
             crate::input::Key::Enter => {
                 let input = self.command_line.take().unwrap_or_default();
-                self.run_command_line(&input, buffer, view)
+                match self.prompt_kind.take().unwrap_or(PromptKind::Command) {
+                    PromptKind::Command => self.run_command_line(&input, buffer, view),
+                    PromptKind::FindFile => self.submit_find_file(&input, buffer.path()),
+                    PromptKind::SwitchBuffer => self.submit_switch_buffer(&input),
+                }
             }
             crate::input::Key::Escape => {
                 self.command_line = None;
-                self.set_status("Command canceled", StatusKind::Info);
+                let message = match self.prompt_kind.take().unwrap_or(PromptKind::Command) {
+                    PromptKind::Command => "Command canceled",
+                    PromptKind::FindFile => "Find file canceled",
+                    PromptKind::SwitchBuffer => "Switch buffer canceled",
+                };
+                self.set_status(message, StatusKind::Info);
                 AppAction::Continue
             }
             _ => AppAction::Continue,
         }
+    }
+
+    fn submit_find_file(&mut self, input: &str, active_path: &Path) -> AppAction {
+        if input.trim().is_empty() {
+            self.set_status("Find file requires a path", StatusKind::Error);
+            return AppAction::Continue;
+        }
+
+        let path = PathBuf::from(input);
+        if path.is_absolute() {
+            AppAction::FindFile(path)
+        } else {
+            let directory = active_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            AppAction::FindFile(directory.join(path))
+        }
+    }
+
+    fn submit_switch_buffer(&mut self, input: &str) -> AppAction {
+        if input.trim().is_empty() {
+            self.set_status("Switch buffer requires a name", StatusKind::Error);
+            return AppAction::Continue;
+        }
+
+        AppAction::SwitchBuffer(input.to_string())
     }
 
     fn run_command_line(&mut self, input: &str, buffer: &mut Buffer, view: &mut View) -> AppAction {
@@ -362,13 +477,13 @@ impl AppState {
             "undo" => self.dispatch_command(commands::Command::Undo, buffer, view),
             "redo" => self.dispatch_command(commands::Command::Redo, buffer, view),
             "quit" => self.dispatch_command(commands::Command::Quit, buffer, view),
-            "quit!" => AppAction::Quit,
+            "quit!" => AppAction::ForceQuit,
             command if command == "search" || command.starts_with("search ") => {
                 self.run_search_command(command, buffer, view)
             }
             "next" => self.repeat_search(buffer, view),
             command if command == "open" || command.starts_with("open ") => {
-                self.run_open_command(command, buffer, view)
+                self.run_open_command(command)
             }
             command => {
                 self.set_status(format!("Unknown command: /{command}"), StatusKind::Error);
@@ -422,12 +537,7 @@ impl AppState {
         AppAction::Continue
     }
 
-    fn run_open_command(
-        &mut self,
-        command: &str,
-        buffer: &mut Buffer,
-        view: &mut View,
-    ) -> AppAction {
+    fn run_open_command(&mut self, command: &str) -> AppAction {
         let path_text = command
             .strip_prefix("open")
             .map(str::trim)
@@ -435,14 +545,6 @@ impl AppState {
 
         if path_text.is_empty() {
             self.set_status("Usage: /open <path>", StatusKind::Error);
-            return AppAction::Continue;
-        }
-
-        if buffer.is_dirty() {
-            self.set_status(
-                "Open canceled: current buffer has unsaved changes",
-                StatusKind::Prompt,
-            );
             return AppAction::Continue;
         }
 
@@ -455,19 +557,7 @@ impl AppState {
                 );
                 AppAction::Continue
             }
-            Ok(false) => match Buffer::open(&path) {
-                Ok(opened) => {
-                    *buffer = opened;
-                    *view = View::new();
-                    self.mark = None;
-                    self.set_status(format!("Opened {}", path.display()), StatusKind::Success);
-                    AppAction::Continue
-                }
-                Err(error) => {
-                    self.set_status(format!("Open failed: {error}"), StatusKind::Error);
-                    AppAction::Continue
-                }
-            },
+            Ok(false) => AppAction::OpenFile(path),
             Err(error) => {
                 self.set_status(format!("Open failed: {error}"), StatusKind::Error);
                 AppAction::Continue
@@ -477,7 +567,7 @@ impl AppState {
 
     fn handle_dirty_quit_key(&mut self, key: crate::input::Key) -> AppAction {
         match key {
-            crate::input::Key::Char('y') => AppAction::Quit,
+            crate::input::Key::Char('y') => AppAction::ForceQuit,
             crate::input::Key::Char('n') | crate::input::Key::Escape => {
                 self.dirty_quit_prompt = false;
                 self.set_status("Quit canceled", StatusKind::Info);
@@ -488,6 +578,11 @@ impl AppState {
                 AppAction::Continue
             }
         }
+    }
+
+    fn request_dirty_quit(&mut self) {
+        self.dirty_quit_prompt = true;
+        self.set_status(DIRTY_QUIT_PROMPT, StatusKind::Prompt);
     }
 
     fn dispatch_command(
@@ -517,17 +612,6 @@ impl AppState {
             return AppAction::Continue;
         }
 
-        if outcome.open_file_picker {
-            self.clear_status();
-            return AppAction::OpenFilePicker;
-        }
-
-        if outcome.open_file_blocked {
-            self.status_message = outcome.status_message;
-            self.status_kind = Some(StatusKind::Prompt);
-            return AppAction::Continue;
-        }
-
         self.status_kind = outcome.status_message.as_ref().map(|_| {
             if outcome.save_failed {
                 StatusKind::Error
@@ -548,6 +632,25 @@ impl AppState {
         self.status_message = None;
         self.status_kind = None;
     }
+
+    fn prompt_text(&self) -> Option<String> {
+        let input = self.command_line.as_ref()?;
+        Some(match self.prompt_kind.unwrap_or(PromptKind::Command) {
+            PromptKind::Command => input.clone(),
+            PromptKind::FindFile => format!("Find file: {input}"),
+            PromptKind::SwitchBuffer => format!("Switch buffer: {input}"),
+        })
+    }
+}
+
+fn render_editor<W: io::Write>(
+    renderer: &Renderer,
+    writer: &mut W,
+    editor: &mut Editor,
+    app_state: &AppState,
+) -> io::Result<()> {
+    let (buffer, view) = editor.active_mut();
+    render(renderer, writer, buffer, view, app_state)
 }
 
 fn render<W: io::Write>(
@@ -559,6 +662,7 @@ fn render<W: io::Write>(
 ) -> io::Result<()> {
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
     let size = TerminalSize { cols, rows };
+    let prompt_text = app_state.prompt_text();
     view.ensure_point_visible(buffer, renderer.viewport_height(size));
     renderer.render(
         writer,
@@ -568,7 +672,7 @@ fn render<W: io::Write>(
         app_state.status_message.as_deref(),
         app_state.status_kind,
         app_state.active_region(buffer, view),
-        app_state.command_line.as_deref(),
+        prompt_text.as_deref(),
         app_state.keycast.as_deref(),
     )
 }
@@ -630,11 +734,16 @@ fn command_clears_mark(command: commands::Command) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{picker_directory, AppAction, AppState, COMMAND_HELP, DIRTY_QUIT_PROMPT};
-    use crate::{buffer::Buffer, input::Key, keymap::Keymap, renderer::StatusKind, view::View};
+    use super::{
+        apply_app_action, AppAction, AppControl, AppState, COMMAND_HELP, DIRTY_QUIT_PROMPT,
+    };
+    use crate::{
+        buffer::Buffer, editor::Editor, input::Key, keymap::Keymap, renderer::StatusKind,
+        view::View,
+    };
     use std::{
         fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::atomic::{AtomicUsize, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -732,7 +841,7 @@ mod tests {
         start_dirty_quit_prompt(&mut app, &mut keymap, &mut buffer, &mut view);
         let action = app.handle_key(Key::Char('y'), &mut keymap, &mut buffer, &mut view);
 
-        assert_eq!(action, AppAction::Quit);
+        assert_eq!(action, AppAction::ForceQuit);
         assert!(buffer.is_dirty());
     }
 
@@ -949,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_x_ctrl_f_requests_file_picker_when_buffer_is_clean() {
+    fn ctrl_x_ctrl_f_opens_an_editable_find_file_prompt() {
         let mut app = AppState::default();
         let mut keymap = Keymap::new();
         let mut buffer = buffer_with_text("notes.txt", "old");
@@ -958,14 +1067,18 @@ mod tests {
         app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
         let action = app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
 
-        assert_eq!(action, AppAction::OpenFilePicker);
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(app.command_line.as_deref(), Some(""));
+        assert_eq!(app.prompt_text().as_deref(), Some("Find file: "));
         assert_eq!(app.status_message, None);
         assert_eq!(buffer.text(), "old");
         assert!(!buffer.is_dirty());
     }
 
     #[test]
-    fn ctrl_x_ctrl_f_keeps_dirty_buffer_in_place() {
+    fn find_file_accepts_a_missing_path_while_current_buffer_is_dirty() {
+        let dir = test_dir("find-file-missing");
+        let target = dir.join("new.txt");
         let mut app = AppState::default();
         let mut keymap = Keymap::new();
         let mut buffer = buffer_with_text("notes.txt", "old");
@@ -973,28 +1086,147 @@ mod tests {
 
         app.handle_key(Key::Char('x'), &mut keymap, &mut buffer, &mut view);
         app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
-        let action = app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        for ch in target.to_string_lossy().chars() {
+            app.handle_key(Key::Char(ch), &mut keymap, &mut buffer, &mut view);
+        }
+        let action = app.handle_key(Key::Enter, &mut keymap, &mut buffer, &mut view);
 
-        assert_eq!(action, AppAction::Continue);
+        assert_eq!(action, AppAction::FindFile(target));
         assert_eq!(buffer.text(), "xold");
         assert!(buffer.is_dirty());
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some("Open canceled: current buffer has unsaved changes")
-        );
-        assert_eq!(app.status_kind, Some(StatusKind::Prompt));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn file_picker_starts_from_current_file_parent_or_current_directory() {
+    fn escape_cancels_find_file_without_changing_the_buffer() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Char('x'), &mut keymap, &mut buffer, &mut view);
+        let action = app.handle_key(Key::Escape, &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(app.command_line, None);
+        assert_eq!(app.status_message.as_deref(), Some("Find file canceled"));
+        assert_eq!(buffer.text(), "old");
+        assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn find_file_preserves_whitespace_in_the_requested_path() {
+        let mut app = AppState::default();
+
         assert_eq!(
-            picker_directory(PathBuf::from("/tmp/current.txt").as_path()),
-            PathBuf::from("/tmp")
+            app.submit_find_file(
+                " leading and trailing.txt ",
+                Path::new("/tmp/project/current.txt")
+            ),
+            AppAction::FindFile(PathBuf::from("/tmp/project/ leading and trailing.txt "))
+        );
+    }
+
+    #[test]
+    fn find_file_resolves_relative_paths_from_the_active_buffer_directory() {
+        let mut app = AppState::default();
+
+        assert_eq!(
+            app.submit_find_file("sibling.rs", Path::new("/tmp/project/src/main.rs")),
+            AppAction::FindFile(PathBuf::from("/tmp/project/src/sibling.rs"))
         );
         assert_eq!(
-            picker_directory(PathBuf::from("current.txt").as_path()),
-            PathBuf::from(".")
+            app.submit_find_file("/tmp/absolute.rs", Path::new("/tmp/project/src/main.rs")),
+            AppAction::FindFile(PathBuf::from("/tmp/absolute.rs"))
         );
+    }
+
+    #[test]
+    fn find_file_routes_existing_directories_to_the_picker() {
+        let dir = test_dir("find-file-directory");
+        let first = dir.join("first.txt");
+        fs::write(&first, "first").unwrap();
+        let mut editor = Editor::new(Buffer::open(&first).unwrap()).unwrap();
+        let mut app = AppState::default();
+
+        assert_eq!(
+            apply_app_action(&mut editor, &mut app, AppAction::FindFile(dir.clone())),
+            AppControl::BrowseDirectory(dir.clone())
+        );
+        assert_eq!(editor.active().0.path(), first);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ctrl_x_b_opens_an_editable_switch_buffer_prompt() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Char('b'), &mut keymap, &mut buffer, &mut view);
+        for ch in "other.txt".chars() {
+            app.handle_key(Key::Char(ch), &mut keymap, &mut buffer, &mut view);
+        }
+        let action = app.handle_key(Key::Enter, &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::SwitchBuffer("other.txt".to_string()));
+        assert_eq!(buffer.text(), "old");
+        assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn opening_and_switching_buffers_keeps_unsaved_edits() {
+        let dir = test_dir("app-buffer-list");
+        let first = dir.join("first.txt");
+        let second = dir.join("second.txt");
+        fs::write(&first, "first").unwrap();
+        fs::write(&second, "second").unwrap();
+        let mut editor = Editor::new(Buffer::open(&first).unwrap()).unwrap();
+        editor.active_mut().0.insert(0, "dirty ");
+        let mut app = AppState::default();
+
+        assert_eq!(
+            apply_app_action(&mut editor, &mut app, AppAction::OpenFile(second.clone())),
+            AppControl::Continue
+        );
+        assert_eq!(editor.active().0.path(), second);
+        assert_eq!(
+            apply_app_action(
+                &mut editor,
+                &mut app,
+                AppAction::SwitchBuffer("first.txt".to_string())
+            ),
+            AppControl::Continue
+        );
+        assert_eq!(editor.active().0.text(), "dirty first");
+        assert!(editor.active().0.is_dirty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn quit_warns_when_only_an_inactive_buffer_is_dirty() {
+        let dir = test_dir("inactive-dirty-quit");
+        let first = dir.join("first.txt");
+        let second = dir.join("second.txt");
+        fs::write(&first, "first").unwrap();
+        fs::write(&second, "second").unwrap();
+        let mut editor = Editor::new(Buffer::open(&first).unwrap()).unwrap();
+        editor.active_mut().0.insert(0, "dirty ");
+        editor.open(&second).unwrap();
+        let mut app = AppState::default();
+
+        assert_eq!(
+            apply_app_action(&mut editor, &mut app, AppAction::Quit),
+            AppControl::Continue
+        );
+        assert!(app.dirty_quit_prompt);
+        assert_eq!(app.status_message.as_deref(), Some(DIRTY_QUIT_PROMPT));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1125,12 +1357,12 @@ mod tests {
         app.handle_key(Key::Char('x'), &mut keymap, &mut buffer, &mut view);
         let action = run_slash_command("/quit!", &mut app, &mut keymap, &mut buffer, &mut view);
 
-        assert_eq!(action, AppAction::Quit);
+        assert_eq!(action, AppAction::ForceQuit);
         assert!(buffer.is_dirty());
     }
 
     #[test]
-    fn slash_open_replaces_buffer_and_resets_view() {
+    fn slash_open_requests_another_buffer_without_replacing_the_current_one() {
         let dir = test_dir("slash-open");
         let current_path = dir.join("current.txt");
         let target_path = dir.join("target.txt");
@@ -1145,15 +1377,10 @@ mod tests {
         let command = format!("/open {}", target_path.display());
         let action = run_slash_command(&command, &mut app, &mut keymap, &mut buffer, &mut view);
 
-        assert_eq!(action, AppAction::Continue);
-        assert_eq!(buffer.path(), target_path.as_path());
-        assert_eq!(buffer.text(), "target");
-        assert_eq!(view.point(), 0);
-        let expected_status = format!("Opened {}", target_path.display());
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some(expected_status.as_str())
-        );
+        assert_eq!(action, AppAction::OpenFile(target_path));
+        assert_eq!(buffer.path(), current_path.as_path());
+        assert_eq!(buffer.text(), "current");
+        assert_eq!(view.point(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1182,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_open_keeps_dirty_buffer_in_place() {
+    fn slash_open_allows_another_buffer_when_current_buffer_is_dirty() {
         let dir = test_dir("slash-open-dirty");
         let current_path = dir.join("current.txt");
         let target_path = dir.join("target.txt");
@@ -1197,13 +1424,9 @@ mod tests {
         let command = format!("/open {}", target_path.display());
         let action = run_slash_command(&command, &mut app, &mut keymap, &mut buffer, &mut view);
 
-        assert_eq!(action, AppAction::Continue);
+        assert_eq!(action, AppAction::OpenFile(target_path));
         assert_eq!(buffer.path(), current_path.as_path());
         assert_eq!(buffer.text(), "xcurrent");
-        assert_eq!(
-            app.status_message.as_deref(),
-            Some("Open canceled: current buffer has unsaved changes")
-        );
         fs::remove_dir_all(dir).unwrap();
     }
 

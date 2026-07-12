@@ -19,6 +19,7 @@ pub enum Command {
     RepeatSearch,
     SaveBuffer,
     SetMark,
+    SwitchBuffer,
     Undo,
     Yank,
     Quit,
@@ -28,8 +29,6 @@ pub enum Command {
 pub struct CommandOutcome {
     pub quit: bool,
     pub dirty_quit_blocked: bool,
-    pub open_file_blocked: bool,
-    pub open_file_picker: bool,
     pub save_failed: bool,
     pub status_message: Option<String>,
 }
@@ -64,9 +63,12 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
             }
             CommandOutcome::default()
         }
-        Command::KillLine | Command::KillRegion | Command::SetMark | Command::Yank => {
-            CommandOutcome::default()
-        }
+        Command::KillLine
+        | Command::KillRegion
+        | Command::OpenFile
+        | Command::SetMark
+        | Command::SwitchBuffer
+        | Command::Yank => CommandOutcome::default(),
         Command::Undo => {
             if let Some(point) = buffer.undo() {
                 view.set_point(point, buffer);
@@ -104,15 +106,6 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
             view.move_to_line_end(buffer);
             CommandOutcome::default()
         }
-        Command::OpenFile if buffer.is_dirty() => CommandOutcome {
-            open_file_blocked: true,
-            status_message: Some("Open canceled: current buffer has unsaved changes".to_string()),
-            ..CommandOutcome::default()
-        },
-        Command::OpenFile => CommandOutcome {
-            open_file_picker: true,
-            ..CommandOutcome::default()
-        },
         Command::SaveBuffer => match buffer.save() {
             Ok(()) => CommandOutcome {
                 status_message: Some(format!("Wrote {}", buffer.path().display())),
@@ -311,26 +304,6 @@ mod tests {
         let outcome = dispatch(Command::Quit, &mut buffer, &mut view);
         assert!(!outcome.quit);
         assert!(outcome.dirty_quit_blocked);
-    }
-
-    #[test]
-    fn open_file_command_requests_picker_only_when_buffer_is_clean() {
-        let mut buffer = buffer_with_text("notes.txt", "");
-        let mut view = View::new();
-
-        let outcome = dispatch(Command::OpenFile, &mut buffer, &mut view);
-        assert!(outcome.open_file_picker);
-        assert!(!outcome.quit);
-
-        dispatch(Command::Insert('x'), &mut buffer, &mut view);
-        let outcome = dispatch(Command::OpenFile, &mut buffer, &mut view);
-
-        assert!(outcome.open_file_blocked);
-        assert!(!outcome.open_file_picker);
-        assert_eq!(
-            outcome.status_message.as_deref(),
-            Some("Open canceled: current buffer has unsaved changes")
-        );
     }
 
     fn buffer_with_text(file_name: &str, text: &str) -> Buffer {

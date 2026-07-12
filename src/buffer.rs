@@ -637,6 +637,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::reversed_empty_ranges)]
     fn text_range_returns_the_requested_chars() {
         let dir = test_dir("text-range");
         let path = dir.join("notes.txt");
