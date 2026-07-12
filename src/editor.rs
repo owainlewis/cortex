@@ -1,9 +1,12 @@
 use crate::{buffer::Buffer, view::View};
 use std::{
-    ffi::OsString,
+    ffi::{CString, OsStr, OsString},
     fs, io,
+    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
 };
+use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug)]
 struct BufferEntry {
@@ -149,8 +152,9 @@ fn path_identity(path: &Path) -> io::Result<PathBuf> {
     loop {
         match fs::canonicalize(ancestor) {
             Ok(mut canonical) => {
+                let case_sensitive = volume_is_case_sensitive(&canonical)?;
                 for component in missing_components.iter().rev() {
-                    canonical.push(component);
+                    canonical.push(normalize_missing_component(component, case_sensitive));
                 }
                 return Ok(canonical);
             }
@@ -166,6 +170,36 @@ fn path_identity(path: &Path) -> io::Result<PathBuf> {
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+fn volume_is_case_sensitive(path: &Path) -> io::Result<bool> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "file path contains an interior NUL byte",
+        )
+    })?;
+
+    // SAFETY: `path` is a valid NUL-terminated C string, and `_PC_CASE_SENSITIVE`
+    // is a read-only query supported by macOS for existing paths.
+    let result = unsafe { libc::pathconf(path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
+    match result {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
+fn normalize_missing_component(component: &OsStr, case_sensitive: bool) -> OsString {
+    if case_sensitive {
+        component.to_os_string()
+    } else {
+        component
+            .to_str()
+            .map(|text| text.nfd().case_fold().nfd().collect::<String>())
+            .map(OsString::from)
+            .unwrap_or_else(|| component.to_os_string())
     }
 }
 
@@ -247,6 +281,71 @@ mod tests {
         assert_eq!(editor.active().0.text(), "unsaved");
         assert_eq!(editor.active().0.path(), relative);
         assert!(!absolute.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_path_case_identity_follows_the_volume() {
+        let dir = test_dir("missing-case");
+        let first = dir.join("first.txt");
+        let upper = dir.join("Future.swift");
+        let lower = dir.join("future.swift");
+        fs::write(&first, "first").unwrap();
+        let case_sensitive = super::volume_is_case_sensitive(&dir).unwrap();
+
+        let mut editor = Editor::new(Buffer::open(&first).unwrap()).unwrap();
+        assert_eq!(editor.open(&upper).unwrap(), OpenResult::Opened);
+        editor.active_mut().0.insert(0, "unsaved");
+        let result = editor.open(&lower).unwrap();
+
+        if case_sensitive {
+            assert_eq!(result, OpenResult::Opened);
+            assert_eq!(editor.active().0.text(), "");
+        } else {
+            assert_eq!(result, OpenResult::AlreadyOpen);
+            assert_eq!(editor.active().0.text(), "unsaved");
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_component_case_folding_is_volume_aware() {
+        let component = std::ffi::OsStr::new("Future-é-Σ.swift");
+        assert_eq!(
+            super::normalize_missing_component(component, false),
+            "future-e\u{301}-σ.swift"
+        );
+        assert_eq!(
+            super::normalize_missing_component(component, true),
+            "Future-é-Σ.swift"
+        );
+    }
+
+    #[test]
+    fn missing_unicode_aliases_share_a_buffer_on_case_insensitive_volumes() {
+        let dir = test_dir("missing-unicode-case");
+        let first = dir.join("first.txt");
+        fs::write(&first, "first").unwrap();
+        let case_sensitive = super::volume_is_case_sensitive(&dir).unwrap();
+        let aliases = [
+            (dir.join("é.swift"), dir.join("e\u{301}.swift")),
+            (dir.join("Σ.swift"), dir.join("ς.swift")),
+        ];
+
+        let mut editor = Editor::new(Buffer::open(&first).unwrap()).unwrap();
+        for (left, right) in aliases {
+            assert_eq!(editor.open(&left).unwrap(), OpenResult::Opened);
+            editor.active_mut().0.insert(0, "unsaved");
+            let result = editor.open(&right).unwrap();
+
+            if case_sensitive {
+                assert_eq!(result, OpenResult::Opened);
+                assert_eq!(editor.active().0.text(), "");
+            } else {
+                assert_eq!(result, OpenResult::AlreadyOpen);
+                assert_eq!(editor.active().0.text(), "unsaved");
+            }
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 

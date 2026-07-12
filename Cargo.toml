@@ -8,6 +8,7 @@ description = "A fast, lightweight, macOS-only terminal code editor."
 
 [dependencies]
 crossterm = "0.27"
+libc = "0.2"
 ropey = "1.6"
 tree-sitter = "0.26.9"
 tree-sitter-highlight = "0.26.9"
@@ -20,3 +21,5 @@ tree-sitter-ruby = "0.23.1"
 tree-sitter-rust = "0.24.2"
 tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
+unicode-casefold = "0.2.0"
+unicode-normalization = "0.1.25"
