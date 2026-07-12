@@ -415,7 +415,7 @@ impl AppState {
                 let input = self.command_line.take().unwrap_or_default();
                 match self.prompt_kind.take().unwrap_or(PromptKind::Command) {
                     PromptKind::Command => self.run_command_line(&input, buffer, view),
-                    PromptKind::FindFile => self.submit_find_file(&input),
+                    PromptKind::FindFile => self.submit_find_file(&input, buffer.path()),
                     PromptKind::SwitchBuffer => self.submit_switch_buffer(&input),
                 }
             }
@@ -433,13 +433,22 @@ impl AppState {
         }
     }
 
-    fn submit_find_file(&mut self, input: &str) -> AppAction {
+    fn submit_find_file(&mut self, input: &str, active_path: &Path) -> AppAction {
         if input.trim().is_empty() {
             self.set_status("Find file requires a path", StatusKind::Error);
             return AppAction::Continue;
         }
 
-        AppAction::FindFile(PathBuf::from(input))
+        let path = PathBuf::from(input);
+        if path.is_absolute() {
+            AppAction::FindFile(path)
+        } else {
+            let directory = active_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            AppAction::FindFile(directory.join(path))
+        }
     }
 
     fn submit_switch_buffer(&mut self, input: &str) -> AppAction {
@@ -734,7 +743,7 @@ mod tests {
     };
     use std::{
         fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::atomic::{AtomicUsize, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -1113,8 +1122,25 @@ mod tests {
         let mut app = AppState::default();
 
         assert_eq!(
-            app.submit_find_file(" leading and trailing.txt "),
-            AppAction::FindFile(PathBuf::from(" leading and trailing.txt "))
+            app.submit_find_file(
+                " leading and trailing.txt ",
+                Path::new("/tmp/project/current.txt")
+            ),
+            AppAction::FindFile(PathBuf::from("/tmp/project/ leading and trailing.txt "))
+        );
+    }
+
+    #[test]
+    fn find_file_resolves_relative_paths_from_the_active_buffer_directory() {
+        let mut app = AppState::default();
+
+        assert_eq!(
+            app.submit_find_file("sibling.rs", Path::new("/tmp/project/src/main.rs")),
+            AppAction::FindFile(PathBuf::from("/tmp/project/src/sibling.rs"))
+        );
+        assert_eq!(
+            app.submit_find_file("/tmp/absolute.rs", Path::new("/tmp/project/src/main.rs")),
+            AppAction::FindFile(PathBuf::from("/tmp/absolute.rs"))
         );
     }
 
