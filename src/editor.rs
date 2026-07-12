@@ -3,7 +3,7 @@ use std::{
     ffi::{CString, OsStr, OsString},
     fs, io,
     os::unix::ffi::OsStrExt,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
@@ -151,12 +151,13 @@ fn path_identity(path: &Path) -> io::Result<PathBuf> {
 
     loop {
         match fs::canonicalize(ancestor) {
-            Ok(mut canonical) => {
+            Ok(canonical) => {
+                let mut identity = normalize_existing_path(&canonical)?;
                 let case_sensitive = volume_is_case_sensitive(&canonical)?;
                 for component in missing_components.iter().rev() {
-                    canonical.push(normalize_missing_component(component, case_sensitive));
+                    identity.push(normalize_path_component(component, case_sensitive));
                 }
-                return Ok(canonical);
+                return Ok(identity);
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let Some(file_name) = ancestor.file_name() else {
@@ -171,6 +172,36 @@ fn path_identity(path: &Path) -> io::Result<PathBuf> {
             Err(error) => return Err(error),
         }
     }
+}
+
+fn normalize_existing_path(path: &Path) -> io::Result<PathBuf> {
+    let mut actual_parent = PathBuf::new();
+    let mut identity = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                actual_parent.push(prefix.as_os_str());
+                identity.push(prefix.as_os_str());
+            }
+            Component::RootDir => {
+                actual_parent.push(Path::new("/"));
+                identity.push(Path::new("/"));
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                actual_parent.pop();
+                identity.pop();
+            }
+            Component::Normal(part) => {
+                let case_sensitive = volume_is_case_sensitive(&actual_parent)?;
+                identity.push(normalize_path_component(part, case_sensitive));
+                actual_parent.push(part);
+            }
+        }
+    }
+
+    Ok(identity)
 }
 
 fn volume_is_case_sensitive(path: &Path) -> io::Result<bool> {
@@ -191,7 +222,7 @@ fn volume_is_case_sensitive(path: &Path) -> io::Result<bool> {
     }
 }
 
-fn normalize_missing_component(component: &OsStr, case_sensitive: bool) -> OsString {
+fn normalize_path_component(component: &OsStr, case_sensitive: bool) -> OsString {
     if case_sensitive {
         component.to_os_string()
     } else {
@@ -312,11 +343,11 @@ mod tests {
     fn missing_component_case_folding_is_volume_aware() {
         let component = std::ffi::OsStr::new("Future-é-Σ.swift");
         assert_eq!(
-            super::normalize_missing_component(component, false),
+            super::normalize_path_component(component, false),
             "future-e\u{301}-σ.swift"
         );
         assert_eq!(
-            super::normalize_missing_component(component, true),
+            super::normalize_path_component(component, true),
             "Future-é-Σ.swift"
         );
     }
@@ -345,6 +376,30 @@ mod tests {
                 assert_eq!(result, OpenResult::AlreadyOpen);
                 assert_eq!(editor.active().0.text(), "unsaved");
             }
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn saved_missing_file_keeps_the_same_buffer_identity() {
+        let dir = test_dir("saved-missing-identity");
+        let first = dir.join("first.txt");
+        let created = dir.join("Future.swift");
+        let case_alias = dir.join("future.swift");
+        fs::write(&first, "first").unwrap();
+        let case_sensitive = super::volume_is_case_sensitive(&dir).unwrap();
+
+        let mut editor = Editor::new(Buffer::open(&first).unwrap()).unwrap();
+        assert_eq!(editor.open(&created).unwrap(), OpenResult::Opened);
+        editor.active_mut().0.insert(0, "saved");
+        editor.active_mut().0.save().unwrap();
+        editor.active_mut().0.insert(0, "unsaved ");
+
+        assert_eq!(editor.open(&created).unwrap(), OpenResult::AlreadyOpen);
+        assert_eq!(editor.active().0.text(), "unsaved saved");
+        if !case_sensitive {
+            assert_eq!(editor.open(&case_alias).unwrap(), OpenResult::AlreadyOpen);
+            assert_eq!(editor.active().0.text(), "unsaved saved");
         }
         fs::remove_dir_all(dir).unwrap();
     }
