@@ -2,6 +2,7 @@ mod app;
 pub mod buffer;
 mod cli;
 mod commands;
+mod editor;
 pub mod highlighter;
 mod input;
 mod keymap;

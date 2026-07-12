@@ -3,7 +3,7 @@
 A small macOS-only terminal code editor written in Rust.
 
 Cortex is currently in v0.3 development.
-The current goal is one fast editing loop: open a file or directory, edit one buffer, save it, and quit cleanly.
+The current goal is one fast editing loop: open files or a directory, edit and switch buffers, save, and quit cleanly.
 
 ## Platform
 
@@ -94,13 +94,16 @@ Existing files open with their current contents.
 Missing files open as empty clean buffers attached to the requested path.
 Saving can create the target file when its parent directory already exists.
 Saving does not create missing parent directories.
+Inside Cortex, `C-x C-f` accepts an existing or missing file path.
+Enter a missing path, edit the empty buffer, and save to create the file.
+Enter a directory path to browse it in the directory picker.
 Directories open a picker that lists non-hidden entries.
 The picker can open regular files.
 The picker can expand and collapse directories.
 
 ## Current Scope
 
-The current editor supports one buffer in the terminal alternate screen.
+The current editor supports multiple file buffers in the terminal alternate screen.
 It uses raw terminal mode while running and should restore the shell after exit.
 It shows file text, cursor position, dirty state, save errors, and short status messages in a modeline.
 It includes a directory picker, a slash command line, visual theme and modeline polish, and syntax highlighting for supported file types.
@@ -127,7 +130,8 @@ It includes a directory picker, a slash command line, visual theme and modeline 
 | `C-/` or `C-_` | Undo the last edit |
 | `C-x u` | Undo the last edit |
 | `Command-z` | Undo the last edit |
-| `C-x C-f` | Open the file picker when the current buffer is clean |
+| `C-x C-f` | Enter a path to find or create a file buffer |
+| `C-x b` | Switch to an open buffer by path or unique file name |
 | `C-x C-s` | Save the file |
 | `C-x C-c` | Quit |
 | `/` | Open the slash command line |
@@ -153,7 +157,7 @@ Press `n` or Escape to cancel.
 
 Escape cancels the command line.
 Unknown slash commands leave the editor open and show an error message.
-`/open <path>` rejects directories and keeps the current buffer in place when it has unsaved changes.
+`/open <path>` rejects directories and opens another buffer without discarding unsaved changes.
 
 ## Directory Picker Keybindings
 
@@ -185,7 +189,8 @@ See [docs/release.md](docs/release.md) for the release checklist.
 ## Known Limitations
 
 Redo is available from the slash command line, but does not have a dedicated keybinding yet.
-Cortex has one active buffer at a time.
+Cortex shows one active buffer at a time.
+The switch-buffer prompt requires an exact path or a unique file name and does not offer completion yet.
 The directory picker can expand directories, but it is still a minimal picker.
 The slash command `/open <path>` opens files only, not directories.
 There are no splits, tabs, minibuffer, config, plugins, LSP, AI integration, or embedded terminal pane yet.
