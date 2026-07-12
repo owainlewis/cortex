@@ -84,6 +84,13 @@ impl Editor {
             return Ok(());
         }
 
+        if let Ok(identity) = path_identity(Path::new(name)) {
+            if let Some(index) = self.index_for_identity(&identity) {
+                self.active = index;
+                return Ok(());
+            }
+        }
+
         let file_name_matches: Vec<usize> = self
             .buffers
             .iter()
@@ -308,11 +315,16 @@ mod tests {
         fs::create_dir_all(second.parent().unwrap()).unwrap();
         fs::write(&first, "first").unwrap();
         fs::write(&second, "second").unwrap();
+        let first_alias_dir = dir.join("first-alias");
+        std::os::unix::fs::symlink(first.parent().unwrap(), &first_alias_dir).unwrap();
+        let first_alias = first_alias_dir.join("notes.txt");
 
         let mut editor = Editor::new(Buffer::open(&first).unwrap()).unwrap();
         editor.open(&second).unwrap();
 
         assert_eq!(editor.switch_to("notes.txt"), Err(SwitchError::Ambiguous));
+        assert_eq!(editor.switch_to(&first_alias.to_string_lossy()), Ok(()));
+        assert_eq!(editor.active().0.text(), "first");
         assert_eq!(editor.switch_to(&first.to_string_lossy()), Ok(()));
         assert_eq!(editor.active().0.text(), "first");
         assert_eq!(editor.switch_to("missing.txt"), Err(SwitchError::NotFound));
