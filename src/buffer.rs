@@ -5,16 +5,20 @@ use std::{
     io::{self, BufReader, BufWriter, Write},
     ops::Range,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 const TEMP_FILE_CREATE_ATTEMPTS: usize = 128;
+static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Buffer {
+    id: u64,
     text: Rope,
     path: PathBuf,
     dirty: bool,
     clean_text: String,
+    revision: u64,
     undo_stack: Vec<Edit>,
     redo_stack: Vec<Edit>,
 }
@@ -39,10 +43,12 @@ impl Buffer {
         let clean_text = text.to_string();
 
         Ok(Self {
+            id: NEXT_BUFFER_ID.fetch_add(1, Ordering::Relaxed),
             text,
             path,
             dirty: false,
             clean_text,
+            revision: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         })
@@ -50,6 +56,10 @@ impl Buffer {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        self.id
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -62,6 +72,10 @@ impl Buffer {
 
     pub fn len_lines(&self) -> usize {
         self.text.len_lines()
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn line_for_char(&self, char_idx: usize) -> usize {
@@ -116,6 +130,28 @@ impl Buffer {
 
     pub fn text(&self) -> String {
         self.text.to_string()
+    }
+
+    pub(crate) fn text_prefix_lines(
+        &self,
+        line_count: usize,
+        max_chars_per_line: usize,
+    ) -> (String, Vec<usize>) {
+        let line_count = line_count.min(self.len_lines());
+        let mut text = String::new();
+        let mut context_barriers = Vec::new();
+
+        for line_idx in 0..line_count {
+            if line_idx > 0 {
+                text.push('\n');
+            }
+            text.push_str(&self.line_prefix_text(line_idx, max_chars_per_line));
+            if line_content_len_chars(self.text.line(line_idx)) > max_chars_per_line {
+                context_barriers.push(line_idx + 1);
+            }
+        }
+
+        (text, context_barriers)
     }
 
     pub fn text_range(&self, char_range: Range<usize>) -> String {
@@ -224,10 +260,26 @@ impl Buffer {
         if !inserted.is_empty() {
             self.text.insert(start, inserted);
         }
+        self.revision = self.revision.wrapping_add(1);
     }
 
     fn update_dirty(&mut self) {
         self.dirty = self.text != self.clean_text.as_str();
+    }
+}
+
+impl Clone for Buffer {
+    fn clone(&self) -> Self {
+        Self {
+            id: NEXT_BUFFER_ID.fetch_add(1, Ordering::Relaxed),
+            text: self.text.clone(),
+            path: self.path.clone(),
+            dirty: self.dirty,
+            clean_text: self.clean_text.clone(),
+            revision: self.revision,
+            undo_stack: self.undo_stack.clone(),
+            redo_stack: self.redo_stack.clone(),
+        }
     }
 }
 

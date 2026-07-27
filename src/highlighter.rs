@@ -1,4 +1,5 @@
-use std::{ops::Range, path::Path};
+use crate::buffer::Buffer;
+use std::{collections::HashMap, ops::Range, path::Path};
 use tree_sitter_highlight::{
     HighlightConfiguration, HighlightEvent, Highlighter as TreeSitterHighlighter,
 };
@@ -52,6 +53,8 @@ const TYPESCRIPT_TSX_EXTENSIONS: &[&str] = &["tsx"];
 const RUBY_EXTENSIONS: &[&str] = &["rb", "rake", "gemspec"];
 const OCAML_EXTENSIONS: &[&str] = &["ml"];
 const OCAML_INTERFACE_EXTENSIONS: &[&str] = &["mli"];
+const HIGHLIGHT_READ_AHEAD_LINES: usize = 256;
+const MAX_HIGHLIGHT_LINE_CHARS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HighlightKind {
@@ -95,11 +98,22 @@ pub struct HighlightSpan {
 pub struct SyntaxHighlighter {
     highlighter: TreeSitterHighlighter,
     languages: Vec<LanguageDefinition>,
+    documents: HashMap<u64, HighlightedDocument>,
+    #[cfg(test)]
+    document_parse_count: usize,
+    #[cfg(test)]
+    last_request_bytes: usize,
 }
 
 struct LanguageDefinition {
     extensions: &'static [&'static str],
     config: HighlightConfiguration,
+}
+
+struct HighlightedDocument {
+    revision: u64,
+    covered_lines: usize,
+    lines: Vec<Vec<HighlightSpan>>,
 }
 
 impl SyntaxHighlighter {
@@ -125,14 +139,101 @@ impl SyntaxHighlighter {
         Self {
             highlighter: TreeSitterHighlighter::new(),
             languages,
+            documents: HashMap::new(),
+            #[cfg(test)]
+            document_parse_count: 0,
+            #[cfg(test)]
+            last_request_bytes: 0,
         }
     }
 
     pub fn highlight_visible_lines(
         &mut self,
-        path: &Path,
-        lines: &[String],
+        buffer: &Buffer,
+        line_range: Range<usize>,
     ) -> Vec<Vec<HighlightSpan>> {
+        let visible_start = line_range.start.min(buffer.len_lines());
+        let visible_end = line_range.end.min(buffer.len_lines());
+        if self.language_idx_for_path(buffer.path()).is_none() {
+            return vec![Vec::new(); visible_end.saturating_sub(visible_start)];
+        }
+
+        let buffer_id = buffer.id();
+        let revision = buffer.revision();
+        let needs_refresh = self.documents.get(&buffer_id).is_none_or(|document| {
+            document.revision != revision || document.covered_lines < visible_end
+        });
+
+        if needs_refresh {
+            let covered_lines = visible_end
+                .saturating_add(HIGHLIGHT_READ_AHEAD_LINES)
+                .min(buffer.len_lines());
+            let (source, context_barriers) =
+                buffer.text_prefix_lines(covered_lines, MAX_HIGHLIGHT_LINE_CHARS);
+            #[cfg(test)]
+            {
+                self.last_request_bytes = source.len();
+            }
+            let highlighted_lines =
+                self.highlight_document_segments(buffer.path(), &source, &context_barriers);
+            self.documents.insert(
+                buffer_id,
+                HighlightedDocument {
+                    revision,
+                    covered_lines,
+                    lines: highlighted_lines,
+                },
+            );
+        }
+
+        let document = &self.documents[&buffer_id];
+        document.lines
+            [line_range.start.min(document.lines.len())..line_range.end.min(document.lines.len())]
+            .to_vec()
+    }
+
+    fn highlight_document_segments(
+        &mut self,
+        path: &Path,
+        source: &str,
+        context_barriers: &[usize],
+    ) -> Vec<Vec<HighlightSpan>> {
+        if context_barriers.is_empty() {
+            return self.highlight_document(path, source);
+        }
+
+        let lines = document_lines(source);
+        let mut highlighted_lines = vec![Vec::new(); lines.len()];
+        let mut segment_start = 0;
+
+        for segment_end in context_barriers
+            .iter()
+            .copied()
+            .chain(std::iter::once(lines.len()))
+        {
+            if segment_start < segment_end {
+                let segment = lines[segment_start..segment_end].join("\n");
+                for (offset, spans) in self
+                    .highlight_document(path, &segment)
+                    .into_iter()
+                    .enumerate()
+                {
+                    highlighted_lines[segment_start + offset] = spans;
+                }
+            }
+            segment_start = segment_end;
+        }
+
+        highlighted_lines
+    }
+
+    fn highlight_document(&mut self, path: &Path, source: &str) -> Vec<Vec<HighlightSpan>> {
+        #[cfg(test)]
+        {
+            self.document_parse_count += 1;
+        }
+
+        let lines = document_lines(source);
         let mut highlighted_lines = vec![Vec::new(); lines.len()];
         let Some(language_idx) = self.language_idx_for_path(path) else {
             return highlighted_lines;
@@ -144,7 +245,7 @@ impl SyntaxHighlighter {
 
         let languages = &self.languages;
         let language = &languages[language_idx];
-        let line_starts = line_start_offsets(lines);
+        let line_starts = line_start_offsets(&lines);
         {
             let events =
                 self.highlighter
@@ -180,7 +281,7 @@ impl SyntaxHighlighter {
         }
 
         if is_markdown_path(path) {
-            self.highlight_markdown_inline_lines(lines, &mut highlighted_lines);
+            self.highlight_markdown_inline_lines(&lines, &mut highlighted_lines);
         }
 
         highlighted_lines
@@ -476,6 +577,13 @@ fn is_markdown_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn document_lines(source: &str) -> Vec<String> {
+    source
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
+        .collect()
+}
+
 fn line_start_offsets(lines: &[String]) -> Vec<usize> {
     let mut offsets = Vec::with_capacity(lines.len() + 1);
     let mut offset = 0;
@@ -522,14 +630,21 @@ fn line_for_offset(line_starts: &[usize], offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{language_label_for_path, HighlightKind, SyntaxHighlighter};
-    use std::path::Path;
+    use crate::buffer::Buffer;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
     fn highlights_known_rust_files() {
         let mut highlighter = SyntaxHighlighter::new();
-        let lines = vec!["fn main() {".to_string(), "    let value = 42;".to_string()];
+        let lines = ["fn main() {".to_string(), "    let value = 42;".to_string()];
 
-        let highlighted = highlighter.highlight_visible_lines(Path::new("main.rs"), &lines);
+        let highlighted = highlighter.highlight_document(Path::new("main.rs"), &lines.join("\n"));
 
         assert!(highlighted
             .iter()
@@ -551,7 +666,7 @@ mod tests {
 
         for (path, lines) in cases {
             let mut highlighter = SyntaxHighlighter::new();
-            let highlighted = highlighter.highlight_visible_lines(path, &lines);
+            let highlighted = highlighter.highlight_document(path, &lines.join("\n"));
 
             assert!(
                 highlighted.iter().flatten().next().is_some(),
@@ -656,7 +771,7 @@ mod tests {
 
         for (path, lines) in cases {
             let mut highlighter = SyntaxHighlighter::new();
-            let highlighted = highlighter.highlight_visible_lines(path, &lines);
+            let highlighted = highlighter.highlight_document(path, &lines.join("\n"));
 
             assert!(
                 highlighted.iter().flatten().next().is_some(),
@@ -669,13 +784,13 @@ mod tests {
     #[test]
     fn highlights_markdown_document_structure() {
         let mut highlighter = SyntaxHighlighter::new();
-        let lines = vec![
+        let lines = [
             "# Heading".to_string(),
             "> quoted".to_string(),
             "- item".to_string(),
         ];
 
-        let highlighted = highlighter.highlight_visible_lines(Path::new("notes.md"), &lines);
+        let highlighted = highlighter.highlight_document(Path::new("notes.md"), &lines.join("\n"));
 
         assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupHeading));
         assert!(line_has_kind(
@@ -695,10 +810,9 @@ mod tests {
     #[test]
     fn highlights_markdown_inline_markup() {
         let mut highlighter = SyntaxHighlighter::new();
-        let lines =
-            vec!["Use **bold**, *em*, `code`, and [link](https://example.com).".to_string()];
+        let lines = ["Use **bold**, *em*, `code`, and [link](https://example.com).".to_string()];
 
-        let highlighted = highlighter.highlight_visible_lines(Path::new("notes.md"), &lines);
+        let highlighted = highlighter.highlight_document(Path::new("notes.md"), &lines.join("\n"));
 
         assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupBold));
         assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupItalic));
@@ -710,23 +824,197 @@ mod tests {
     #[test]
     fn highlights_markdown_fenced_code_by_language() {
         let mut highlighter = SyntaxHighlighter::new();
-        let lines = vec![
+        let lines = [
             "```rust".to_string(),
             "fn main() {}".to_string(),
             "```".to_string(),
         ];
 
-        let highlighted = highlighter.highlight_visible_lines(Path::new("notes.md"), &lines);
+        let highlighted = highlighter.highlight_document(Path::new("notes.md"), &lines.join("\n"));
 
         assert!(line_has_kind(&highlighted[1], HighlightKind::Keyword));
     }
 
     #[test]
+    fn viewport_inside_rust_block_comment_keeps_document_context() {
+        let (buffer, dir) = buffer_with_text(
+            "comment.rs",
+            "fn main() {\n    /* opener\n    comment one\n    comment two\n    */\n}\n",
+        );
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 2..4);
+
+        assert_eq!(highlighted.len(), 2);
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::Comment)));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn viewport_inside_rust_multiline_string_keeps_document_context() {
+        let (buffer, dir) = buffer_with_text(
+            "string.rs",
+            "fn main() {\n    let text = \"first\nsecond\nthird\";\n}\n",
+        );
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 2..3);
+
+        assert_eq!(highlighted.len(), 1);
+        assert!(line_has_kind(&highlighted[0], HighlightKind::String));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn viewport_inside_markdown_fence_keeps_injected_language_context() {
+        let (buffer, dir) = buffer_with_text(
+            "notes.md",
+            "Before\n\n```rust\nfn main() {\n    let answer = 42;\n}\n```\n",
+        );
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 3..6);
+
+        assert_eq!(highlighted.len(), 3);
+        assert!(line_has_kind(&highlighted[0], HighlightKind::Keyword));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn scrolling_reuses_cached_document_highlights() {
+        let (buffer, dir) = buffer_with_text("cached.rs", "fn main() {\n    let answer = 42;\n}\n");
+        let mut highlighter = SyntaxHighlighter::new();
+
+        highlighter.highlight_visible_lines(&buffer, 0..2);
+        highlighter.highlight_visible_lines(&buffer, 1..3);
+
+        assert_eq!(highlighter.document_parse_count, 1);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn editing_invalidates_only_the_changed_buffer_cache() {
+        let (mut rust_buffer, rust_dir) =
+            buffer_with_text("cached.rs", "fn main() {\n    let answer = 42;\n}\n");
+        let (markdown_buffer, markdown_dir) =
+            buffer_with_text("cached.md", "# Heading\n\nParagraph\n");
+        let mut highlighter = SyntaxHighlighter::new();
+
+        highlighter.highlight_visible_lines(&rust_buffer, 0..2);
+        highlighter.highlight_visible_lines(&markdown_buffer, 0..2);
+        rust_buffer.insert(0, "// changed\n");
+        highlighter.highlight_visible_lines(&rust_buffer, 0..2);
+        highlighter.highlight_visible_lines(&markdown_buffer, 1..3);
+
+        assert_eq!(highlighter.document_parse_count, 3);
+        remove_dir(rust_dir);
+        remove_dir(markdown_dir);
+    }
+
+    #[test]
+    fn independent_buffers_for_the_same_path_do_not_share_cached_spans() {
+        let (rust_buffer, dir) = buffer_with_text("same.rs", "fn main() {}\n");
+        let mut highlighter = SyntaxHighlighter::new();
+        let rust_highlights = highlighter.highlight_visible_lines(&rust_buffer, 0..1);
+
+        fs::write(rust_buffer.path(), "plain words\n").unwrap();
+        let plain_buffer = Buffer::open(rust_buffer.path()).unwrap();
+        let plain_highlights = highlighter.highlight_visible_lines(&plain_buffer, 0..1);
+
+        assert_ne!(rust_buffer.id(), plain_buffer.id());
+        assert!(line_has_kind(&rust_highlights[0], HighlightKind::Keyword));
+        assert!(!line_has_kind(&plain_highlights[0], HighlightKind::Keyword));
+        assert_eq!(highlighter.document_parse_count, 2);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn editing_near_start_of_large_buffer_keeps_highlight_work_bounded() {
+        let text = (0..5000)
+            .map(|idx| format!("let value_{idx} = {idx};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (mut buffer, dir) = buffer_with_text("large.rs", &text);
+        let mut highlighter = SyntaxHighlighter::new();
+
+        highlighter.highlight_visible_lines(&buffer, 0..20);
+        let document = &highlighter.documents[&buffer.id()];
+        assert_eq!(
+            document.covered_lines,
+            20 + super::HIGHLIGHT_READ_AHEAD_LINES
+        );
+        assert!(document.lines.len() <= document.covered_lines + 1);
+
+        buffer.insert(0, "// edit\n");
+        highlighter.highlight_visible_lines(&buffer, 0..20);
+
+        assert_eq!(highlighter.document_parse_count, 2);
+        assert_eq!(
+            highlighter.documents[&buffer.id()].covered_lines,
+            20 + super::HIGHLIGHT_READ_AHEAD_LINES
+        );
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn pathological_single_line_buffer_has_a_strict_highlight_work_bound() {
+        let text = format!("fn main() {{}}{}", "x".repeat(1_000_000));
+        let (buffer, dir) = buffer_with_text("minified.rs", &text);
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 0..1);
+
+        assert_eq!(
+            highlighter.last_request_bytes,
+            super::MAX_HIGHLIGHT_LINE_CHARS
+        );
+        assert!(line_has_kind(&highlighted[0], HighlightKind::Keyword));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn truncated_line_does_not_leak_false_context_into_later_lines() {
+        let text = format!(
+            "fn main() {{\n    /*{}*/\n    let visible = 42;\n}}\n",
+            "x".repeat(super::MAX_HIGHLIGHT_LINE_CHARS)
+        );
+        let (buffer, dir) = buffer_with_text("barrier.rs", &text);
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 1..3);
+
+        assert!(line_has_kind(&highlighted[1], HighlightKind::Keyword));
+        assert!(!line_has_kind(&highlighted[1], HighlightKind::Comment));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn unsupported_buffer_skips_prefix_construction_and_parsing() {
+        let text = (0..5000)
+            .map(|idx| format!("plain text line {idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (buffer, dir) = buffer_with_text("large.txt", &text);
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 4000..4020);
+
+        assert_eq!(highlighted, vec![Vec::new(); 20]);
+        assert_eq!(highlighter.document_parse_count, 0);
+        assert_eq!(highlighter.last_request_bytes, 0);
+        assert!(highlighter.documents.is_empty());
+        remove_dir(dir);
+    }
+
+    #[test]
     fn unknown_extensions_return_plain_lines() {
         let mut highlighter = SyntaxHighlighter::new();
-        let lines = vec!["fn main() {}".to_string()];
+        let lines = ["fn main() {}".to_string()];
 
-        let highlighted = highlighter.highlight_visible_lines(Path::new("notes.unknown"), &lines);
+        let highlighted =
+            highlighter.highlight_document(Path::new("notes.unknown"), &lines.join("\n"));
 
         assert_eq!(highlighted, vec![Vec::new()]);
     }
@@ -734,9 +1022,9 @@ mod tests {
     #[test]
     fn invalid_source_still_returns_without_panicking() {
         let mut highlighter = SyntaxHighlighter::new();
-        let lines = vec!["fn {".to_string(), "\"unterminated".to_string()];
+        let lines = ["fn {".to_string(), "\"unterminated".to_string()];
 
-        let highlighted = highlighter.highlight_visible_lines(Path::new("broken.rs"), &lines);
+        let highlighted = highlighter.highlight_document(Path::new("broken.rs"), &lines.join("\n"));
 
         assert_eq!(highlighted.len(), 2);
     }
@@ -748,12 +1036,28 @@ mod tests {
             .map(|idx| format!("let value_{idx} = {idx};"))
             .collect::<Vec<_>>();
 
-        let highlighted = highlighter.highlight_visible_lines(Path::new("large.rs"), &lines);
+        let highlighted = highlighter.highlight_document(Path::new("large.rs"), &lines.join("\n"));
 
         assert_eq!(highlighted.len(), lines.len());
     }
 
     fn line_has_kind(spans: &[super::HighlightSpan], kind: HighlightKind) -> bool {
         spans.iter().any(|span| span.kind == kind)
+    }
+
+    fn buffer_with_text(file_name: &str, text: &str) -> (Buffer, PathBuf) {
+        let counter = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "cortex-highlighter-test-{}-{counter}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(file_name);
+        fs::write(&path, text).unwrap();
+        (Buffer::open(path).unwrap(), dir)
+    }
+
+    fn remove_dir(path: PathBuf) {
+        fs::remove_dir_all(path).unwrap();
     }
 }
