@@ -21,7 +21,7 @@ use std::{
 
 const DIRTY_QUIT_PROMPT: &str = "Buffers modified; quit without saving? (y or n)";
 const COMMAND_HELP: &str =
-    "Commands: /help, /commands, /open <path>, /search <text>, /next, /save, /undo, /redo, /quit, /quit!";
+    "Commands: /help, /commands, /open <path>, /search <text>, /next, /reload, /save, /undo, /redo, /quit, /quit!";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct AppState {
@@ -474,6 +474,7 @@ impl AppState {
                 AppAction::Continue
             }
             "save" => self.dispatch_command(commands::Command::SaveBuffer, buffer, view),
+            "reload" => self.dispatch_command(commands::Command::ReloadBuffer, buffer, view),
             "undo" => self.dispatch_command(commands::Command::Undo, buffer, view),
             "redo" => self.dispatch_command(commands::Command::Redo, buffer, view),
             "quit" => self.dispatch_command(commands::Command::Quit, buffer, view),
@@ -613,7 +614,7 @@ impl AppState {
         }
 
         self.status_kind = outcome.status_message.as_ref().map(|_| {
-            if outcome.save_failed {
+            if outcome.failed {
                 StatusKind::Error
             } else {
                 StatusKind::Success
@@ -650,6 +651,7 @@ fn render_editor<W: io::Write>(
     app_state: &AppState,
 ) -> io::Result<()> {
     let (buffer, view) = editor.active_mut();
+    buffer.refresh_disk_changed();
     render(renderer, writer, buffer, view, app_state)
 }
 
@@ -727,6 +729,7 @@ fn command_clears_mark(command: commands::Command) -> bool {
             | commands::Command::InsertNewline
             | commands::Command::DeleteBackward
             | commands::Command::DeleteForward
+            | commands::Command::ReloadBuffer
             | commands::Command::Undo
             | commands::Command::Redo
     )
@@ -773,6 +776,30 @@ mod tests {
             .status_message
             .as_deref()
             .is_some_and(|message| message.contains("Wrote")));
+        assert_eq!(app.status_kind, Some(StatusKind::Success));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reload_key_sequence_reloads_external_changes() {
+        let dir = test_dir("reload-key");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "before").unwrap();
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = Buffer::open(&path).unwrap();
+        let mut view = View::new();
+        fs::write(&path, "after").unwrap();
+
+        app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
+        let action = app.handle_key(Key::Ctrl('r'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(buffer.text(), "after");
+        assert_eq!(
+            app.status_message,
+            Some(format!("Reloaded {}", path.display()))
+        );
         assert_eq!(app.status_kind, Some(StatusKind::Success));
         fs::remove_dir_all(dir).unwrap();
     }

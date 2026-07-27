@@ -1,4 +1,7 @@
-use crate::{buffer::Buffer, view::View};
+use crate::{
+    buffer::{Buffer, ReloadError},
+    view::View,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -16,6 +19,7 @@ pub enum Command {
     MoveToLineEnd,
     OpenFile,
     Redo,
+    ReloadBuffer,
     RepeatSearch,
     SaveBuffer,
     SetMark,
@@ -29,7 +33,7 @@ pub enum Command {
 pub struct CommandOutcome {
     pub quit: bool,
     pub dirty_quit_blocked: bool,
-    pub save_failed: bool,
+    pub failed: bool,
     pub status_message: Option<String>,
 }
 
@@ -81,6 +85,7 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
             }
             CommandOutcome::default()
         }
+        Command::ReloadBuffer => reload_buffer(buffer, view),
         Command::RepeatSearch => CommandOutcome::default(),
         Command::MoveForwardChar => {
             view.move_forward_char(buffer);
@@ -112,7 +117,7 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
                 ..CommandOutcome::default()
             },
             Err(error) => CommandOutcome {
-                save_failed: true,
+                failed: true,
                 status_message: Some(format!("Save failed: {error}")),
                 ..CommandOutcome::default()
             },
@@ -128,12 +133,51 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
     }
 }
 
+fn reload_buffer(buffer: &mut Buffer, view: &mut View) -> CommandOutcome {
+    let line = buffer.line_for_char(view.point());
+    let column = view.point() - buffer.line_start_char(line);
+
+    match buffer.reload() {
+        Ok(()) => {
+            let line = line.min(buffer.len_lines().saturating_sub(1));
+            let line_start = buffer.line_start_char(line);
+            let line_len = buffer.line_end_char(line) - line_start;
+            view.set_point(line_start + column.min(line_len), buffer);
+            CommandOutcome {
+                status_message: Some(format!("Reloaded {}", buffer.path().display())),
+                ..CommandOutcome::default()
+            }
+        }
+        Err(ReloadError::Dirty) => CommandOutcome {
+            failed: true,
+            status_message: Some("Reload refused: buffer has unsaved changes".to_string()),
+            ..CommandOutcome::default()
+        },
+        Err(ReloadError::Io(error)) => {
+            let message = if error.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "Reload failed: file does not exist: {}",
+                    buffer.path().display()
+                )
+            } else {
+                format!("Reload failed: {error}")
+            };
+            CommandOutcome {
+                failed: true,
+                status_message: Some(message),
+                ..CommandOutcome::default()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{dispatch, Command};
     use crate::{buffer::Buffer, view::View};
     use std::{
         fs,
+        os::unix::fs::PermissionsExt,
         path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
         time::{SystemTime, UNIX_EPOCH},
@@ -264,7 +308,7 @@ mod tests {
         let outcome = dispatch(Command::SaveBuffer, &mut buffer, &mut view);
 
         assert!(!outcome.quit);
-        assert!(!outcome.save_failed);
+        assert!(!outcome.failed);
         assert!(outcome
             .status_message
             .as_deref()
@@ -281,13 +325,76 @@ mod tests {
 
         let outcome = dispatch(Command::SaveBuffer, &mut buffer, &mut view);
 
-        assert!(outcome.save_failed);
+        assert!(outcome.failed);
         assert!(!outcome.quit);
         assert!(outcome
             .status_message
             .as_deref()
             .is_some_and(|message| message.contains("Save failed")));
         assert!(buffer.is_dirty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reload_command_preserves_line_and_column_with_clamping() {
+        let dir = test_dir("commands-reload");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "abc\ndefgh\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        let mut view = View::new();
+        view.set_point(8, &buffer);
+        fs::write(&path, "x\nyz\n").unwrap();
+
+        let outcome = dispatch(Command::ReloadBuffer, &mut buffer, &mut view);
+
+        assert!(!outcome.failed);
+        assert_eq!(buffer.text(), "x\nyz\n");
+        assert_eq!(view.point(), 4);
+        assert_eq!(
+            outcome.status_message,
+            Some(format!("Reloaded {}", path.display()))
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reload_command_reports_deleted_files_without_changing_the_buffer() {
+        let dir = test_dir("commands-reload-deleted");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "keep me").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        let mut view = View::new();
+        fs::remove_file(&path).unwrap();
+
+        let outcome = dispatch(Command::ReloadBuffer, &mut buffer, &mut view);
+
+        assert!(outcome.failed);
+        assert_eq!(buffer.text(), "keep me");
+        assert!(outcome
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("file does not exist")));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reload_command_reports_permission_errors_without_changing_the_buffer() {
+        let dir = test_dir("commands-reload-permission");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "keep me").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        let mut view = View::new();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let outcome = dispatch(Command::ReloadBuffer, &mut buffer, &mut view);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(outcome.failed);
+        assert_eq!(buffer.text(), "keep me");
+        assert!(outcome
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Permission denied")));
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -24,7 +24,7 @@ const MODELINE_BRAND: &str = "CORTEX";
 const MIN_GUTTER_TOTAL_WIDTH: usize = 12;
 const MAX_PICKER_INDENT_DEPTH: usize = 4;
 const COMMAND_LINE_HINT: &str =
-    "/help  /commands  /open <path>  /search <text>  /next  /save  /undo  /redo  /quit  /quit!";
+    "/help  /commands  /open <path>  /search <text>  /next  /reload  /save  /undo  /redo  /quit  /quit!";
 
 const THEME: Theme = Theme {
     editor_fg: Color::Rgb {
@@ -704,6 +704,11 @@ fn modeline_text(buffer: &Buffer, view: &View, status_message: Option<&str>) -> 
     } else {
         "CLEAN"
     };
+    let disk_state = if buffer.disk_changed() {
+        "  [disk-changed]"
+    } else {
+        ""
+    };
     let file_name = buffer
         .path()
         .file_name()
@@ -711,9 +716,10 @@ fn modeline_text(buffer: &Buffer, view: &View, status_message: Option<&str>) -> 
         .map_or_else(|| buffer.path().display().to_string(), ToOwned::to_owned);
 
     let mut text = format!(
-        " {MODELINE_BRAND}  {}  {}  Ln {}, Col {} ",
+        " {MODELINE_BRAND}  {}  {}{}  Ln {}, Col {} ",
         file_name,
         dirty_state,
+        disk_state,
         line_idx + 1,
         column + 1
     );
@@ -1396,6 +1402,28 @@ mod tests {
         assert!(frame.modeline.contains("MODIFIED"));
         assert_eq!(frame.modeline_style, ModelineStyle::Dirty);
         assert!(frame.lines[0].gutter.starts_with("+>"));
+    }
+
+    #[test]
+    fn frame_modeline_shows_when_the_disk_copy_changed() {
+        let dir = test_dir("modeline-disk-changed");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "before").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        fs::write(&path, "after with a different length").unwrap();
+        buffer.refresh_disk_changed();
+
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 60, rows: 3 },
+            None,
+            None,
+            None,
+        );
+
+        assert!(frame.modeline.contains("[disk-changed]"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

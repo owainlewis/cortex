@@ -4,11 +4,13 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufReader, BufWriter, Write},
     ops::Range,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 const TEMP_FILE_CREATE_ATTEMPTS: usize = 128;
+const FILE_READ_ATTEMPTS: usize = 3;
 static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -17,10 +19,32 @@ pub struct Buffer {
     text: Rope,
     path: PathBuf,
     dirty: bool,
+    disk_baseline: DiskStamp,
+    disk_changed: bool,
     clean_text: String,
     revision: u64,
     undo_stack: Vec<Edit>,
     redo_stack: Vec<Edit>,
+}
+
+#[derive(Debug)]
+pub enum ReloadError {
+    Dirty,
+    Io(io::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiskStamp {
+    Missing,
+    Present {
+        device: u64,
+        inode: u64,
+        len: u64,
+        modified_seconds: i64,
+        modified_nanoseconds: i64,
+        changed_seconds: i64,
+        changed_nanoseconds: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,11 +59,7 @@ struct Edit {
 impl Buffer {
     pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
-        let text = match File::open(&path) {
-            Ok(file) => Rope::from_reader(BufReader::new(file))?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Rope::new(),
-            Err(error) => return Err(error),
-        };
+        let (text, disk_baseline) = load_file(&path, true)?;
         let clean_text = text.to_string();
 
         Ok(Self {
@@ -47,6 +67,8 @@ impl Buffer {
             text,
             path,
             dirty: false,
+            disk_baseline,
+            disk_changed: false,
             clean_text,
             revision: 0,
             undo_stack: Vec::new(),
@@ -64,6 +86,16 @@ impl Buffer {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    pub fn disk_changed(&self) -> bool {
+        self.disk_changed
+    }
+
+    pub fn refresh_disk_changed(&mut self) {
+        self.disk_changed = disk_stamp(&self.path)
+            .map(|stamp| stamp != self.disk_baseline)
+            .unwrap_or(true);
     }
 
     pub fn len_chars(&self) -> usize {
@@ -212,8 +244,26 @@ impl Buffer {
     pub fn save(&mut self) -> io::Result<()> {
         ensure_parent_directory_exists(&self.path)?;
         write_atomically(&self.path, &self.text)?;
+        self.disk_baseline = disk_stamp(&self.path)?;
+        self.disk_changed = false;
         self.clean_text = self.text.to_string();
         self.dirty = false;
+        Ok(())
+    }
+
+    pub fn reload(&mut self) -> Result<(), ReloadError> {
+        if self.dirty {
+            return Err(ReloadError::Dirty);
+        }
+
+        let (text, disk_baseline) = load_file(&self.path, false).map_err(ReloadError::Io)?;
+        self.clean_text = text.to_string();
+        self.text = text;
+        self.revision = self.revision.wrapping_add(1);
+        self.disk_baseline = disk_baseline;
+        self.disk_changed = false;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         Ok(())
     }
 
@@ -275,11 +325,58 @@ impl Clone for Buffer {
             text: self.text.clone(),
             path: self.path.clone(),
             dirty: self.dirty,
+            disk_baseline: self.disk_baseline,
+            disk_changed: self.disk_changed,
             clean_text: self.clean_text.clone(),
             revision: self.revision,
             undo_stack: self.undo_stack.clone(),
             redo_stack: self.redo_stack.clone(),
         }
+    }
+}
+
+fn load_file(path: &Path, allow_missing: bool) -> io::Result<(Rope, DiskStamp)> {
+    for _ in 0..FILE_READ_ATTEMPTS {
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if allow_missing && error.kind() == io::ErrorKind::NotFound => {
+                return Ok((Rope::new(), DiskStamp::Missing));
+            }
+            Err(error) => return Err(error),
+        };
+        let before = stamp_for_metadata(&file.metadata()?);
+        let text = Rope::from_reader(BufReader::new(&file))?;
+        let after = stamp_for_metadata(&file.metadata()?);
+        let current = disk_stamp(path)?;
+
+        if before == after && after == current {
+            return Ok((text, current));
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "file changed while it was being read",
+    ))
+}
+
+fn disk_stamp(path: &Path) -> io::Result<DiskStamp> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(stamp_for_metadata(&metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(DiskStamp::Missing),
+        Err(error) => Err(error),
+    }
+}
+
+fn stamp_for_metadata(metadata: &fs::Metadata) -> DiskStamp {
+    DiskStamp::Present {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        len: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
     }
 }
 
@@ -437,6 +534,90 @@ mod tests {
         assert_eq!(buffer.text(), "");
         assert_eq!(buffer.len_chars(), 0);
         assert!(!buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn disk_changed_tracks_external_writes_deletion_and_creation() {
+        let dir = test_dir("disk-changed");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "before").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.refresh_disk_changed();
+        assert!(!buffer.disk_changed());
+
+        fs::write(&path, "after with a different length").unwrap();
+        buffer.refresh_disk_changed();
+        assert!(buffer.disk_changed());
+
+        fs::remove_file(&path).unwrap();
+        buffer.refresh_disk_changed();
+        assert!(buffer.disk_changed());
+
+        let missing_path = dir.join("created.txt");
+        let mut missing_buffer = Buffer::open(&missing_path).unwrap();
+        fs::write(&missing_path, "created outside Cortex").unwrap();
+        missing_buffer.refresh_disk_changed();
+        assert!(missing_buffer.disk_changed());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn reload_replaces_a_clean_buffer_and_resets_disk_and_edit_history() {
+        let dir = test_dir("reload-clean");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "before").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(0, "x");
+        buffer.undo();
+        let revision = buffer.revision();
+        fs::write(&path, "after with a different length").unwrap();
+        buffer.refresh_disk_changed();
+
+        buffer.reload().unwrap();
+
+        assert_eq!(buffer.text(), "after with a different length");
+        assert!(!buffer.is_dirty());
+        assert!(!buffer.disk_changed());
+        assert_eq!(buffer.revision(), revision.wrapping_add(1));
+        assert_eq!(buffer.undo(), None);
+        assert_eq!(buffer.redo(), None);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn reload_refuses_to_replace_unsaved_edits() {
+        let dir = test_dir("reload-dirty");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "before").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(0, "local ");
+        fs::write(&path, "external change").unwrap();
+
+        assert!(matches!(buffer.reload(), Err(super::ReloadError::Dirty)));
+        assert_eq!(buffer.text(), "local before");
+        assert!(buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_refreshes_the_disk_baseline_and_clears_the_indicator() {
+        let dir = test_dir("save-disk-baseline");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "before").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        fs::write(&path, "external change").unwrap();
+        buffer.refresh_disk_changed();
+        assert!(buffer.disk_changed());
+
+        buffer.insert(0, "local ");
+        buffer.save().unwrap();
+        buffer.refresh_disk_changed();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "local before");
+        assert!(!buffer.is_dirty());
+        assert!(!buffer.disk_changed());
         remove_dir(dir);
     }
 
