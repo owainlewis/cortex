@@ -21,7 +21,11 @@ git push origin v0.1.0
 ```
 
 Pushing the tag starts the `Release` workflow.
-The workflow builds the macOS release binary and creates a GitHub Release.
+The workflow verifies that the tagged commit is reachable from `main`.
+It then checks formatting, runs Clippy with warnings denied, runs the test suite, and builds the macOS release binary.
+Before publishing, it verifies that the remote tag still targets the commit that passed those gates.
+The GitHub Release and its assets are created only after every gate passes.
+A failed gate for an unpublished tag creates no GitHub Release or release assets.
 It uploads these assets:
 
 - `cortex-vX.Y.Z-aarch64-apple-darwin.tar.gz` or `cortex-vX.Y.Z-x86_64-apple-darwin.tar.gz`
@@ -29,6 +33,7 @@ It uploads these assets:
 
 The release workflow refuses to publish if a release for the tag already exists.
 It should not overwrite existing release assets.
+Rerunning the workflow for an already published tag therefore fails without changing the existing release.
 
 Verify the release after the workflow completes:
 
