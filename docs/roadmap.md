@@ -202,7 +202,7 @@ Tracking issues:
 - [open] [#50 Add diffed rendering](https://github.com/owainlewis/cortex/issues/50)
 - [open] [#51 Add latency and large-file performance checks](https://github.com/owainlewis/cortex/issues/51)
 - [open] [#58 Allow literal slash insertion without losing command entry](https://github.com/owainlewis/cortex/issues/58)
-- [open] [#59 Harden atomic-save temporary file creation](https://github.com/owainlewis/cortex/issues/59)
+- [closed] [#59 Harden atomic-save temporary file creation](https://github.com/owainlewis/cortex/issues/59)
 - [open] [#60 Preserve file permissions and define symlink save behavior](https://github.com/owainlewis/cortex/issues/60)
 - [open] [#61 Remove whole-buffer work from input and render paths](https://github.com/owainlewis/cortex/issues/61)
 - [open] [#62 Preserve syntax highlight context across viewport boundaries](https://github.com/owainlewis/cortex/issues/62)
