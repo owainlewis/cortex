@@ -10,6 +10,7 @@ Use this file for product direction and status.
 
 Status meanings:
 - Done: the tracking issues are closed.
+- In progress: some tracking issues are closed while related work remains open.
 - Planned: the tracking issues are open.
 - Not ticketed: the phase needs issues before work starts.
 
@@ -98,23 +99,29 @@ Release notes should focus on opening files, command discovery, visual clarity, 
 
 ## v0.3 Editing
 
-Status: Planned.
+Status: In progress.
 
 Goal: make everyday editing safer and faster.
 
-Likely includes:
+Shipped:
 - Undo and redo.
 - Minibuffer foundation.
-- Incremental search.
 - Multiple buffers.
 - Find file.
 - Switch buffer.
 
+Planned:
+- Incremental search.
+- Command registry and `M-x`.
+- Kill ring and yank-pop.
+
 Tracking issues:
-- [open] [#27 Add undo and redo](https://github.com/owainlewis/cortex/issues/27)
-- [open] [#28 Add minibuffer foundation](https://github.com/owainlewis/cortex/issues/28)
+- [closed] [#27 Add undo and redo](https://github.com/owainlewis/cortex/issues/27)
+- [closed] [#28 Add minibuffer foundation](https://github.com/owainlewis/cortex/issues/28)
 - [open] [#29 Add incremental search](https://github.com/owainlewis/cortex/issues/29)
-- [open] [#30 Add multiple buffers, find-file, and switch-buffer](https://github.com/owainlewis/cortex/issues/30)
+- [closed] [#30 Add multiple buffers, find-file, and switch-buffer](https://github.com/owainlewis/cortex/issues/30)
+- [open] [#46 Add command registry and M-x](https://github.com/owainlewis/cortex/issues/46)
+- [open] [#47 Replace cut slot with a real kill ring](https://github.com/owainlewis/cortex/issues/47)
 
 Release notes should focus on editing safety, search, and buffer navigation.
 
@@ -139,7 +146,7 @@ Release notes should focus on splits, tabs, and navigation.
 
 ## v0.5 Agent Workflow
 
-Status: Not ticketed.
+Status: Planned.
 
 Goal: support terminal-based coding agents without adding an AI platform.
 
@@ -147,10 +154,11 @@ Likely includes:
 - Manual file reload.
 - Dirty reload guard.
 - Disk changed indicator.
-- Embedded terminal pane if the window model is ready.
+- Terminal pane as a window leaf.
 
 Tracking issues:
-- None yet.
+- [open] [#48 Add agent-safe file reload](https://github.com/owainlewis/cortex/issues/48)
+- [open] [#49 Add terminal pane as a window leaf](https://github.com/owainlewis/cortex/issues/49)
 
 Release notes should focus on reload safety and working with files changed by agents.
 
@@ -178,22 +186,46 @@ Tracking issues:
 
 Release notes should focus on install, update, CI, and release workflow changes.
 
-## Later Quality Work
+## Editor Quality
 
-Status: Not ticketed.
+Status: Planned.
 
-Goal: make the editor faster, clearer, and more durable.
+Goal: keep editing correct, safe, and fast as the editor grows.
 
 Likely includes:
 - Diffed rendering.
-- Reload diff highlights.
-- More syntax coverage.
-- Better modeline details.
-- Theme cleanup.
-- Large-file performance work.
+- Latency and large-file performance checks.
+- File-save hardening.
+- Rendering and Unicode correctness.
 
 Tracking issues:
-- None yet.
+- [open] [#50 Add diffed rendering](https://github.com/owainlewis/cortex/issues/50)
+- [open] [#51 Add latency and large-file performance checks](https://github.com/owainlewis/cortex/issues/51)
+- [open] [#58 Allow literal slash insertion without losing command entry](https://github.com/owainlewis/cortex/issues/58)
+- [open] [#59 Harden atomic-save temporary file creation](https://github.com/owainlewis/cortex/issues/59)
+- [open] [#60 Preserve file permissions and define symlink save behavior](https://github.com/owainlewis/cortex/issues/60)
+- [open] [#61 Remove whole-buffer work from input and render paths](https://github.com/owainlewis/cortex/issues/61)
+- [open] [#62 Preserve syntax highlight context across viewport boundaries](https://github.com/owainlewis/cortex/issues/62)
+- [open] [#63 Render Unicode grapheme clusters and combining marks correctly](https://github.com/owainlewis/cortex/issues/63)
+- [open] [#64 Mark final-newline-only changes in the gutter](https://github.com/owainlewis/cortex/issues/64)
+
+## Repository Quality
+
+Status: In progress.
+
+Goal: keep project tracking, contribution flow, CI, security, and releases dependable.
+
+Tracking issues:
+- [closed] [#52 Reconcile README, roadmap, and issue state with shipped behavior](https://github.com/owainlewis/cortex/issues/52)
+- [closed] [#65 Protect main with required Rust checks](https://github.com/owainlewis/cortex/issues/65)
+- [open] [#66 Create active roadmap tracking with milestones and a Cortex Project](https://github.com/owainlewis/cortex/issues/66)
+- [open] [#67 Enable dependency vulnerability scanning and update automation](https://github.com/owainlewis/cortex/issues/67)
+- [open] [#68 Add the repository labels required by STANDARDS.md](https://github.com/owainlewis/cortex/issues/68)
+- [open] [#69 Gate tagged releases on formatting, clippy, tests, and build](https://github.com/owainlewis/cortex/issues/69)
+- [open] [#70 Pin GitHub Actions and add release provenance](https://github.com/owainlewis/cortex/issues/70)
+- [open] [#71 Standardize merge strategy and clean stale branches](https://github.com/owainlewis/cortex/issues/71)
+- [open] [#72 Add contributing, security, and issue-reporting guidance](https://github.com/owainlewis/cortex/issues/72)
+- [open] [#73 Make the macOS arm64 build target deterministic](https://github.com/owainlewis/cortex/issues/73)
 
 ## Rules
 

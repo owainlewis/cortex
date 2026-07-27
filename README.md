@@ -3,7 +3,7 @@
 A small macOS-only terminal code editor written in Rust.
 
 Cortex is currently in v0.3 development.
-The current goal is one fast editing loop: open files or a directory, edit and switch buffers, save, and quit cleanly.
+The current goal is one fast editing loop: open files or a directory, edit and switch buffers, search, save, and quit cleanly.
 
 ## Platform
 
@@ -106,7 +106,7 @@ The picker can expand and collapse directories.
 The current editor supports multiple file buffers in the terminal alternate screen.
 It uses raw terminal mode while running and should restore the shell after exit.
 It shows file text, cursor position, dirty state, save errors, and short status messages in a modeline.
-It includes a directory picker, a slash command line, visual theme and modeline polish, and syntax highlighting for supported file types.
+It includes shared prompts for commands and buffer navigation, a directory picker, forward search, mark and cut/yank editing, undo and redo, visual polish, and syntax highlighting for supported file types.
 
 ## Editor Keybindings
 
@@ -136,7 +136,7 @@ It includes a directory picker, a slash command line, visual theme and modeline 
 | `C-x C-c` | Quit |
 | `/` | Open the slash command line |
 
-If the buffer is dirty, `C-x C-c` asks whether to quit without saving.
+If any open buffer is dirty, `C-x C-c` asks whether to quit without saving.
 Press `y` to confirm.
 Press `n` or Escape to cancel.
 
@@ -151,7 +151,7 @@ Press `n` or Escape to cancel.
 | `/redo` | Redo the last undone edit |
 | `/quit` | Quit, using the same dirty-buffer prompt as `C-x C-c` |
 | `/quit!` | Quit without saving |
-| `/open <path>` | Open a file path when the current buffer is clean |
+| `/open <path>` | Open another file buffer |
 | `/help` | Show the available slash commands |
 | `/commands` | Show the available slash commands (alias for `/help`) |
 
@@ -191,11 +191,18 @@ See [docs/release.md](docs/release.md) for the release checklist.
 Redo is available from the slash command line, but does not have a dedicated keybinding yet.
 Cortex shows one active buffer at a time.
 The switch-buffer prompt requires an exact path or a unique file name and does not offer completion yet.
+Search is forward-only through `/search <text>`, with `C-s` or `/next` repeating the last search.
+Incremental and reverse search are not implemented yet.
+Cut and yank retain only the latest cut text, with no kill ring or yank-pop yet.
+Typing `/` opens command entry, so a literal slash cannot currently be inserted into a buffer.
 The directory picker can expand directories, but it is still a minimal picker.
 The slash command `/open <path>` opens files only, not directories.
-There are no splits, tabs, minibuffer, config, plugins, LSP, AI integration, or embedded terminal pane yet.
+There are no splits, tabs, command registry, `M-x`, config, plugins, LSP, AI integration, or embedded terminal pane yet.
 Long lines are clipped to the terminal width instead of wrapped.
 The renderer uses a simple full-screen redraw rather than diffed rendering.
+Syntax highlighting can lose context when the viewport begins inside a multiline construct.
+Unicode grapheme handling is incomplete.
+Saving an existing file does not yet guarantee preservation of permissions, macOS metadata, or symlink behavior.
 External file changes are not watched or reloaded.
 
 ## License
