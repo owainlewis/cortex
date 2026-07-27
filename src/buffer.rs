@@ -98,7 +98,7 @@ impl Buffer {
 
     pub fn line_changed(&self, line_idx: usize) -> bool {
         let line_idx = self.clamp_line_idx(line_idx);
-        self.line_prefix_text(line_idx, usize::MAX) != clean_line_text(&self.clean_text, line_idx)
+        self.text.line(line_idx) != clean_line_text(&self.clean_text, line_idx)
     }
 
     pub fn find_forward(&self, query: &str, start_char: usize) -> Option<usize> {
@@ -245,20 +245,8 @@ fn line_content_len_chars(line: RopeSlice<'_>) -> usize {
     }
 }
 
-fn clean_line_text(text: &str, line_idx: usize) -> String {
-    let mut lines = text.split_inclusive('\n');
-
-    for idx in 0..=line_idx {
-        let Some(line) = lines.next() else {
-            return String::new();
-        };
-
-        if idx == line_idx {
-            return line.trim_end_matches(['\r', '\n']).to_string();
-        }
-    }
-
-    String::new()
+fn clean_line_text(text: &str, line_idx: usize) -> &str {
+    text.split_inclusive('\n').nth(line_idx).unwrap_or_default()
 }
 
 fn char_to_byte_idx(text: &str, char_idx: usize) -> usize {
@@ -450,16 +438,75 @@ mod tests {
     }
 
     #[test]
-    fn line_changed_detects_newline_only_changes() {
-        let dir = test_dir("line-changed-newline");
+    fn line_changed_detects_deleted_final_newline() {
+        let dir = test_dir("line-changed-delete-final-newline");
         let path = dir.join("notes.txt");
-        fs::write(&path, "alpha\nbeta\n").unwrap();
+        fs::write(&path, "alpha\n").unwrap();
         let mut buffer = Buffer::open(&path).unwrap();
 
         buffer.delete(5..6);
 
         assert!(buffer.line_changed(0));
-        assert!(buffer.line_changed(1));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn line_changed_detects_added_final_newline() {
+        let dir = test_dir("line-changed-add-final-newline");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(5, "\n");
+
+        assert!(buffer.line_changed(0));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn line_changed_detects_lf_and_crlf_terminator_changes() {
+        let dir = test_dir("line-changed-line-terminator");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\r\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.delete(5..6);
+
+        assert_eq!(buffer.text(), "alpha\n");
+        assert!(buffer.line_changed(0));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn undo_and_redo_restore_final_newline_change_marker() {
+        let dir = test_dir("line-changed-undo-redo-final-newline");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.delete(5..6);
+        assert!(buffer.line_changed(0));
+
+        buffer.undo();
+        assert!(!buffer.line_changed(0));
+
+        buffer.redo();
+        assert!(buffer.line_changed(0));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_resets_final_newline_change_marker_baseline() {
+        let dir = test_dir("line-changed-save-final-newline");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(5, "\n");
+        assert!(buffer.line_changed(0));
+
+        buffer.save().unwrap();
+        assert!(!buffer.line_changed(0));
         remove_dir(dir);
     }
 
