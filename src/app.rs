@@ -17,9 +17,11 @@ use std::{
     fs, io,
     ops::Range,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 const DIRTY_QUIT_PROMPT: &str = "Buffers modified; quit without saving? (y or n)";
+const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const COMMAND_HELP: &str =
     "Commands: /help, /commands, /open <path>, /search <text>, /next, /reload, /save, /undo, /redo, /quit, /quit!";
 
@@ -34,6 +36,7 @@ struct AppState {
     last_search: Option<String>,
     mark: Option<usize>,
     kill_ring: Option<String>,
+    last_disk_check: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,7 +99,12 @@ fn run_editor<W: io::Write>(terminal: &mut TerminalSession<W>, buffer: Buffer) -
     let renderer = Renderer::new();
     let mut app_state = AppState::default();
 
-    render_editor(&renderer, terminal.writer_mut(), &mut editor, &app_state)?;
+    render_editor(
+        &renderer,
+        terminal.writer_mut(),
+        &mut editor,
+        &mut app_state,
+    )?;
 
     loop {
         match event::read()? {
@@ -117,12 +125,20 @@ fn run_editor<W: io::Write>(terminal: &mut TerminalSession<W>, buffer: Buffer) -
                         )?,
                         AppControl::Quit => break,
                     }
-                    render_editor(&renderer, terminal.writer_mut(), &mut editor, &app_state)?;
+                    render_editor(
+                        &renderer,
+                        terminal.writer_mut(),
+                        &mut editor,
+                        &mut app_state,
+                    )?;
                 }
             }
-            Event::Resize(_, _) => {
-                render_editor(&renderer, terminal.writer_mut(), &mut editor, &app_state)?
-            }
+            Event::Resize(_, _) => render_editor(
+                &renderer,
+                terminal.writer_mut(),
+                &mut editor,
+                &mut app_state,
+            )?,
             _ => {}
         }
     }
@@ -595,7 +611,7 @@ impl AppState {
         let clear_mark = command_clears_mark(command);
         let outcome = commands::dispatch(command, buffer, view);
 
-        if clear_mark {
+        if clear_mark && !outcome.failed {
             self.mark = None;
         }
 
@@ -642,16 +658,29 @@ impl AppState {
             PromptKind::SwitchBuffer => format!("Switch buffer: {input}"),
         })
     }
+
+    fn disk_check_due(&mut self, now: Instant) -> bool {
+        let due = self.last_disk_check.is_none_or(|last_check| {
+            now.checked_duration_since(last_check)
+                .is_some_and(|elapsed| elapsed >= DISK_CHECK_INTERVAL)
+        });
+        if due {
+            self.last_disk_check = Some(now);
+        }
+        due
+    }
 }
 
 fn render_editor<W: io::Write>(
     renderer: &Renderer,
     writer: &mut W,
     editor: &mut Editor,
-    app_state: &AppState,
+    app_state: &mut AppState,
 ) -> io::Result<()> {
     let (buffer, view) = editor.active_mut();
-    buffer.refresh_disk_changed();
+    if app_state.disk_check_due(Instant::now()) {
+        buffer.refresh_disk_changed();
+    }
     render(renderer, writer, buffer, view, app_state)
 }
 
@@ -739,6 +768,7 @@ fn command_clears_mark(command: commands::Command) -> bool {
 mod tests {
     use super::{
         apply_app_action, AppAction, AppControl, AppState, COMMAND_HELP, DIRTY_QUIT_PROMPT,
+        DISK_CHECK_INTERVAL,
     };
     use crate::{
         buffer::Buffer, editor::Editor, input::Key, keymap::Keymap, renderer::StatusKind,
@@ -748,7 +778,7 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         sync::atomic::{AtomicUsize, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Instant, SystemTime, UNIX_EPOCH},
     };
 
     static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -789,6 +819,7 @@ mod tests {
         let mut keymap = Keymap::new();
         let mut buffer = Buffer::open(&path).unwrap();
         let mut view = View::new();
+        app.mark = Some(1);
         fs::write(&path, "after").unwrap();
 
         app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
@@ -801,7 +832,44 @@ mod tests {
             Some(format!("Reloaded {}", path.display()))
         );
         assert_eq!(app.status_kind, Some(StatusKind::Success));
+        assert_eq!(app.mark, None);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_reload_preserves_the_active_mark() {
+        let dir = test_dir("reload-mark");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "before").unwrap();
+        let mut app = AppState {
+            mark: Some(1),
+            ..AppState::default()
+        };
+        let mut keymap = Keymap::new();
+        let mut buffer = Buffer::open(&path).unwrap();
+        let mut view = View::new();
+        buffer.insert(0, "local ");
+        fs::write(&path, "external").unwrap();
+
+        app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('r'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(app.mark, Some(1));
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Reload refused")));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn disk_change_checks_are_rate_limited() {
+        let start = Instant::now();
+        let mut app = AppState::default();
+
+        assert!(app.disk_check_due(start));
+        assert!(!app.disk_check_due(start + DISK_CHECK_INTERVAL / 2));
+        assert!(app.disk_check_due(start + DISK_CHECK_INTERVAL));
     }
 
     #[test]

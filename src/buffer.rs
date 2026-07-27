@@ -243,8 +243,7 @@ impl Buffer {
 
     pub fn save(&mut self) -> io::Result<()> {
         ensure_parent_directory_exists(&self.path)?;
-        write_atomically(&self.path, &self.text)?;
-        self.disk_baseline = disk_stamp(&self.path)?;
+        self.disk_baseline = write_atomically(&self.path, &self.text)?;
         self.disk_changed = false;
         self.clean_text = self.text.to_string();
         self.dirty = false;
@@ -416,23 +415,25 @@ fn find_byte_from(text: &str, query: &str, start_byte: usize) -> Option<usize> {
 /// The contents are written to a temporary sibling file, flushed and fsynced,
 /// then atomically renamed over the target. If any step fails the original file
 /// is left untouched and the temporary file is removed.
-fn write_atomically(path: &Path, text: &Rope) -> io::Result<()> {
+fn write_atomically(path: &Path, text: &Rope) -> io::Result<DiskStamp> {
     write_atomically_with(path, random_temp_suffix, |file| {
         let mut writer = BufWriter::new(file);
         text.write_to(&mut writer)?;
         writer.flush()?;
-        let file = writer.into_inner().map_err(|error| error.into_error())?;
-        file.sync_all()
+        writer.get_ref().sync_all()
     })
 }
 
-fn write_atomically_with<S, W>(path: &Path, suffix: S, write: W) -> io::Result<()>
+fn write_atomically_with<S, W>(path: &Path, suffix: S, write: W) -> io::Result<DiskStamp>
 where
     S: FnMut() -> io::Result<String>,
-    W: FnOnce(File) -> io::Result<()>,
+    W: FnOnce(&mut File) -> io::Result<()>,
 {
-    let (temp_path, temp_file) = create_temp_file(path, suffix)?;
-    let result = write(temp_file).and_then(|()| fs::rename(&temp_path, path));
+    let (temp_path, mut temp_file) = create_temp_file(path, suffix)?;
+    let result = write(&mut temp_file).and_then(|()| {
+        fs::rename(&temp_path, path)?;
+        Ok(stamp_for_metadata(&temp_file.metadata()?))
+    });
 
     if result.is_err() {
         let _ = fs::remove_file(&temp_path);
@@ -500,9 +501,10 @@ fn ensure_parent_directory_exists(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{temp_path_for, write_atomically_with, Buffer};
+    use super::{disk_stamp, temp_path_for, write_atomically_with, Buffer};
     use std::{
-        fs, io,
+        fs::{self, FileTimes},
+        io,
         io::Write,
         os::unix::fs::symlink,
         path::PathBuf,
@@ -560,6 +562,27 @@ mod tests {
         fs::write(&missing_path, "created outside Cortex").unwrap();
         missing_buffer.refresh_disk_changed();
         assert!(missing_buffer.disk_changed());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn disk_changed_detects_same_length_edits_with_restored_mtime() {
+        let dir = test_dir("disk-changed-restored-mtime");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "AAAA").unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        fs::write(&path, "BBBB").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
+        buffer.refresh_disk_changed();
+
+        assert!(buffer.disk_changed());
         remove_dir(dir);
     }
 
@@ -925,13 +948,33 @@ mod tests {
         write_atomically_with(
             &path,
             || Ok(suffixes.next().unwrap().to_string()),
-            |mut file| file.write_all(b"saved"),
+            |file| file.write_all(b"saved"),
         )
         .unwrap();
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "saved");
         assert_eq!(fs::read_to_string(&occupied).unwrap(), "attacker content");
         assert!(!temp_path_for(&path, "available").exists());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn atomic_write_returns_the_stamp_of_the_saved_file() {
+        let dir = test_dir("save-returned-stamp");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+
+        let saved_stamp = write_atomically_with(
+            &path,
+            || Ok("saved".to_string()),
+            |file| file.write_all(b"saved"),
+        )
+        .unwrap();
+
+        assert_eq!(saved_stamp, disk_stamp(&path).unwrap());
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, "external replacement").unwrap();
+        assert_ne!(saved_stamp, disk_stamp(&path).unwrap());
         remove_dir(dir);
     }
 
@@ -949,7 +992,7 @@ mod tests {
         write_atomically_with(
             &path,
             || Ok(suffixes.next().unwrap().to_string()),
-            |mut file| file.write_all(b"saved"),
+            |file| file.write_all(b"saved"),
         )
         .unwrap();
 
@@ -983,7 +1026,7 @@ mod tests {
                 }
                 .to_string())
             },
-            |mut file| file.write_all(b"saved"),
+            |file| file.write_all(b"saved"),
         )
         .unwrap();
 
@@ -1006,7 +1049,7 @@ mod tests {
         let result = write_atomically_with(
             &path,
             || Ok(suffixes.next().unwrap().to_string()),
-            |mut file| {
+            |file| {
                 file.write_all(b"partial")?;
                 Err(io::Error::other("injected write failure"))
             },
