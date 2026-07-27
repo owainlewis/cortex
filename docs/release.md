@@ -23,6 +23,7 @@ git push origin v0.1.0
 Pushing the tag starts the `Release` workflow.
 The workflow verifies that the tagged commit is reachable from `main`.
 It then checks formatting, runs Clippy with warnings denied, runs the test suite, and builds the macOS release binary.
+The workflow generates signed build provenance for the release archive before uploading it for publication.
 Before publishing, it verifies that the remote tag still targets the commit that passed those gates.
 The GitHub Release and its assets are created only after every gate passes.
 A failed gate for an unpublished tag creates no GitHub Release or release assets.
@@ -42,13 +43,20 @@ gh release view v0.1.0 --repo owainlewis/cortex
 ```
 
 Download the archive and checksum.
-Verify the checksum before running the binary:
+Verify the checksum and signed provenance before running the binary:
 
 ```sh
 shasum -a 256 -c cortex-v0.1.0-aarch64-apple-darwin.tar.gz.sha256
+gh attestation verify cortex-v0.1.0-aarch64-apple-darwin.tar.gz \
+  --repo owainlewis/cortex \
+  --signer-workflow owainlewis/cortex/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.1.0
 tar -xzf cortex-v0.1.0-aarch64-apple-darwin.tar.gz
 ./cortex --version
 ```
+
+The checksum confirms that the archive matches the published digest.
+The attestation verifies that the archive was produced for that tag by this repository's release workflow.
 
 ## Install And Update
 
