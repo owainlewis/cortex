@@ -54,6 +54,7 @@ const RUBY_EXTENSIONS: &[&str] = &["rb", "rake", "gemspec"];
 const OCAML_EXTENSIONS: &[&str] = &["ml"];
 const OCAML_INTERFACE_EXTENSIONS: &[&str] = &["mli"];
 const HIGHLIGHT_READ_AHEAD_LINES: usize = 256;
+const MAX_HIGHLIGHT_LINE_CHARS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HighlightKind {
@@ -100,6 +101,8 @@ pub struct SyntaxHighlighter {
     documents: HashMap<u64, HighlightedDocument>,
     #[cfg(test)]
     document_parse_count: usize,
+    #[cfg(test)]
+    last_document_bytes: usize,
 }
 
 struct LanguageDefinition {
@@ -139,6 +142,8 @@ impl SyntaxHighlighter {
             documents: HashMap::new(),
             #[cfg(test)]
             document_parse_count: 0,
+            #[cfg(test)]
+            last_document_bytes: 0,
         }
     }
 
@@ -158,8 +163,8 @@ impl SyntaxHighlighter {
             let covered_lines = visible_end
                 .saturating_add(HIGHLIGHT_READ_AHEAD_LINES)
                 .min(buffer.len_lines());
-            let highlighted_lines =
-                self.highlight_document(buffer.path(), &buffer.text_prefix_lines(covered_lines));
+            let source = buffer.text_prefix_lines(covered_lines, MAX_HIGHLIGHT_LINE_CHARS);
+            let highlighted_lines = self.highlight_document(buffer.path(), &source);
             self.documents.insert(
                 buffer_id,
                 HighlightedDocument {
@@ -180,6 +185,7 @@ impl SyntaxHighlighter {
         #[cfg(test)]
         {
             self.document_parse_count += 1;
+            self.last_document_bytes = source.len();
         }
 
         let lines = document_lines(source);
@@ -904,6 +910,22 @@ mod tests {
             highlighter.documents[&buffer.id()].covered_lines,
             20 + super::HIGHLIGHT_READ_AHEAD_LINES
         );
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn pathological_single_line_buffer_has_a_strict_highlight_work_bound() {
+        let text = format!("fn main() {{}}{}", "x".repeat(1_000_000));
+        let (buffer, dir) = buffer_with_text("minified.rs", &text);
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 0..1);
+
+        assert_eq!(
+            highlighter.last_document_bytes,
+            super::MAX_HIGHLIGHT_LINE_CHARS
+        );
+        assert!(line_has_kind(&highlighted[0], HighlightKind::Keyword));
         remove_dir(dir);
     }
 

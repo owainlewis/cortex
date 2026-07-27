@@ -18,7 +18,7 @@ The editor already supports multiple buffers, and future windows may render the 
 
 1. Add a monotonic text revision to `Buffer` that changes after insert, delete, undo, and redo operations that modify text.
 2. Keep document highlight caches in `SyntaxHighlighter`, keyed by stable buffer identity and revision.
-3. Parse and highlight the source prefix needed for the viewport plus a bounded read-ahead window when its cache is absent, stale, or too short.
+3. Parse and highlight the source prefix needed for the viewport plus bounded line read-ahead and per-line character limits when its cache is absent, stale, or too short.
 4. Return only the document-relative line spans requested by the renderer.
 5. Keep buffer contents, view state, editing behavior, and terminal styling unchanged.
 6. Add focused tests for Rust block comments, Rust multiline strings, and Markdown fenced Rust code when their openers are above the requested viewport.
@@ -35,6 +35,8 @@ Scrolling and repeated rendering do not reparse an unchanged buffer.
 Editing invalidates the changed buffer's cached document without invalidating other buffers.
 
 Highlighting a large buffer near its start does not parse or retain the unrelated tail.
+
+Highlighting a minified or otherwise very long physical line does not parse its unrelated tail beyond Cortex's visible editing surface.
 
 Highlight state remains behind the renderer and highlighter boundary and is reusable by multiple views of the same buffer.
 
