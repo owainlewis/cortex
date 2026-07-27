@@ -1,11 +1,13 @@
 use ropey::{Rope, RopeSlice};
 use std::{
     ffi::{OsStr, OsString},
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, BufReader, BufWriter, Write},
     ops::Range,
     path::{Path, PathBuf},
 };
+
+const TEMP_FILE_CREATE_ATTEMPTS: usize = 128;
 
 #[derive(Debug, Clone)]
 pub struct Buffer {
@@ -278,17 +280,22 @@ fn find_byte_from(text: &str, query: &str, start_byte: usize) -> Option<usize> {
 /// then atomically renamed over the target. If any step fails the original file
 /// is left untouched and the temporary file is removed.
 fn write_atomically(path: &Path, text: &Rope) -> io::Result<()> {
-    let temp_path = temp_path_for(path);
-
-    let result = (|| {
-        let file = File::create(&temp_path)?;
+    write_atomically_with(path, random_temp_suffix, |file| {
         let mut writer = BufWriter::new(file);
         text.write_to(&mut writer)?;
         writer.flush()?;
         let file = writer.into_inner().map_err(|error| error.into_error())?;
-        file.sync_all()?;
-        fs::rename(&temp_path, path)
-    })();
+        file.sync_all()
+    })
+}
+
+fn write_atomically_with<S, W>(path: &Path, suffix: S, write: W) -> io::Result<()>
+where
+    S: FnMut() -> io::Result<String>,
+    W: FnOnce(File) -> io::Result<()>,
+{
+    let (temp_path, temp_file) = create_temp_file(path, suffix)?;
+    let result = write(temp_file).and_then(|()| fs::rename(&temp_path, path));
 
     if result.is_err() {
         let _ = fs::remove_file(&temp_path);
@@ -297,10 +304,41 @@ fn write_atomically(path: &Path, text: &Rope) -> io::Result<()> {
     result
 }
 
-fn temp_path_for(path: &Path) -> PathBuf {
+fn create_temp_file<S>(path: &Path, mut suffix: S) -> io::Result<(PathBuf, File)>
+where
+    S: FnMut() -> io::Result<String>,
+{
+    for _ in 0..TEMP_FILE_CREATE_ATTEMPTS {
+        let temp_path = temp_path_for(path, &suffix()?);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not create a unique temporary save file",
+    ))
+}
+
+fn random_temp_suffix() -> io::Result<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        io::Error::other(format!("could not generate a temporary name: {error}"))
+    })?;
+    Ok(format!("{:032x}", u128::from_ne_bytes(bytes)))
+}
+
+fn temp_path_for(path: &Path, suffix: &str) -> PathBuf {
     let mut name = OsString::from(".");
     name.push(path.file_name().unwrap_or_else(|| OsStr::new("cortex")));
-    name.push(format!(".cortex-{}.tmp", std::process::id()));
+    name.push(format!(".cortex-{suffix}.tmp"));
 
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
@@ -325,9 +363,11 @@ fn ensure_parent_directory_exists(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Buffer;
+    use super::{temp_path_for, write_atomically_with, Buffer};
     use std::{
         fs, io,
+        io::Write,
+        os::unix::fs::symlink,
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -590,6 +630,112 @@ mod tests {
 
         assert_eq!(names, vec!["notes.txt".to_string()]);
         assert_eq!(fs::read_to_string(&path).unwrap(), "before\nafter");
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_retries_a_pre_existing_temporary_file_without_changing_it() {
+        let dir = test_dir("save-pre-existing-temp-file");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+        let occupied = temp_path_for(&path, "occupied");
+        fs::write(&occupied, "attacker content").unwrap();
+        let mut suffixes = ["occupied", "available"].into_iter();
+
+        write_atomically_with(
+            &path,
+            || Ok(suffixes.next().unwrap().to_string()),
+            |mut file| file.write_all(b"saved"),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "saved");
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "attacker content");
+        assert!(!temp_path_for(&path, "available").exists());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_does_not_follow_or_remove_a_hostile_temporary_symlink() {
+        let dir = test_dir("save-hostile-temp-symlink");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+        let symlink_target = dir.join("attacker-target.txt");
+        fs::write(&symlink_target, "attacker content").unwrap();
+        let occupied = temp_path_for(&path, "occupied");
+        symlink(&symlink_target, &occupied).unwrap();
+        let mut suffixes = ["occupied", "available"].into_iter();
+
+        write_atomically_with(
+            &path,
+            || Ok(suffixes.next().unwrap().to_string()),
+            |mut file| file.write_all(b"saved"),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "saved");
+        assert_eq!(
+            fs::read_to_string(&symlink_target).unwrap(),
+            "attacker content"
+        );
+        assert!(occupied.is_symlink());
+        assert!(!temp_path_for(&path, "available").exists());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn temporary_name_collisions_are_retried_safely() {
+        let dir = test_dir("save-temp-collision");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+        let occupied = temp_path_for(&path, "occupied");
+        fs::write(&occupied, "occupied").unwrap();
+        let mut attempts = 0;
+
+        write_atomically_with(
+            &path,
+            || {
+                attempts += 1;
+                Ok(if attempts == 1 {
+                    "occupied"
+                } else {
+                    "available"
+                }
+                .to_string())
+            },
+            |mut file| file.write_all(b"saved"),
+        )
+        .unwrap();
+
+        assert_eq!(attempts, 2);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "saved");
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "occupied");
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn write_failure_preserves_the_target_and_cleans_up_only_the_created_temp_file() {
+        let dir = test_dir("save-write-failure-cleanup");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+        let occupied = temp_path_for(&path, "occupied");
+        fs::write(&occupied, "attacker content").unwrap();
+        let created = temp_path_for(&path, "created");
+        let mut suffixes = ["occupied", "created"].into_iter();
+
+        let result = write_atomically_with(
+            &path,
+            || Ok(suffixes.next().unwrap().to_string()),
+            |mut file| {
+                file.write_all(b"partial")?;
+                Err(io::Error::other("injected write failure"))
+            },
+        );
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Other);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "attacker content");
+        assert!(!created.exists());
         remove_dir(dir);
     }
 
