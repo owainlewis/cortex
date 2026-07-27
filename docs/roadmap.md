@@ -146,18 +146,20 @@ Release notes should focus on splits, tabs, and navigation.
 
 ## v0.5 Agent Workflow
 
-Status: Planned.
+Status: In progress.
 
 Goal: support terminal-based coding agents without adding an AI platform.
 
-Likely includes:
+Shipped:
 - Manual file reload.
 - Dirty reload guard.
 - Disk changed indicator.
+
+Planned:
 - Terminal pane as a window leaf.
 
 Tracking issues:
-- [open] [#48 Add agent-safe file reload](https://github.com/owainlewis/cortex/issues/48)
+- [closed] [#48 Add agent-safe file reload](https://github.com/owainlewis/cortex/issues/48)
 - [open] [#49 Add terminal pane as a window leaf](https://github.com/owainlewis/cortex/issues/49)
 
 Release notes should focus on reload safety and working with files changed by agents.

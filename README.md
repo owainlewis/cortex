@@ -132,6 +132,7 @@ It includes shared prompts for commands and buffer navigation, a directory picke
 | `Command-z` | Undo the last edit |
 | `C-x C-f` | Enter a path to find or create a file buffer |
 | `C-x b` | Switch to an open buffer by path or unique file name |
+| `C-x C-r` | Reload a clean buffer from disk |
 | `C-x C-s` | Save the file |
 | `C-x C-c` | Quit |
 | `/` | Open the slash command line |
@@ -145,6 +146,7 @@ Press `n` or Escape to cancel.
 | Command | Action |
 | --- | --- |
 | `/save` | Save the current file |
+| `/reload` | Reload a clean buffer from disk |
 | `/search <text>` | Search forward for text |
 | `/next` | Repeat the previous search |
 | `/undo` | Undo the last edit |
@@ -203,7 +205,9 @@ The renderer uses a simple full-screen redraw rather than diffed rendering.
 Syntax highlighting can lose context when the viewport begins inside a multiline construct.
 Unicode grapheme handling is incomplete.
 Saving an existing file does not yet guarantee preservation of permissions, macOS metadata, or symlink behavior.
-External file changes are not watched or reloaded.
+External file changes are not watched automatically.
+The modeline marks detected disk changes, and `C-x C-r` or `/reload` reloads the file.
+Reload refuses to replace a buffer with unsaved edits.
 
 ## License
 
