@@ -18,21 +18,23 @@ pub enum Key {
 }
 
 pub fn key_from_event(event: KeyEvent) -> Key {
+    let meta_modifiers = KeyModifiers::ALT | KeyModifiers::META;
+    let allowed_meta_modifiers = meta_modifiers | KeyModifiers::SHIFT;
+
     match event.code {
-        KeyCode::Null => Key::Ctrl(' '),
-        KeyCode::Char(ch) if event.modifiers.contains(KeyModifiers::SUPER) => {
-            Key::Command(ch.to_ascii_lowercase())
-        }
         KeyCode::Char(ch)
-            if event.modifiers.contains(KeyModifiers::ALT)
-                || event.modifiers.contains(KeyModifiers::META) =>
+            if event.modifiers.intersects(meta_modifiers)
+                && event
+                    .modifiers
+                    .difference(allowed_meta_modifiers)
+                    .is_empty() =>
         {
             Key::Meta(ch.to_ascii_lowercase())
         }
-        _ if event.modifiers.contains(KeyModifiers::ALT)
-            || event.modifiers.contains(KeyModifiers::META) =>
-        {
-            Key::Unhandled
+        _ if event.modifiers.intersects(meta_modifiers) => Key::Unhandled,
+        KeyCode::Null => Key::Ctrl(' '),
+        KeyCode::Char(ch) if event.modifiers.contains(KeyModifiers::SUPER) => {
+            Key::Command(ch.to_ascii_lowercase())
         }
         KeyCode::Char(ch) if event.modifiers.contains(KeyModifiers::CONTROL) => {
             Key::Ctrl(ch.to_ascii_lowercase())
@@ -118,7 +120,10 @@ mod tests {
             Key::Meta('x')
         );
         assert_eq!(
-            key_from_event(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::META)),
+            key_from_event(KeyEvent::new(
+                KeyCode::Char('X'),
+                KeyModifiers::META | KeyModifiers::SHIFT
+            )),
             Key::Meta('x')
         );
     }
@@ -135,6 +140,24 @@ mod tests {
         );
         assert_eq!(
             key_from_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::ALT)),
+            Key::Unhandled
+        );
+    }
+
+    #[test]
+    fn maps_meta_characters_with_extra_modifiers_to_unhandled() {
+        assert_eq!(
+            key_from_event(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            Key::Unhandled
+        );
+        assert_eq!(
+            key_from_event(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::SUPER | KeyModifiers::META
+            )),
             Key::Unhandled
         );
     }
