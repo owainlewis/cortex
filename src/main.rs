@@ -69,3 +69,5 @@ fn main() -> ExitCode {
         }
     }
 }
+
+this intentionally invalid rust verifies issue 65 protection
