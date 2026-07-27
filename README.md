@@ -135,7 +135,7 @@ It includes shared prompts for commands and buffer navigation, a directory picke
 | `C-x C-r` | Reload a clean buffer from disk |
 | `C-x C-s` | Save the file |
 | `C-x C-c` | Quit |
-| `/` | Open the slash command line |
+| `M-x` | Open the slash command line |
 
 If any open buffer is dirty, `C-x C-c` asks whether to quit without saving.
 Press `y` to confirm.
@@ -196,10 +196,10 @@ The switch-buffer prompt requires an exact path or a unique file name and does n
 Search is forward-only through `/search <text>`, with `C-s` or `/next` repeating the last search.
 Incremental and reverse search are not implemented yet.
 Cut and yank retain only the latest cut text, with no kill ring or yank-pop yet.
-Typing `/` opens command entry, so a literal slash cannot currently be inserted into a buffer.
+Slash commands are entered through `M-x`; the leading slash remains part of the command syntax until the command registry lands.
 The directory picker can expand directories, but it is still a minimal picker.
 The slash command `/open <path>` opens files only, not directories.
-There are no splits, tabs, command registry, `M-x`, config, plugins, LSP, AI integration, or embedded terminal pane yet.
+There are no splits, tabs, command registry, config, plugins, LSP, AI integration, or embedded terminal pane yet.
 Long lines are clipped to the terminal width instead of wrapped.
 The renderer uses a simple full-screen redraw rather than diffed rendering.
 Syntax highlighting can lose context when the viewport begins inside a multiline construct.

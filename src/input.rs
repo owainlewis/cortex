@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum Key {
     Char(char),
     Ctrl(char),
+    Meta(char),
     Command(char),
     Enter,
     Escape,
@@ -17,14 +18,16 @@ pub enum Key {
 }
 
 pub fn key_from_event(event: KeyEvent) -> Key {
-    if event.modifiers.contains(KeyModifiers::ALT) || event.modifiers.contains(KeyModifiers::META) {
-        return Key::Unhandled;
-    }
-
     match event.code {
         KeyCode::Null => Key::Ctrl(' '),
         KeyCode::Char(ch) if event.modifiers.contains(KeyModifiers::SUPER) => {
             Key::Command(ch.to_ascii_lowercase())
+        }
+        KeyCode::Char(ch)
+            if event.modifiers.contains(KeyModifiers::ALT)
+                || event.modifiers.contains(KeyModifiers::META) =>
+        {
+            Key::Meta(ch.to_ascii_lowercase())
         }
         KeyCode::Char(ch) if event.modifiers.contains(KeyModifiers::CONTROL) => {
             Key::Ctrl(ch.to_ascii_lowercase())
@@ -104,9 +107,21 @@ mod tests {
     }
 
     #[test]
-    fn maps_invalid_keys_to_unhandled_so_prefixes_can_reset() {
+    fn maps_meta_characters_case_insensitively() {
         assert_eq!(
             key_from_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)),
+            Key::Meta('x')
+        );
+        assert_eq!(
+            key_from_event(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::META)),
+            Key::Meta('x')
+        );
+    }
+
+    #[test]
+    fn maps_invalid_keys_to_unhandled_so_prefixes_can_reset() {
+        assert_eq!(
+            key_from_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::ALT)),
             Key::Unhandled
         );
     }

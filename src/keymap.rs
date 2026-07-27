@@ -22,10 +22,6 @@ impl Keymap {
         Self::default()
     }
 
-    pub fn has_pending_prefix(&self) -> bool {
-        self.pending_prefix.is_some()
-    }
-
     pub fn resolve(&mut self, key: Key) -> KeymapResult {
         if let Some(prefix) = self.pending_prefix.take() {
             return resolve_prefixed(prefix, key);
@@ -51,6 +47,7 @@ impl Keymap {
             Key::Ctrl('e') => KeymapResult::Command(Command::MoveToLineEnd),
             Key::Ctrl('s') => KeymapResult::Command(Command::RepeatSearch),
             Key::Ctrl(' ') => KeymapResult::Command(Command::SetMark),
+            Key::Meta('x') => KeymapResult::Command(Command::OpenCommandLine),
             Key::Command('z') => KeymapResult::Command(Command::Undo),
             Key::Ctrl('/') | Key::Ctrl('_') => KeymapResult::Command(Command::Undo),
             _ => KeymapResult::Unbound,
@@ -82,6 +79,10 @@ mod tests {
         assert_eq!(
             keymap.resolve(Key::Char('a')),
             KeymapResult::Command(Command::Insert('a'))
+        );
+        assert_eq!(
+            keymap.resolve(Key::Char('/')),
+            KeymapResult::Command(Command::Insert('/'))
         );
         assert_eq!(
             keymap.resolve(Key::Enter),
@@ -166,6 +167,10 @@ mod tests {
             KeymapResult::Command(Command::SetMark)
         );
         assert_eq!(
+            keymap.resolve(Key::Meta('x')),
+            KeymapResult::Command(Command::OpenCommandLine)
+        );
+        assert_eq!(
             keymap.resolve(Key::Command('z')),
             KeymapResult::Command(Command::Undo)
         );
@@ -241,16 +246,5 @@ mod tests {
             keymap.resolve(Key::Char('a')),
             KeymapResult::Command(Command::Insert('a'))
         );
-    }
-
-    #[test]
-    fn reports_pending_prefix_state() {
-        let mut keymap = Keymap::new();
-
-        assert!(!keymap.has_pending_prefix());
-        assert_eq!(keymap.resolve(Key::Ctrl('x')), KeymapResult::PendingPrefix);
-        assert!(keymap.has_pending_prefix());
-        assert_eq!(keymap.resolve(Key::Unhandled), KeymapResult::Unbound);
-        assert!(!keymap.has_pending_prefix());
     }
 }
