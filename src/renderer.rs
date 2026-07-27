@@ -1414,6 +1414,23 @@ mod tests {
     }
 
     #[test]
+    fn frame_marks_a_final_newline_only_change_in_the_gutter() {
+        let mut buffer = buffer_with_text("notes.txt", "alpha\n");
+        buffer.delete(5..6);
+
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 40, rows: 3 },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(frame.lines[0].gutter, "+>  1 ");
+    }
+
+    #[test]
     fn frame_uses_scroll_line_to_keep_point_visible() {
         let buffer = buffer_with_text("notes.txt", "one\ntwo\nthree\nfour\n");
         let mut view = View::new();
