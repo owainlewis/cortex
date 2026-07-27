@@ -29,6 +29,11 @@ pub fn key_from_event(event: KeyEvent) -> Key {
         {
             Key::Meta(ch.to_ascii_lowercase())
         }
+        _ if event.modifiers.contains(KeyModifiers::ALT)
+            || event.modifiers.contains(KeyModifiers::META) =>
+        {
+            Key::Unhandled
+        }
         KeyCode::Char(ch) if event.modifiers.contains(KeyModifiers::CONTROL) => {
             Key::Ctrl(ch.to_ascii_lowercase())
         }
@@ -119,7 +124,15 @@ mod tests {
     }
 
     #[test]
-    fn maps_invalid_keys_to_unhandled_so_prefixes_can_reset() {
+    fn maps_meta_modified_non_characters_to_unhandled() {
+        assert_eq!(
+            key_from_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)),
+            Key::Unhandled
+        );
+        assert_eq!(
+            key_from_event(KeyEvent::new(KeyCode::Left, KeyModifiers::META)),
+            Key::Unhandled
+        );
         assert_eq!(
             key_from_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::ALT)),
             Key::Unhandled
