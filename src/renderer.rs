@@ -395,13 +395,11 @@ impl Renderer {
         keycast: Option<&str>,
     ) -> io::Result<()> {
         let viewport_height = self.viewport_height(size);
-        let width = size.cols as usize;
-        let text_width = width.saturating_sub(editor_gutter_width(buffer, width));
-        let visible_lines = visible_lines(buffer, view, text_width, viewport_height);
-        let highlighted_lines = self
-            .highlighter
-            .borrow_mut()
-            .highlight_visible_lines(buffer.path(), &visible_lines);
+        let first_visible_line = view.scroll_line();
+        let highlighted_lines = self.highlighter.borrow_mut().highlight_visible_lines(
+            buffer,
+            first_visible_line..first_visible_line.saturating_add(viewport_height),
+        );
         let frame = build_frame_with_highlights(
             buffer,
             view,
@@ -614,19 +612,6 @@ fn build_frame_with_highlights(
         cursor,
         modeline_style,
     }
-}
-
-fn visible_lines(
-    buffer: &Buffer,
-    view: &View,
-    width: usize,
-    viewport_height: usize,
-) -> Vec<String> {
-    (0..viewport_height)
-        .map(|screen_row| view.scroll_line().saturating_add(screen_row))
-        .take_while(|line_idx| *line_idx < buffer.len_lines())
-        .map(|line_idx| buffer.line_prefix_text(line_idx, width))
-        .collect()
 }
 
 fn editor_gutter_width(buffer: &Buffer, terminal_width: usize) -> usize {
