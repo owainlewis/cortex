@@ -102,7 +102,7 @@ pub struct SyntaxHighlighter {
     #[cfg(test)]
     document_parse_count: usize,
     #[cfg(test)]
-    last_document_bytes: usize,
+    last_request_bytes: usize,
 }
 
 struct LanguageDefinition {
@@ -143,7 +143,7 @@ impl SyntaxHighlighter {
             #[cfg(test)]
             document_parse_count: 0,
             #[cfg(test)]
-            last_document_bytes: 0,
+            last_request_bytes: 0,
         }
     }
 
@@ -152,9 +152,14 @@ impl SyntaxHighlighter {
         buffer: &Buffer,
         line_range: Range<usize>,
     ) -> Vec<Vec<HighlightSpan>> {
+        let visible_start = line_range.start.min(buffer.len_lines());
+        let visible_end = line_range.end.min(buffer.len_lines());
+        if self.language_idx_for_path(buffer.path()).is_none() {
+            return vec![Vec::new(); visible_end.saturating_sub(visible_start)];
+        }
+
         let buffer_id = buffer.id();
         let revision = buffer.revision();
-        let visible_end = line_range.end.min(buffer.len_lines());
         let needs_refresh = self.documents.get(&buffer_id).is_none_or(|document| {
             document.revision != revision || document.covered_lines < visible_end
         });
@@ -163,8 +168,14 @@ impl SyntaxHighlighter {
             let covered_lines = visible_end
                 .saturating_add(HIGHLIGHT_READ_AHEAD_LINES)
                 .min(buffer.len_lines());
-            let source = buffer.text_prefix_lines(covered_lines, MAX_HIGHLIGHT_LINE_CHARS);
-            let highlighted_lines = self.highlight_document(buffer.path(), &source);
+            let (source, context_barriers) =
+                buffer.text_prefix_lines(covered_lines, MAX_HIGHLIGHT_LINE_CHARS);
+            #[cfg(test)]
+            {
+                self.last_request_bytes = source.len();
+            }
+            let highlighted_lines =
+                self.highlight_document_segments(buffer.path(), &source, &context_barriers);
             self.documents.insert(
                 buffer_id,
                 HighlightedDocument {
@@ -181,11 +192,45 @@ impl SyntaxHighlighter {
             .to_vec()
     }
 
+    fn highlight_document_segments(
+        &mut self,
+        path: &Path,
+        source: &str,
+        context_barriers: &[usize],
+    ) -> Vec<Vec<HighlightSpan>> {
+        if context_barriers.is_empty() {
+            return self.highlight_document(path, source);
+        }
+
+        let lines = document_lines(source);
+        let mut highlighted_lines = vec![Vec::new(); lines.len()];
+        let mut segment_start = 0;
+
+        for segment_end in context_barriers
+            .iter()
+            .copied()
+            .chain(std::iter::once(lines.len()))
+        {
+            if segment_start < segment_end {
+                let segment = lines[segment_start..segment_end].join("\n");
+                for (offset, spans) in self
+                    .highlight_document(path, &segment)
+                    .into_iter()
+                    .enumerate()
+                {
+                    highlighted_lines[segment_start + offset] = spans;
+                }
+            }
+            segment_start = segment_end;
+        }
+
+        highlighted_lines
+    }
+
     fn highlight_document(&mut self, path: &Path, source: &str) -> Vec<Vec<HighlightSpan>> {
         #[cfg(test)]
         {
             self.document_parse_count += 1;
-            self.last_document_bytes = source.len();
         }
 
         let lines = document_lines(source);
@@ -922,10 +967,44 @@ mod tests {
         let highlighted = highlighter.highlight_visible_lines(&buffer, 0..1);
 
         assert_eq!(
-            highlighter.last_document_bytes,
+            highlighter.last_request_bytes,
             super::MAX_HIGHLIGHT_LINE_CHARS
         );
         assert!(line_has_kind(&highlighted[0], HighlightKind::Keyword));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn truncated_line_does_not_leak_false_context_into_later_lines() {
+        let text = format!(
+            "fn main() {{\n    /*{}*/\n    let visible = 42;\n}}\n",
+            "x".repeat(super::MAX_HIGHLIGHT_LINE_CHARS)
+        );
+        let (buffer, dir) = buffer_with_text("barrier.rs", &text);
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 1..3);
+
+        assert!(line_has_kind(&highlighted[1], HighlightKind::Keyword));
+        assert!(!line_has_kind(&highlighted[1], HighlightKind::Comment));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn unsupported_buffer_skips_prefix_construction_and_parsing() {
+        let text = (0..5000)
+            .map(|idx| format!("plain text line {idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (buffer, dir) = buffer_with_text("large.txt", &text);
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 4000..4020);
+
+        assert_eq!(highlighted, vec![Vec::new(); 20]);
+        assert_eq!(highlighter.document_parse_count, 0);
+        assert_eq!(highlighter.last_request_bytes, 0);
+        assert!(highlighter.documents.is_empty());
         remove_dir(dir);
     }
 

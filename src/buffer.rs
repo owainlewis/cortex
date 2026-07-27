@@ -132,18 +132,26 @@ impl Buffer {
         self.text.to_string()
     }
 
-    pub(crate) fn text_prefix_lines(&self, line_count: usize, max_chars_per_line: usize) -> String {
+    pub(crate) fn text_prefix_lines(
+        &self,
+        line_count: usize,
+        max_chars_per_line: usize,
+    ) -> (String, Vec<usize>) {
         let line_count = line_count.min(self.len_lines());
         let mut text = String::new();
+        let mut context_barriers = Vec::new();
 
         for line_idx in 0..line_count {
             if line_idx > 0 {
                 text.push('\n');
             }
             text.push_str(&self.line_prefix_text(line_idx, max_chars_per_line));
+            if line_content_len_chars(self.text.line(line_idx)) > max_chars_per_line {
+                context_barriers.push(line_idx + 1);
+            }
         }
 
-        text
+        (text, context_barriers)
     }
 
     pub fn text_range(&self, char_range: Range<usize>) -> String {
