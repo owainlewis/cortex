@@ -249,9 +249,18 @@ pub enum StatusKind {
     Prompt,
 }
 
-#[derive(Default)]
 pub struct Renderer {
     highlighter: RefCell<SyntaxHighlighter>,
+    last_frame: RefCell<Option<CellFrame>>,
+}
+
+impl Default for Renderer {
+    fn default() -> Self {
+        Self {
+            highlighter: RefCell::new(SyntaxHighlighter::default()),
+            last_frame: RefCell::new(None),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,6 +283,25 @@ struct PickerFrame {
     modeline: String,
     cursor: CursorPosition,
     status_kind: Option<StatusKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CellFrame {
+    size: TerminalSize,
+    cells: Vec<Cell>,
+    cursor: CursorPosition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cell {
+    content: CellContent,
+    style: TextStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CellContent {
+    Text(char),
+    Continuation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,7 +389,7 @@ struct Theme {
     syntax_variable: Color,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TextStyle {
     foreground: Color,
     background: Option<Color>,
@@ -379,6 +407,10 @@ impl Renderer {
 
     pub fn viewport_height(&self, size: TerminalSize) -> usize {
         size.rows.saturating_sub(1) as usize
+    }
+
+    pub(crate) fn invalidate(&self) {
+        self.last_frame.borrow_mut().take();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -412,30 +444,7 @@ impl Renderer {
             &highlighted_lines,
         );
 
-        queue!(
-            writer,
-            cursor::Hide,
-            terminal::Clear(ClearType::All),
-            cursor::MoveTo(0, 0)
-        )?;
-
-        if size.cols == 0 || size.rows == 0 {
-            queue!(writer, ResetColor, cursor::Show)?;
-            return writer.flush();
-        }
-
-        for (row, line) in frame.lines.iter().enumerate() {
-            render_editor_line(writer, row as u16, line, size.cols as usize)?;
-        }
-
-        let modeline_row = size.rows.saturating_sub(1);
-        render_modeline(writer, modeline_row, &frame.modeline, frame.modeline_style)?;
-        queue!(
-            writer,
-            cursor::MoveTo(frame.cursor.col, frame.cursor.row),
-            cursor::Show
-        )?;
-        writer.flush()
+        self.paint(writer, paint_editor_frame(frame, size))
     }
 
     pub fn render_directory_picker<W: Write>(
@@ -446,34 +455,76 @@ impl Renderer {
     ) -> io::Result<()> {
         let frame = build_picker_frame(picker, size);
 
-        queue!(
-            writer,
-            cursor::Hide,
-            terminal::Clear(ClearType::All),
-            cursor::MoveTo(0, 0)
-        )?;
+        self.paint(writer, paint_picker_frame(frame, size))
+    }
 
-        if size.cols == 0 || size.rows == 0 {
-            queue!(writer, ResetColor, cursor::Show)?;
-            return writer.flush();
+    fn paint<W: Write>(&self, writer: &mut W, frame: CellFrame) -> io::Result<()> {
+        queue!(writer, cursor::Hide)?;
+
+        let full_redraw = self
+            .last_frame
+            .borrow()
+            .as_ref()
+            .is_none_or(|previous| previous.size != frame.size);
+        if full_redraw {
+            queue!(writer, terminal::Clear(ClearType::All))?;
         }
 
-        for (row, line) in frame.lines.iter().enumerate() {
-            render_picker_line(writer, row as u16, line, size.cols as usize)?;
+        if frame.size.cols > 0 && frame.size.rows > 0 {
+            let previous = self.last_frame.borrow();
+            let cell_changed = |index: usize| {
+                full_redraw
+                    || previous
+                        .as_ref()
+                        .is_none_or(|previous| previous.cells[index] != frame.cells[index])
+            };
+            let width = frame.size.cols as usize;
+            let mut index = 0;
+            while index < frame.cells.len() {
+                if !cell_changed(index) {
+                    index += 1;
+                    continue;
+                }
+                let cell = &frame.cells[index];
+                let CellContent::Text(text) = &cell.content else {
+                    index += 1;
+                    continue;
+                };
+                let row = (index / width) as u16;
+                let col = (index % width) as u16;
+                let row_end = index - (index % width) + width;
+                let mut run = text.to_string();
+                let mut next = index + 1;
+                while next < row_end && cell_changed(next) && frame.cells[next].style == cell.style
+                {
+                    if let CellContent::Text(text) = &frame.cells[next].content {
+                        run.push(*text);
+                    }
+                    next += 1;
+                }
+                queue!(
+                    writer,
+                    cursor::MoveTo(col, row),
+                    SetAttribute(Attribute::Reset),
+                    ResetColor
+                )?;
+                apply_text_style(writer, cell.style)?;
+                queue!(writer, Print(run))?;
+                index = next;
+            }
+            drop(previous);
         }
 
-        let modeline_row = size.rows.saturating_sub(1);
-        let modeline_style = frame
-            .status_kind
-            .map(modeline_style_for_status)
-            .unwrap_or(ModelineStyle::Info);
-        render_modeline(writer, modeline_row, &frame.modeline, modeline_style)?;
         queue!(
             writer,
+            SetAttribute(Attribute::Reset),
+            ResetColor,
             cursor::MoveTo(frame.cursor.col, frame.cursor.row),
             cursor::Show
         )?;
-        writer.flush()
+        writer.flush()?;
+        self.last_frame.replace(Some(frame));
+        Ok(())
     }
 }
 
@@ -808,122 +859,165 @@ fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFra
     }
 }
 
-fn render_editor_line<W: Write>(
-    writer: &mut W,
-    row: u16,
-    line: &ScreenLine,
-    width: usize,
-) -> io::Result<()> {
-    let foreground = match line.kind {
-        ScreenLineKind::Text => THEME.editor_fg,
-        ScreenLineKind::EmptySpace => THEME.empty_fg,
-    };
-    queue!(
-        writer,
-        cursor::MoveTo(0, row),
-        ResetColor,
-        SetForegroundColor(foreground)
-    )?;
+fn paint_editor_frame(frame: Frame, size: TerminalSize) -> CellFrame {
+    let width = size.cols as usize;
+    let mut cells = Vec::with_capacity(width.saturating_mul(size.rows as usize));
 
-    if !line.gutter.is_empty() {
-        let gutter_foreground = if line.current {
-            THEME.gutter_current_fg
-        } else {
-            THEME.gutter_fg
+    for line in &frame.lines {
+        let row_start = cells.len();
+        let foreground = match line.kind {
+            ScreenLineKind::Text => THEME.editor_fg,
+            ScreenLineKind::EmptySpace => THEME.empty_fg,
         };
-        queue!(writer, SetForegroundColor(gutter_foreground))?;
-        queue!(writer, Print(&line.gutter), ResetColor)?;
-    }
 
-    for segment in &line.segments {
-        let mut style = segment
-            .highlight
-            .map_or_else(|| plain_style(foreground), highlight_style);
-        if segment.selected {
-            style.background = Some(THEME.selection_bg);
+        if !line.gutter.is_empty() {
+            let gutter_foreground = if line.current {
+                THEME.gutter_current_fg
+            } else {
+                THEME.gutter_fg
+            };
+            push_cells(
+                &mut cells,
+                &line.gutter,
+                plain_style(gutter_foreground),
+                width,
+            );
         }
-        queue!(writer, SetAttribute(Attribute::Reset), ResetColor)?;
-        apply_text_style(writer, style)?;
-        queue!(writer, Print(&segment.text))?;
+
+        for segment in &line.segments {
+            let mut style = segment
+                .highlight
+                .map_or_else(|| plain_style(foreground), highlight_style);
+            if segment.selected {
+                style.background = Some(THEME.selection_bg);
+            }
+            let remaining = width.saturating_sub(cells.len() - row_start);
+            push_cells(&mut cells, &segment.text, style, remaining);
+        }
+
+        fill_row(&mut cells, row_start, width, plain_style(foreground));
     }
 
-    let gutter_width = measure_cells(&line.gutter, width);
-    let content_width = width.saturating_sub(gutter_width);
-    let remaining_width = content_width.saturating_sub(measure_cells(&line.text, content_width));
-    if remaining_width > 0 {
-        queue!(
-            writer,
-            SetAttribute(Attribute::Reset),
-            ResetColor,
-            SetForegroundColor(foreground)
-        )?;
-        queue!(writer, Print(" ".repeat(remaining_width)))?;
+    if size.rows > 0 {
+        paint_modeline(&mut cells, &frame.modeline, frame.modeline_style, width);
     }
 
-    queue!(writer, SetAttribute(Attribute::Reset), ResetColor)
+    debug_assert_eq!(
+        cells.len(),
+        width.saturating_mul(size.rows as usize),
+        "painted editor frame must cover every terminal cell"
+    );
+    CellFrame {
+        size,
+        cells,
+        cursor: frame.cursor,
+    }
 }
 
-fn render_picker_line<W: Write>(
-    writer: &mut W,
-    row: u16,
-    line: &PickerLine,
-    width: usize,
-) -> io::Result<()> {
-    let foreground = if line.selected {
-        THEME.picker_selected_fg
-    } else {
-        THEME.picker_fg
-    };
-    queue!(writer, cursor::MoveTo(0, row), ResetColor)?;
+fn paint_picker_frame(frame: PickerFrame, size: TerminalSize) -> CellFrame {
+    let width = size.cols as usize;
+    let mut cells = Vec::with_capacity(width.saturating_mul(size.rows as usize));
 
-    if line.selected {
-        queue!(writer, SetBackgroundColor(THEME.picker_selected_bg))?;
+    for line in &frame.lines {
+        let row_start = cells.len();
+        let style = TextStyle {
+            foreground: if line.selected {
+                THEME.picker_selected_fg
+            } else {
+                THEME.picker_fg
+            },
+            background: line.selected.then_some(THEME.picker_selected_bg),
+            ..plain_style(THEME.picker_fg)
+        };
+        push_cells(&mut cells, &line.text, style, width);
+        fill_row(&mut cells, row_start, width, style);
     }
 
-    queue!(
-        writer,
-        SetForegroundColor(foreground),
-        Print(fit_status_line(&line.text, width)),
-        ResetColor
-    )
+    if size.rows > 0 {
+        let modeline_style = frame
+            .status_kind
+            .map(modeline_style_for_status)
+            .unwrap_or(ModelineStyle::Info);
+        paint_modeline(&mut cells, &frame.modeline, modeline_style, width);
+    }
+
+    debug_assert_eq!(
+        cells.len(),
+        width.saturating_mul(size.rows as usize),
+        "painted picker frame must cover every terminal cell"
+    );
+    CellFrame {
+        size,
+        cells,
+        cursor: frame.cursor,
+    }
 }
 
-fn render_modeline<W: Write>(
-    writer: &mut W,
-    row: u16,
-    modeline: &str,
-    style: ModelineStyle,
-) -> io::Result<()> {
+fn paint_modeline(cells: &mut Vec<Cell>, modeline: &str, style: ModelineStyle, width: usize) {
+    let row_start = cells.len();
     let (foreground, background) = modeline_colors(style);
+    let modeline_style = TextStyle {
+        foreground,
+        background: Some(background),
+        bold: true,
+        ..plain_style(foreground)
+    };
     let brand = format!(" {MODELINE_BRAND} ");
-    queue!(
-        writer,
-        cursor::MoveTo(0, row),
-        SetAttribute(Attribute::Bold),
-    )?;
 
     if let Some(rest) = modeline.strip_prefix(&brand) {
-        queue!(
-            writer,
-            SetForegroundColor(THEME.modeline_brand_fg),
-            SetBackgroundColor(THEME.modeline_brand_bg),
-            Print(&brand),
-            SetForegroundColor(foreground),
-            SetBackgroundColor(background),
-            Print(rest),
-            SetAttribute(Attribute::Reset),
-            ResetColor
-        )
+        let brand_style = TextStyle {
+            foreground: THEME.modeline_brand_fg,
+            background: Some(THEME.modeline_brand_bg),
+            bold: true,
+            ..plain_style(THEME.modeline_brand_fg)
+        };
+        push_cells(cells, &brand, brand_style, width);
+        push_cells(
+            cells,
+            rest,
+            modeline_style,
+            width.saturating_sub(cells.len() - row_start),
+        );
     } else {
-        queue!(
-            writer,
-            SetForegroundColor(foreground),
-            SetBackgroundColor(background),
-            Print(modeline),
-            SetAttribute(Attribute::Reset),
-            ResetColor
-        )
+        push_cells(cells, modeline, modeline_style, width);
     }
+
+    fill_row(cells, row_start, width, modeline_style);
+}
+
+fn push_cells(cells: &mut Vec<Cell>, text: &str, style: TextStyle, max_cells: usize) {
+    let mut used: usize = 0;
+    for ch in text.chars() {
+        let cell_width = char_cell_width(ch);
+        if cell_width == 0 {
+            continue;
+        }
+        if used.saturating_add(cell_width) > max_cells {
+            break;
+        }
+
+        cells.push(Cell {
+            content: CellContent::Text(ch),
+            style,
+        });
+        for _ in 1..cell_width {
+            cells.push(Cell {
+                content: CellContent::Continuation,
+                style,
+            });
+        }
+        used += cell_width;
+    }
+}
+
+fn fill_row(cells: &mut Vec<Cell>, row_start: usize, width: usize, style: TextStyle) {
+    cells.resize(
+        row_start.saturating_add(width),
+        Cell {
+            content: CellContent::Text(' '),
+            style,
+        },
+    );
 }
 
 fn keycast_text(keycast: &str) -> String {
@@ -1310,8 +1404,9 @@ fn is_wide(ch: char) -> bool {
 mod tests {
     use super::{
         build_frame, build_frame_with_selection, build_picker_frame, fit_line_cells,
-        fit_status_line, measure_cells, CursorPosition, Frame, ModelineStyle, ScreenLineKind,
-        StatusKind, TerminalSize, COMMAND_LINE_HINT,
+        fit_status_line, measure_cells, plain_style, Cell, CellContent, CellFrame, CursorPosition,
+        Frame, ModelineStyle, Renderer, ScreenLineKind, StatusKind, TerminalSize,
+        COMMAND_LINE_HINT, THEME,
     };
     use crate::{
         buffer::Buffer,
@@ -1731,6 +1826,93 @@ mod tests {
     }
 
     #[test]
+    fn paint_skips_unchanged_cells() {
+        let renderer = Renderer::new();
+        let size = TerminalSize { cols: 3, rows: 1 };
+        let mut output = Vec::new();
+
+        renderer
+            .paint(&mut output, painted_text_frame("ABC", size))
+            .unwrap();
+        output.clear();
+        renderer
+            .paint(&mut output, painted_text_frame("AXC", size))
+            .unwrap();
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(output.contains('X'));
+        assert!(!output.contains('A'));
+        assert!(!output.contains('C'));
+        assert!(!output.contains("\x1b[2J"));
+    }
+
+    #[test]
+    fn paint_resize_clears_and_repaints_the_full_frame() {
+        let renderer = Renderer::new();
+        let mut output = Vec::new();
+
+        renderer
+            .paint(
+                &mut output,
+                painted_text_frame("AB", TerminalSize { cols: 2, rows: 1 }),
+            )
+            .unwrap();
+        output.clear();
+        renderer
+            .paint(
+                &mut output,
+                painted_text_frame("ABC", TerminalSize { cols: 3, rows: 1 }),
+            )
+            .unwrap();
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(output.contains("\x1b[2J"));
+        assert!(output.contains("ABC"));
+    }
+
+    #[test]
+    fn cursor_movement_does_not_rewrite_unchanged_buffer_text() {
+        let buffer = buffer_with_text("notes.txt", "alpha\n");
+        let renderer = Renderer::new();
+        let size = TerminalSize { cols: 40, rows: 3 };
+        let mut view = View::new();
+        let mut output = Vec::new();
+
+        renderer
+            .render(
+                &mut output,
+                &buffer,
+                &view,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        output.clear();
+        view.move_forward_char(&buffer);
+        renderer
+            .render(
+                &mut output,
+                &buffer,
+                &view,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(!output.contains("alpha"));
+        assert!(!output.contains("\x1b[2J"));
+    }
+
+    #[test]
     fn frame_modeline_shows_active_command_line_and_moves_cursor_to_it() {
         let buffer = buffer_with_text("notes.txt", "alpha\n");
 
@@ -1825,6 +2007,21 @@ mod tests {
 
     fn line_texts(frame: &Frame) -> Vec<&str> {
         frame.lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    fn painted_text_frame(text: &str, size: TerminalSize) -> CellFrame {
+        let style = plain_style(THEME.editor_fg);
+        CellFrame {
+            size,
+            cells: text
+                .chars()
+                .map(|ch| Cell {
+                    content: CellContent::Text(ch),
+                    style,
+                })
+                .collect(),
+            cursor: CursorPosition { col: 0, row: 0 },
+        }
     }
 
     fn buffer_with_text(file_name: &str, text: &str) -> Buffer {
