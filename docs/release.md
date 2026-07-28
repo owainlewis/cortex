@@ -23,13 +23,16 @@ git push origin v0.1.0
 Pushing the tag starts the `Release` workflow.
 The workflow verifies that the tagged commit is reachable from `main`.
 It then checks formatting, runs Clippy with warnings denied, runs the test suite, and builds the macOS release binary.
+The build target is always `aarch64-apple-darwin`, regardless of the GitHub-hosted runner architecture.
+Packaging verifies that the binary is arm64 and that the archive contains one executable named `cortex`.
+It normalizes archive ownership, executable mode, timestamps, and gzip headers so packaging the same binary produces the same archive bytes.
 The workflow generates signed build provenance for the release archive before uploading it for publication.
 Before publishing, it verifies that the remote tag still targets the commit that passed those gates.
 The GitHub Release and its assets are created only after every gate passes.
 A failed gate for an unpublished tag creates no GitHub Release or release assets.
 It uploads these assets:
 
-- `cortex-vX.Y.Z-aarch64-apple-darwin.tar.gz` or `cortex-vX.Y.Z-x86_64-apple-darwin.tar.gz`
+- `cortex-vX.Y.Z-aarch64-apple-darwin.tar.gz`
 - a matching `.sha256` checksum file
 
 The release workflow refuses to publish if a release for the tag already exists.
@@ -87,8 +90,9 @@ They are unstable and may be broken.
 The `Nightly` workflow can be run manually from GitHub Actions.
 It also runs on a schedule.
 It checks out `main`, builds the macOS release binary, and uploads a workflow artifact.
+The nightly build also targets `aarch64-apple-darwin` explicitly and verifies the packaged binary architecture.
 
-The uploaded artifact is named with `cortex-nightly`, the workflow run number, and the macOS target triple.
+The uploaded artifact is named with `cortex-nightly`, the workflow run number, and `aarch64-apple-darwin`.
 The archive and checksum inside that artifact also include the commit SHA.
 They are retained for 14 days.
 They are not GitHub Releases.
@@ -99,5 +103,6 @@ To verify a nightly artifact, download it from the workflow run and check the ch
 ```sh
 shasum -a 256 -c cortex-nightly-*.tar.gz.sha256
 tar -xzf cortex-nightly-*.tar.gz
+lipo -verify_arch arm64 cortex
 ./cortex --version
 ```
