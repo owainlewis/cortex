@@ -73,3 +73,5 @@ Confirm the terminal is restored and the shell remains usable after Cortex exits
 - GitHub automatically deletes merged head branches hosted in this repository.
 
 Pull requests must pass the required `Rust checks` workflow before merge.
+
+Performance-sensitive changes should also run the [local performance checks](docs/performance.md).

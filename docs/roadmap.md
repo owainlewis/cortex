@@ -202,7 +202,7 @@ Likely includes:
 
 Tracking issues:
 - [closed] [#50 Add diffed rendering](https://github.com/owainlewis/cortex/issues/50)
-- [open] [#51 Add latency and large-file performance checks](https://github.com/owainlewis/cortex/issues/51)
+- [closed] [#51 Add latency and large-file performance checks](https://github.com/owainlewis/cortex/issues/51)
 - [closed] [#58 Allow literal slash insertion without losing command entry](https://github.com/owainlewis/cortex/issues/58)
 - [closed] [#59 Harden atomic-save temporary file creation](https://github.com/owainlewis/cortex/issues/59)
 - [closed] [#60 Preserve file permissions and define symlink save behavior](https://github.com/owainlewis/cortex/issues/60)
