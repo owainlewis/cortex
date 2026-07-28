@@ -2,7 +2,7 @@ use ropey::{Rope, RopeSlice};
 use std::{
     ffi::{CString, OsStr, OsString},
     fs::{self, File, OpenOptions},
-    io::{self, BufReader, BufWriter, Read, Seek, Write},
+    io::{self, BufRead, BufReader, BufWriter, Seek, Write},
     ops::Range,
     os::unix::ffi::OsStrExt,
     os::unix::{
@@ -33,11 +33,13 @@ pub struct Buffer {
     id: u64,
     text: Rope,
     path: PathBuf,
-    dirty: bool,
     disk_baseline: DiskStamp,
     save_location: SaveLocation,
     disk_changed: bool,
-    clean_text: String,
+    clean_text: Rope,
+    history_state: u64,
+    clean_history_state: u64,
+    next_history_state: u64,
     revision: u64,
     undo_stack: Vec<Edit>,
     redo_stack: Vec<Edit>,
@@ -95,7 +97,7 @@ struct CommitContext<'a> {
 struct SourceBaseline<'a> {
     file: &'a File,
     metadata: SemanticMetadata,
-    text: &'a str,
+    text: &'a Rope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,23 +107,27 @@ struct Edit {
     inserted: String,
     point_before: usize,
     point_after: usize,
+    state_before: u64,
+    state_after: u64,
 }
 
 impl Buffer {
     pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
         let (text, disk_baseline, save_location) = load_file(&path, true)?;
-        let clean_text = text.to_string();
+        let clean_text = text.clone();
 
         Ok(Self {
             id: NEXT_BUFFER_ID.fetch_add(1, Ordering::Relaxed),
             text,
             path,
-            dirty: false,
             disk_baseline,
             save_location,
             disk_changed: false,
             clean_text,
+            history_state: 0,
+            clean_history_state: 0,
+            next_history_state: 1,
             revision: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -137,7 +143,7 @@ impl Buffer {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.history_state != self.clean_history_state
     }
 
     pub fn disk_changed(&self) -> bool {
@@ -196,7 +202,11 @@ impl Buffer {
 
     pub fn line_changed(&self, line_idx: usize) -> bool {
         let line_idx = self.clamp_line_idx(line_idx);
-        self.text.line(line_idx) != clean_line_text(&self.clean_text, line_idx)
+        let current_line = self.text.line(line_idx);
+        self.clean_text.get_line(line_idx).map_or_else(
+            || current_line.len_chars() != 0,
+            |clean_line| current_line != clean_line,
+        )
     }
 
     pub fn find_forward(&self, query: &str, start_char: usize) -> Option<usize> {
@@ -280,7 +290,6 @@ impl Buffer {
         self.apply_inverse_edit(&edit);
         let point = edit.point_before.min(self.len_chars());
         self.redo_stack.push(edit);
-        self.update_dirty();
         Some(point)
     }
 
@@ -289,7 +298,6 @@ impl Buffer {
         self.apply_edit(&edit);
         let point = edit.point_after.min(self.len_chars());
         self.undo_stack.push(edit);
-        self.update_dirty();
         Some(point)
     }
 
@@ -323,20 +331,23 @@ impl Buffer {
         self.disk_baseline = disk_baseline;
         self.save_location = save_location;
         self.disk_changed = false;
-        self.clean_text = self.text.to_string();
-        self.dirty = false;
+        self.clean_text = self.text.clone();
+        self.clean_history_state = self.history_state;
         Ok(())
     }
 
     pub fn reload(&mut self) -> Result<(), ReloadError> {
-        if self.dirty {
+        if self.is_dirty() {
             return Err(ReloadError::Dirty);
         }
 
         let (text, disk_baseline, save_location) =
             load_file(&self.path, false).map_err(ReloadError::Io)?;
-        self.clean_text = text.to_string();
+        self.clean_text = text.clone();
         self.text = text;
+        self.history_state = 0;
+        self.clean_history_state = 0;
+        self.next_history_state = 1;
         self.revision = self.revision.wrapping_add(1);
         self.disk_baseline = disk_baseline;
         self.save_location = save_location;
@@ -358,28 +369,32 @@ impl Buffer {
         point_after: usize,
     ) {
         let deleted = self.text.slice(char_range.clone()).to_string();
+        let state_after = self.allocate_history_state();
         let edit = Edit {
             start: char_range.start,
             deleted,
             inserted: inserted.to_string(),
             point_before,
             point_after,
+            state_before: self.history_state,
+            state_after,
         };
 
         self.apply_edit(&edit);
         self.undo_stack.push(edit);
         self.redo_stack.clear();
-        self.update_dirty();
     }
 
     fn apply_edit(&mut self, edit: &Edit) {
         let deleted_len = edit.deleted.chars().count();
         self.apply_change(edit.start, deleted_len, &edit.inserted);
+        self.history_state = edit.state_after;
     }
 
     fn apply_inverse_edit(&mut self, edit: &Edit) {
         let inserted_len = edit.inserted.chars().count();
         self.apply_change(edit.start, inserted_len, &edit.deleted);
+        self.history_state = edit.state_before;
     }
 
     fn apply_change(&mut self, start: usize, remove_len: usize, inserted: &str) {
@@ -392,8 +407,13 @@ impl Buffer {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    fn update_dirty(&mut self) {
-        self.dirty = self.text != self.clean_text.as_str();
+    fn allocate_history_state(&mut self) -> u64 {
+        let state = self.next_history_state;
+        self.next_history_state = self
+            .next_history_state
+            .checked_add(1)
+            .expect("buffer history state exhausted");
+        state
     }
 }
 
@@ -403,11 +423,13 @@ impl Clone for Buffer {
             id: NEXT_BUFFER_ID.fetch_add(1, Ordering::Relaxed),
             text: self.text.clone(),
             path: self.path.clone(),
-            dirty: self.dirty,
             disk_baseline: self.disk_baseline,
             save_location: self.save_location.clone(),
             disk_changed: self.disk_changed,
             clean_text: self.clean_text.clone(),
+            history_state: self.history_state,
+            clean_history_state: self.clean_history_state,
+            next_history_state: self.next_history_state,
             revision: self.revision,
             undo_stack: self.undo_stack.clone(),
             redo_stack: self.redo_stack.clone(),
@@ -562,10 +584,6 @@ fn line_content_len_chars(line: RopeSlice<'_>) -> usize {
     }
 }
 
-fn clean_line_text(text: &str, line_idx: usize) -> &str {
-    text.split_inclusive('\n').nth(line_idx).unwrap_or_default()
-}
-
 fn char_to_byte_idx(text: &str, char_idx: usize) -> usize {
     text.char_indices()
         .nth(char_idx)
@@ -590,7 +608,7 @@ fn write_atomically<F, G>(
     expected_location: &SaveLocation,
     expected_stamp: DiskStamp,
     text: &Rope,
-    baseline_text: &str,
+    baseline_text: &Rope,
     before_commit: F,
     after_rename: G,
 ) -> io::Result<(DiskStamp, SaveLocation)>
@@ -949,12 +967,28 @@ fn extended_attribute(file: &File, name: &[u8]) -> io::Result<Vec<u8>> {
     ))
 }
 
-fn file_text_matches(file: &File, expected: &str) -> io::Result<bool> {
+fn file_text_matches(file: &File, expected: &Rope) -> io::Result<bool> {
     let mut file = file.try_clone()?;
     file.rewind()?;
-    let mut contents = Vec::new();
-    file.read_to_end(&mut contents)?;
-    Ok(contents == expected.as_bytes())
+    let mut reader = BufReader::new(file);
+
+    for chunk in expected.chunks() {
+        let mut expected_bytes = chunk.as_bytes();
+        while !expected_bytes.is_empty() {
+            let actual = reader.fill_buf()?;
+            if actual.is_empty() {
+                return Ok(false);
+            }
+            let compared = actual.len().min(expected_bytes.len());
+            if actual[..compared] != expected_bytes[..compared] {
+                return Ok(false);
+            }
+            reader.consume(compared);
+            expected_bytes = &expected_bytes[compared..];
+        }
+    }
+
+    Ok(reader.fill_buf()?.is_empty())
 }
 
 fn commit_temp_file<A>(
@@ -1517,6 +1551,30 @@ mod tests {
     }
 
     #[test]
+    fn editing_near_eof_of_a_large_buffer_uses_one_history_state() {
+        let dir = test_dir("large-eof-dirty-state");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "line\n".repeat(100_000)).unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        let eof = buffer.len_chars();
+
+        buffer.insert(eof, "tail");
+
+        assert_eq!(buffer.history_state, 1);
+        assert_eq!(buffer.next_history_state, 2);
+        assert!(buffer.is_dirty());
+
+        assert_eq!(buffer.undo(), Some(eof));
+        assert_eq!(buffer.history_state, 0);
+        assert!(!buffer.is_dirty());
+
+        assert_eq!(buffer.redo(), Some(eof + 4));
+        assert_eq!(buffer.history_state, 1);
+        assert!(buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
     fn line_changed_compares_current_text_to_the_saved_baseline() {
         let dir = test_dir("line-changed");
         let path = dir.join("notes.txt");
@@ -1534,6 +1592,31 @@ mod tests {
         buffer.save().unwrap();
 
         assert!(!buffer.line_changed(0));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn line_changed_tracks_inserted_and_deleted_lines() {
+        let dir = test_dir("line-changed-structure");
+        let inserted_path = dir.join("inserted.txt");
+        let deleted_path = dir.join("deleted.txt");
+        fs::write(&inserted_path, "alpha\nbeta\ngamma\n").unwrap();
+        fs::write(&deleted_path, "alpha\nbeta\ngamma\n").unwrap();
+        let mut inserted = Buffer::open(&inserted_path).unwrap();
+        let mut deleted = Buffer::open(&deleted_path).unwrap();
+
+        inserted.insert(inserted.line_start_char(1), "new\n");
+        deleted.delete(deleted.line_start_char(1)..deleted.line_start_char(2));
+
+        assert!(!inserted.line_changed(0));
+        assert!(inserted.line_changed(1));
+        assert!(inserted.line_changed(2));
+        assert!(inserted.line_changed(3));
+        assert!(!inserted.line_changed(4));
+
+        assert!(!deleted.line_changed(0));
+        assert!(deleted.line_changed(1));
+        assert!(deleted.line_changed(2));
         remove_dir(dir);
     }
 
