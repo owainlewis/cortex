@@ -1040,6 +1040,7 @@ fn has_context_dependent_width(text: &str) -> bool {
             ch as u32,
             0x200C..=0x200D
                 | 0xFE00..=0xFE0F
+                | 0x1F1E6..=0x1F1FF
                 | 0x1F3FB..=0x1F3FF
                 | 0xE0020..=0xE007F
                 | 0xE0100..=0xE01EF
@@ -1914,6 +1915,25 @@ mod tests {
 
         assert!(output.contains("\x1b[2J"));
         assert!(output.contains("👨‍💻B"));
+    }
+
+    #[test]
+    fn paint_keeps_full_redraw_for_regional_indicator_flags() {
+        let renderer = Renderer::new();
+        let size = TerminalSize { cols: 10, rows: 1 };
+        let mut output = Vec::new();
+
+        renderer
+            .paint(&mut output, painted_text_frame("🇺🇸A", size))
+            .unwrap();
+        output.clear();
+        renderer
+            .paint(&mut output, painted_text_frame("🇺🇦A", size))
+            .unwrap();
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(output.contains("\x1b[2J"));
+        assert!(output.contains("🇺🇦A"));
     }
 
     #[test]
