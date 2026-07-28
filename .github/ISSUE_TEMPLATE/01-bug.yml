@@ -1,0 +1,86 @@
+name: Bug report
+description: Report reproducible broken behavior in Cortex.
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Questions belong in [GitHub Discussions](https://github.com/owainlewis/cortex/discussions).
+        Report security vulnerabilities through [private vulnerability reporting](https://github.com/owainlewis/cortex/security/advisories/new), not here.
+
+  - type: checkboxes
+    id: existing
+    attributes:
+      label: Existing reports
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the broken behavior and why it matters.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: List the smallest reliable sequence that triggers the problem.
+      placeholder: |
+        1. Run ...
+        2. Press ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should Cortex do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What does Cortex do instead?
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Cortex version or commit
+      placeholder: cortex 0.1.0 or a commit SHA
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: macOS 15.5
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      description: Include the terminal application and version.
+      placeholder: Ghostty 1.1.3
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Verification evidence
+      description: Add logs, screenshots, a minimal file, or other useful evidence.

@@ -1,0 +1,68 @@
+name: Feature request
+description: Propose a focused improvement to Cortex.
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use [GitHub Discussions](https://github.com/owainlewis/cortex/discussions) for questions and early ideas.
+        Report security vulnerabilities through [private vulnerability reporting](https://github.com/owainlewis/cortex/security/advisories/new), not here.
+
+  - type: checkboxes
+    id: existing
+    attributes:
+      label: Existing proposals
+      options:
+        - label: I searched existing issues and discussions for this proposal.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow problem should Cortex solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe one focused way to solve the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: macOS terminal workflow
+      description: Explain how this fits Cortex's macOS-only terminal workflow.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List concrete outcomes that would make the work complete.
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Explain how the change should be tested or manually checked.
+    validations:
+      required: true
+
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: List related work that should stay out of scope.
