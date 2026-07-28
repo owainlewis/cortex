@@ -201,70 +201,45 @@ impl Buffer {
         line.slice(..content_len.min(max_chars)).to_string()
     }
 
-    pub fn line_text(&self, line_idx: usize) -> String {
+    pub fn line_prefix_for_width(&self, line_idx: usize, width: usize) -> String {
         let line_idx = self.clamp_line_idx(line_idx);
         let line = self.text.line(line_idx);
-        line.slice(..line_content_len_chars(line)).to_string()
+        let content = line.slice(..line_content_len_chars(line));
+        text::rope_prefix_for_width(content, width)
     }
 
     pub fn grapheme_boundary_at_or_before(&self, char_idx: usize) -> usize {
         let char_idx = char_idx.min(self.len_chars());
-        if char_idx == self.len_chars() {
-            return char_idx;
-        }
-
-        let line_idx = self.line_for_char(char_idx);
-        let line_start = self.line_start_char(line_idx);
-        let line = self.text.line(line_idx).to_string();
-        line_start + text::boundary_at_or_before(&line, char_idx - line_start)
+        text::rope_boundary_at_or_before(self.text.slice(..), char_idx)
     }
 
     pub fn grapheme_boundary_at_or_after(&self, char_idx: usize) -> usize {
         let char_idx = char_idx.min(self.len_chars());
-        if char_idx == self.len_chars() {
-            return char_idx;
-        }
-
-        let line_idx = self.line_for_char(char_idx);
-        let line_start = self.line_start_char(line_idx);
-        let line = self.text.line(line_idx).to_string();
-        line_start + text::boundary_at_or_after(&line, char_idx - line_start)
+        text::rope_boundary_at_or_after(self.text.slice(..), char_idx)
     }
 
     pub fn next_grapheme_boundary(&self, char_idx: usize) -> usize {
         let char_idx = char_idx.min(self.len_chars());
-        if char_idx == self.len_chars() {
-            return char_idx;
-        }
-
-        let line_idx = self.line_for_char(char_idx);
-        let line_start = self.line_start_char(line_idx);
-        let line = self.text.line(line_idx).to_string();
-        line_start + text::next_boundary(&line, char_idx - line_start)
+        text::next_rope_boundary(self.text.slice(..), char_idx)
     }
 
     pub fn previous_grapheme_boundary(&self, char_idx: usize) -> usize {
         let char_idx = char_idx.min(self.len_chars());
-        if char_idx == 0 {
-            return 0;
-        }
-
-        let line_idx = self.line_for_char(char_idx - 1);
-        let line_start = self.line_start_char(line_idx);
-        let line = self.text.line(line_idx).to_string();
-        line_start + text::previous_boundary(&line, char_idx - line_start)
+        text::previous_rope_boundary(self.text.slice(..), char_idx)
     }
 
     pub fn display_column(&self, char_idx: usize) -> usize {
         let char_idx = self.grapheme_boundary_at_or_before(char_idx);
         let line_idx = self.line_for_char(char_idx);
         let line_start = self.line_start_char(line_idx);
-        text::measure_width(&self.text_range(line_start..char_idx), usize::MAX)
+        text::measure_rope_width(self.text.slice(line_start..char_idx), usize::MAX)
     }
 
     pub fn char_at_display_column(&self, line_idx: usize, column: usize) -> usize {
         let line_start = self.line_start_char(line_idx);
-        line_start + text::char_index_at_column(&self.line_text(line_idx), column)
+        let line = self.text.line(self.clamp_line_idx(line_idx));
+        let content = line.slice(..line_content_len_chars(line));
+        line_start + text::rope_char_index_at_column(content, column)
     }
 
     pub fn line_changed(&self, line_idx: usize) -> bool {

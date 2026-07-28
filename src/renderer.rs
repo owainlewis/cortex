@@ -604,7 +604,7 @@ fn build_frame_with_highlights(
     for screen_row in 0..viewport_height {
         let line_idx = view.scroll_line().saturating_add(screen_row);
         let screen_line = if line_idx < buffer.len_lines() {
-            let raw_text = buffer.line_text(line_idx);
+            let raw_text = buffer.line_prefix_for_width(line_idx, text_width);
             let line_start = buffer.line_start_char(line_idx);
             let spans = highlighted_lines
                 .get(screen_row)
