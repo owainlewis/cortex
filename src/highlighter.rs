@@ -62,6 +62,10 @@ const HIGHLIGHT_WINDOW_LINES: usize = 256;
 const CONTEXT_CHECKPOINT_LINES: usize = 256;
 const MAX_RECENT_CHECKPOINTS: usize = 8;
 const MAX_HIGHLIGHT_LINE_CHARS: usize = 4096;
+// Exact Rust block-comment depth and its synthetic parser wrapper are retained only
+// through this level. Deeper input becomes a fixed-size conservative overflow state,
+// so checkpoints stay constant-size and exact wrapper text is capped at 384 bytes.
+const MAX_RUST_BLOCK_COMMENT_DEPTH: u8 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HighlightKind {
@@ -164,7 +168,8 @@ enum SyntaxContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RustContext {
     Code,
-    BlockComment(usize),
+    BlockComment(u8),
+    BlockCommentOverflow,
     String,
     RawString(usize),
 }
@@ -428,13 +433,19 @@ fn seeded_source(
 fn rust_wrapper(context: RustContext) -> Option<(String, String)> {
     match context {
         RustContext::Code => None,
-        RustContext::BlockComment(depth) => Some(("/* ".repeat(depth), " */".repeat(depth))),
+        RustContext::BlockComment(depth) => Some(rust_block_comment_wrapper(depth)),
+        RustContext::BlockCommentOverflow => None,
         RustContext::String => Some(("let cortex_seed = \"".to_string(), "\";".to_string())),
         RustContext::RawString(hashes) => Some((
             format!("let cortex_seed = r{}\"", "#".repeat(hashes)),
             format!("\"{};", "#".repeat(hashes)),
         )),
     }
+}
+
+fn rust_block_comment_wrapper(depth: u8) -> (String, String) {
+    let depth = usize::from(depth);
+    ("/* ".repeat(depth), " */".repeat(depth))
 }
 
 fn scan_rust_line(mut context: RustContext, line: &str) -> RustContext {
@@ -468,7 +479,11 @@ fn scan_rust_line(mut context: RustContext, line: &str) -> RustContext {
             }
             RustContext::BlockComment(depth) => {
                 if bytes[idx..].starts_with(b"/*") {
-                    context = RustContext::BlockComment(depth + 1);
+                    context = if depth == MAX_RUST_BLOCK_COMMENT_DEPTH {
+                        RustContext::BlockCommentOverflow
+                    } else {
+                        RustContext::BlockComment(depth + 1)
+                    };
                     idx += 2;
                 } else if bytes[idx..].starts_with(b"*/") {
                     context = if depth == 1 {
@@ -481,6 +496,7 @@ fn scan_rust_line(mut context: RustContext, line: &str) -> RustContext {
                     idx += 1;
                 }
             }
+            RustContext::BlockCommentOverflow => break,
             RustContext::String => {
                 if bytes[idx] == b'\\' {
                     idx = (idx + 2).min(bytes.len());
@@ -735,20 +751,7 @@ impl SyntaxHighlighter {
                     {
                         self.last_scanned_lines += _scanned_lines;
                     }
-                    let (source, context_barriers) =
-                        text_line_range(buffer, window_start..covered_end);
-                    let (source, context_barriers, seed_lines) =
-                        seeded_source(context, source, context_barriers);
-                    #[cfg(test)]
-                    {
-                        self.last_request_bytes = source.len();
-                    }
-                    let mut lines =
-                        self.highlight_document_segments(buffer.path(), &source, &context_barriers);
-                    if seed_lines > 0 {
-                        lines.drain(..seed_lines.min(lines.len()));
-                    }
-                    lines.truncate(covered_end.saturating_sub(window_start));
+                    let lines = self.highlight_window(buffer, window_start..covered_end, context);
                     let (_, _scanned_lines) = cache.context_at_line(buffer, covered_end);
                     #[cfg(test)]
                     {
@@ -775,6 +778,83 @@ impl SyntaxHighlighter {
 
         self.documents.insert(buffer_id, document);
         highlighted
+    }
+
+    fn highlight_window(
+        &mut self,
+        buffer: &Buffer,
+        line_range: Range<usize>,
+        context: SyntaxContext,
+    ) -> Vec<Vec<HighlightSpan>> {
+        match context {
+            SyntaxContext::Rust(RustContext::BlockCommentOverflow) => {
+                overflowed_rust_comment_lines(buffer, line_range)
+            }
+            SyntaxContext::Markdown(MarkdownContext::Fence {
+                marker,
+                marker_len,
+                info,
+                rust: Some(RustContext::BlockCommentOverflow),
+            }) => self
+                .highlight_overflowed_markdown_rust(buffer, line_range, marker, marker_len, info),
+            context => {
+                let expected_lines = line_range.end.saturating_sub(line_range.start);
+                let (source, context_barriers) = text_line_range(buffer, line_range);
+                let (source, context_barriers, seed_lines) =
+                    seeded_source(context, source, context_barriers);
+                #[cfg(test)]
+                {
+                    self.last_request_bytes = source.len();
+                }
+                let mut lines =
+                    self.highlight_document_segments(buffer.path(), &source, &context_barriers);
+                if seed_lines > 0 {
+                    lines.drain(..seed_lines.min(lines.len()));
+                }
+                lines.truncate(expected_lines);
+                lines
+            }
+        }
+    }
+
+    fn highlight_overflowed_markdown_rust(
+        &mut self,
+        buffer: &Buffer,
+        line_range: Range<usize>,
+        marker: u8,
+        marker_len: usize,
+        info: String,
+    ) -> Vec<Vec<HighlightSpan>> {
+        let closing_line = (line_range.start..line_range.end).find(|line_idx| {
+            let line = buffer.line_prefix_text(*line_idx, MAX_HIGHLIGHT_LINE_CHARS);
+            markdown_fence_closes(&line, marker, marker_len)
+        });
+        let Some(closing_line) = closing_line else {
+            return overflowed_rust_comment_lines(buffer, line_range);
+        };
+
+        let mut lines = overflowed_rust_comment_lines(buffer, line_range.start..closing_line);
+        let expected_suffix_lines = line_range.end.saturating_sub(closing_line);
+        let (source, context_barriers) = text_line_range(buffer, closing_line..line_range.end);
+        let closing_context = SyntaxContext::Markdown(MarkdownContext::Fence {
+            marker,
+            marker_len,
+            info,
+            rust: None,
+        });
+        let (source, context_barriers, seed_lines) =
+            seeded_source(closing_context, source, context_barriers);
+        #[cfg(test)]
+        {
+            self.last_request_bytes = source.len();
+        }
+        let mut suffix =
+            self.highlight_document_segments(buffer.path(), &source, &context_barriers);
+        suffix.drain(..seed_lines.min(suffix.len()));
+        suffix.truncate(expected_suffix_lines);
+        suffix.resize_with(expected_suffix_lines, Vec::new);
+        lines.append(&mut suffix);
+        lines
     }
 
     fn highlight_document_segments(
@@ -938,6 +1018,25 @@ impl SyntaxHighlighter {
             }
         }
     }
+}
+
+fn overflowed_rust_comment_lines(
+    buffer: &Buffer,
+    line_range: Range<usize>,
+) -> Vec<Vec<HighlightSpan>> {
+    line_range
+        .map(|line_idx| {
+            let line = buffer.line_prefix_text(line_idx, MAX_HIGHLIGHT_LINE_CHARS);
+            if line.is_empty() {
+                Vec::new()
+            } else {
+                vec![HighlightSpan {
+                    range: 0..line.len(),
+                    kind: HighlightKind::Comment,
+                }]
+            }
+        })
+        .collect()
 }
 
 impl Default for SyntaxHighlighter {
@@ -1434,6 +1533,163 @@ mod tests {
         assert!(highlighted
             .iter()
             .all(|line| line_has_kind(line, HighlightKind::Comment)));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn deeply_nested_rust_comment_has_bounded_parser_input() {
+        let text = "/*\n".repeat(20_000);
+        let (buffer, dir) = buffer_with_text("nested.rs", &text);
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 19_000..19_020);
+
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::Comment)));
+        assert!(
+            highlighter.last_request_bytes <= 2_048,
+            "capped deep nested context produced {} parser bytes",
+            highlighter.last_request_bytes
+        );
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn rust_comment_context_caps_exact_wrapper_and_uses_fixed_overflow_state() {
+        let exact_openers = "/*".repeat(usize::from(super::MAX_RUST_BLOCK_COMMENT_DEPTH));
+        let exact = super::scan_rust_line(super::RustContext::Code, &exact_openers);
+
+        assert_eq!(
+            exact,
+            super::RustContext::BlockComment(super::MAX_RUST_BLOCK_COMMENT_DEPTH)
+        );
+        let (seed, suffix) = super::rust_wrapper(exact).expect("exact wrapper");
+        let max_wrapper_side = usize::from(super::MAX_RUST_BLOCK_COMMENT_DEPTH) * 3;
+        assert_eq!(seed.len(), max_wrapper_side);
+        assert_eq!(suffix.len(), max_wrapper_side);
+
+        let overflow = super::scan_rust_line(exact, "/*");
+        assert_eq!(overflow, super::RustContext::BlockCommentOverflow);
+        assert_eq!(
+            super::scan_rust_line(overflow, "*/"),
+            super::RustContext::BlockCommentOverflow
+        );
+        assert!(super::rust_wrapper(overflow).is_none());
+    }
+
+    #[test]
+    fn rust_comment_at_exact_depth_closes_inside_deep_window() {
+        let mut lines = vec!["comment".to_string(); 1_024];
+        lines[0] = "/*".repeat(usize::from(super::MAX_RUST_BLOCK_COMMENT_DEPTH));
+        lines[260] = "*/".repeat(usize::from(super::MAX_RUST_BLOCK_COMMENT_DEPTH));
+        lines[261] = "let visible = 42;".to_string();
+        let (buffer, dir) = buffer_with_text("exact-depth.rs", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 256..262);
+
+        assert!(line_has_kind(&highlighted[0], HighlightKind::Comment));
+        assert!(line_has_kind(&highlighted[5], HighlightKind::Keyword));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn overflowed_rust_comment_cannot_close_inside_deep_window() {
+        let mut lines = vec!["comment".to_string(); 1_024];
+        lines[0] = "/*".repeat(usize::from(super::MAX_RUST_BLOCK_COMMENT_DEPTH) + 1);
+        lines[260] = "*/".repeat(usize::from(super::MAX_RUST_BLOCK_COMMENT_DEPTH));
+        lines[261] = "let still_commented = 42;".to_string();
+        let (buffer, dir) = buffer_with_text("overflow-depth.rs", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 256..262);
+
+        assert!(line_has_kind(&highlighted[5], HighlightKind::Comment));
+        assert!(!line_has_kind(&highlighted[5], HighlightKind::Keyword));
+        assert_eq!(highlighter.last_request_bytes, 0);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn overflowed_markdown_rust_comment_stops_at_fence_boundary() {
+        let mut lines = vec!["comment".to_string(); 1_024];
+        lines[0] = "```rust".to_string();
+        lines[1] = "/*".repeat(usize::from(super::MAX_RUST_BLOCK_COMMENT_DEPTH) + 1);
+        lines[260] = "*/".repeat(usize::from(super::MAX_RUST_BLOCK_COMMENT_DEPTH));
+        lines[261] = "let still_commented = 42;".to_string();
+        lines[262] = "```".to_string();
+        lines[263] = "# Visible heading".to_string();
+        let (buffer, dir) = buffer_with_text("overflow-depth.md", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 256..264);
+
+        assert!(line_has_kind(&highlighted[5], HighlightKind::Comment));
+        assert!(!line_has_kind(&highlighted[5], HighlightKind::Keyword));
+        assert!(line_has_kind(&highlighted[7], HighlightKind::MarkupHeading));
+        assert!(highlighter.last_request_bytes <= 8_192);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn edits_around_rust_comment_depth_cap_rebuild_bounded_context() {
+        let mut lines = vec!["comment".to_string(); 1_024];
+        lines[0] = "/*".repeat(usize::from(
+            super::MAX_RUST_BLOCK_COMMENT_DEPTH.saturating_sub(1),
+        ));
+        lines[261] = "let visible = 42;".to_string();
+        let (mut buffer, dir) = buffer_with_text("edited-depth.rs", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+        let viewport = 256..262;
+
+        let initial = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(line_has_kind(&initial[5], HighlightKind::Comment));
+
+        let opener_edit = buffer.line_end_char(0);
+        buffer.insert(opener_edit, "/*");
+        let exact = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(line_has_kind(&exact[5], HighlightKind::Comment));
+        assert!(highlighter.last_request_bytes <= 8_192);
+
+        buffer.insert(opener_edit, "/*");
+        let overflow = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(line_has_kind(&overflow[5], HighlightKind::Comment));
+        assert!(highlighter.last_request_bytes <= 8_192);
+
+        buffer.delete(opener_edit..opener_edit + 2);
+        let closer_edit = buffer.line_start_char(260);
+        buffer.insert(
+            closer_edit,
+            &"*/".repeat(usize::from(super::MAX_RUST_BLOCK_COMMENT_DEPTH)),
+        );
+        let closed = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(line_has_kind(&closed[5], HighlightKind::Keyword));
+        assert!(highlighter.last_request_bytes <= 8_192);
+
+        buffer.delete(closer_edit..closer_edit + 2);
+        let reopened = highlighter.highlight_visible_lines(&buffer, viewport);
+        assert!(line_has_kind(&reopened[5], HighlightKind::Comment));
+        assert!(highlighter.last_request_bytes <= 8_192);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn deeply_nested_markdown_rust_comment_has_bounded_parser_input() {
+        let mut lines = vec!["/*".to_string(); 20_002];
+        lines[0] = "```rust".to_string();
+        lines[20_001] = "```".to_string();
+        let (buffer, dir) = buffer_with_text("nested.md", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 19_000..19_020);
+
+        assert_eq!(highlighted.len(), 20);
+        assert!(
+            highlighter.last_request_bytes <= 2_048,
+            "capped fenced Rust context produced {} parser bytes",
+            highlighter.last_request_bytes
+        );
         remove_dir(dir);
     }
 
