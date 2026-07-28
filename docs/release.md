@@ -103,6 +103,6 @@ To verify a nightly artifact, download it from the workflow run and check the ch
 ```sh
 shasum -a 256 -c cortex-nightly-*.tar.gz.sha256
 tar -xzf cortex-nightly-*.tar.gz
-lipo -verify_arch arm64 cortex
+lipo cortex -verify_arch arm64
 ./cortex --version
 ```
