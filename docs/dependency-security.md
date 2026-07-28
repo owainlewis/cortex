@@ -22,6 +22,10 @@ Scheduled runs audit `main`, while manual runs audit the selected revision.
 It runs separately from normal pull-request checks because the RustSec advisory database changes independently of a pull request.
 This keeps routine pull-request checks deterministic while still detecting newly published advisories.
 
+Audit concurrency is grouped by event name and Git ref.
+Scheduled, `main` push, and manual audits therefore cannot cancel each other, and manual audits of different refs remain independent.
+Cancellation stays enabled within one event and ref so a newer duplicate can replace an older run.
+
 The audit fails for every active RustSec vulnerability that affects the lockfile, regardless of CVSS score.
 There is no minimum score because RustSec advisories do not all carry comparable severity metadata.
 Informational warnings, including unmaintained, unsound, or yanked-package notices, are reported in the job log but do not fail the audit.

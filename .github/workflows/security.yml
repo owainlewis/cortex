@@ -15,7 +15,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: security-audit
+  # Isolate event purposes and audited refs while replacing true duplicates.
+  group: security-audit-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
