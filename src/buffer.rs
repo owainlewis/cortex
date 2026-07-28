@@ -910,17 +910,27 @@ impl Buffer {
         let following = self
             .text
             .get_char(edit.start.saturating_add(inserted.chars().count()));
-        let left_crlf_changed = forms_crlf_at_left_seam(inserted, previous, following)
-            != forms_crlf_at_left_seam(deleted, previous, following);
+        let inserted_forms_left_crlf = forms_crlf_at_left_seam(inserted, previous, following);
+        let deleted_forms_left_crlf = forms_crlf_at_left_seam(deleted, previous, following);
+        let left_crlf_changed = inserted_forms_left_crlf != deleted_forms_left_crlf;
         let start_char = edit.start.saturating_sub(usize::from(left_crlf_changed));
         let start = self.line_for_char(start_char);
         let inserted_lines = structural_line_break_contribution(inserted, previous, following);
         let deleted_lines = structural_line_break_contribution(deleted, previous, following);
         let end = if inserted_lines == deleted_lines {
-            start
-                .saturating_add(inserted_lines)
+            let affected_lines = inserted_lines
                 .saturating_add(1)
-                .min(self.len_lines())
+                .max(edited_line_span(
+                    inserted,
+                    left_crlf_changed,
+                    inserted_forms_left_crlf,
+                ))
+                .max(edited_line_span(
+                    deleted,
+                    left_crlf_changed,
+                    deleted_forms_left_crlf,
+                ));
+            start.saturating_add(affected_lines).min(self.len_lines())
         } else if self.len_lines() > self.clean_text.len_lines()
             && self
                 .text
@@ -964,6 +974,17 @@ fn structural_line_break_contribution(
 
 fn forms_crlf_at_left_seam(text: &str, previous: Option<char>, following: Option<char>) -> bool {
     previous == Some('\r') && text.chars().next().or(following) == Some('\n')
+}
+
+fn edited_line_span(text: &str, left_crlf_changed: bool, forms_left_crlf: bool) -> usize {
+    let slice = RopeSlice::from(text);
+    if slice.len_chars() == 0 {
+        return 1;
+    }
+
+    usize::from(left_crlf_changed && !forms_left_crlf)
+        .saturating_add(slice.char_to_line(slice.len_chars() - 1))
+        .saturating_add(1)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2387,6 +2408,44 @@ mod tests {
                 "{name} marked an unchanged tail"
             );
         }
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn crlf_seam_edits_mark_content_after_the_absorbed_break() {
+        let dir = test_dir("line-changed-crlf-seam-content");
+        let inserted_path = dir.join("inserted.txt");
+        let deleted_path = dir.join("deleted.txt");
+        fs::write(&inserted_path, "a\rb\nc").unwrap();
+        fs::write(&deleted_path, "a\r\nXb\nc").unwrap();
+        let mut inserted = Buffer::open(&inserted_path).unwrap();
+        let mut deleted = Buffer::open(&deleted_path).unwrap();
+
+        inserted.insert(2, "\nX");
+        deleted.delete(2..4);
+
+        assert_eq!(inserted.text(), "a\r\nXb\nc");
+        assert_eq!(deleted.text(), "a\rb\nc");
+        for buffer in [&inserted, &deleted] {
+            assert!(buffer.line_changed(0));
+            assert!(buffer.line_changed(1));
+            assert!(!buffer.line_changed(2));
+        }
+
+        inserted.undo();
+        assert!((0..inserted.len_lines()).all(|line| !inserted.line_changed(line)));
+        inserted.redo();
+        assert!(inserted.line_changed(0));
+        assert!(inserted.line_changed(1));
+        assert!(!inserted.line_changed(2));
+
+        deleted.save().unwrap();
+        deleted.undo();
+        assert!(deleted.line_changed(0));
+        assert!(deleted.line_changed(1));
+        assert!(!deleted.line_changed(2));
+        deleted.redo();
+        assert!((0..deleted.len_lines()).all(|line| !deleted.line_changed(line)));
         remove_dir(dir);
     }
 
