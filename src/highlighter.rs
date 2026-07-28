@@ -486,13 +486,9 @@ fn text_line_range(buffer: &Buffer, line_range: Range<usize>) -> (String, Vec<us
     (source, context_barriers)
 }
 
-fn seeded_source(
-    context: SyntaxContext,
-    source: String,
-    context_barriers: Vec<usize>,
-) -> (String, Vec<usize>, usize) {
+fn seeded_source(context: SyntaxContext, source: String) -> (String, usize) {
     let Some((seed, suffix)) = context.wrapper() else {
-        return (source, context_barriers, 0);
+        return (source, 0);
     };
     let seed_lines = document_lines(&seed).len();
     let mut seeded = seed;
@@ -500,11 +496,7 @@ fn seeded_source(
     seeded.push_str(&source);
     seeded.push('\n');
     seeded.push_str(&suffix);
-    let context_barriers = context_barriers
-        .into_iter()
-        .map(|barrier| barrier + seed_lines)
-        .collect();
-    (seeded, context_barriers, seed_lines)
+    (seeded, seed_lines)
 }
 
 fn rust_wrapper(context: RustContext) -> Option<(String, String)> {
@@ -921,17 +913,12 @@ impl SyntaxHighlighter {
             context => {
                 let expected_lines = line_range.end.saturating_sub(line_range.start);
                 let (source, context_barriers) = text_line_range(buffer, line_range);
-                let (source, context_barriers, seed_lines) =
-                    seeded_source(context, source, context_barriers);
-                #[cfg(test)]
-                {
-                    self.last_request_bytes = source.len();
-                }
-                let mut lines =
-                    self.highlight_document_segments(buffer.path(), &source, &context_barriers);
-                if seed_lines > 0 {
-                    lines.drain(..seed_lines.min(lines.len()));
-                }
+                let mut lines = self.highlight_context_segments(
+                    buffer.path(),
+                    &source,
+                    &context_barriers,
+                    context,
+                );
                 lines.truncate(expected_lines);
                 lines
             }
@@ -1015,6 +1002,57 @@ impl SyntaxHighlighter {
             self.highlight_window(buffer, suffix_start..line_range.end, suffix_context);
         lines.append(&mut suffix);
         lines
+    }
+
+    fn highlight_context_segments(
+        &mut self,
+        path: &Path,
+        source: &str,
+        context_barriers: &[usize],
+        mut context: SyntaxContext,
+    ) -> Vec<Vec<HighlightSpan>> {
+        let lines = document_lines(source);
+        let mut highlighted_lines = vec![Vec::new(); lines.len()];
+        let mut segment_start = 0;
+        #[cfg(test)]
+        let mut request_bytes = 0;
+
+        for segment_end in context_barriers
+            .iter()
+            .copied()
+            .chain(std::iter::once(lines.len()))
+        {
+            if segment_start < segment_end {
+                let segment_lines = &lines[segment_start..segment_end];
+                let (seeded, seed_lines) = seeded_source(context.clone(), segment_lines.join("\n"));
+                #[cfg(test)]
+                {
+                    request_bytes += seeded.len();
+                }
+                let mut segment = self.highlight_document(path, &seeded);
+                segment.drain(..seed_lines.min(segment.len()));
+                segment.truncate(segment_lines.len());
+                for (offset, spans) in segment.into_iter().enumerate() {
+                    highlighted_lines[segment_start + offset] = spans;
+                }
+
+                for line in &segment_lines[..segment_lines.len() - 1] {
+                    context.advance_line(line, false);
+                }
+                if let Some(line) = segment_lines.last() {
+                    // A barrier ends its segment immediately after the truncated line.
+                    let truncated = context_barriers.binary_search(&segment_end).is_ok();
+                    context.advance_line(line, truncated);
+                }
+            }
+            segment_start = segment_end;
+        }
+
+        #[cfg(test)]
+        {
+            self.last_request_bytes = request_bytes;
+        }
+        highlighted_lines
     }
 
     fn highlight_document_segments(
@@ -2495,6 +2533,16 @@ mod tests {
     }
 
     #[test]
+    fn markdown_fence_reseeds_rust_after_truncated_line_and_closes() {
+        assert_markdown_fence_reseeds_after_truncated_line("");
+    }
+
+    #[test]
+    fn block_quoted_markdown_fence_reseeds_rust_after_truncated_line_and_closes() {
+        assert_markdown_fence_reseeds_after_truncated_line("> ");
+    }
+
+    #[test]
     fn unsupported_buffer_skips_prefix_construction_and_parsing() {
         let text = (0..5000)
             .map(|idx| format!("plain text line {idx}"))
@@ -2613,6 +2661,33 @@ mod tests {
         assert!(highlighter.last_request_bytes <= max_window_lines * 128);
         assert!(window.lines.len() <= max_window_lines);
         assert!(cache.checkpoints.len() <= super::MAX_RECENT_CHECKPOINTS + 1);
+    }
+
+    fn assert_markdown_fence_reseeds_after_truncated_line(prefix: &str) {
+        let mut lines = vec![format!("{prefix}paragraph"); 512];
+        lines[1] = format!("{prefix}```rust");
+        for line in &mut lines[2..257] {
+            *line = format!("{prefix}let inside = 1;");
+        }
+        lines[257] = format!(
+            "{prefix}{}",
+            "x".repeat(super::MAX_HIGHLIGHT_LINE_CHARS + 1)
+        );
+        lines[258] = format!("{prefix}let after = 2;");
+        lines[259] = format!("{prefix}```");
+        lines[260] = format!("{prefix}# Visible heading");
+        let (buffer, dir) = buffer_with_text("reseeded-fence.md", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 256..261);
+
+        assert!(line_has_kind(&highlighted[0], HighlightKind::Keyword));
+        assert!(line_has_kind(&highlighted[2], HighlightKind::Keyword));
+        assert!(line_has_kind(&highlighted[4], HighlightKind::MarkupHeading));
+        assert!(!line_has_kind(&highlighted[4], HighlightKind::Keyword));
+        assert_eq!(highlighter.document_parse_count, 2);
+        assert_bounded_rebuild_work(&highlighter, buffer.id());
+        remove_dir(dir);
     }
 
     fn buffer_with_text(file_name: &str, text: &str) -> (Buffer, PathBuf) {
