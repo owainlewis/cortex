@@ -30,9 +30,10 @@ Factory must open an issue instead of changing docs when the product decision is
 - Active milestone work must have a GitHub Project.
 - Issues selected for active milestone work must be present on that project.
 - Project status must reflect real work state.
-- Done means the linked PR or direct commit is merged.
-- In Progress means active implementation, review, checks, or blocked work after start.
 - Todo means planned work that has not started.
+- In Progress means active implementation, checks, or blocked work after start.
+- Reviewing means a linked pull request or explicit decision is awaiting review, required checks, or merge.
+- Done means the linked pull request or direct commit is merged, acceptance criteria are verified, and the issue is closed.
 
 Factory may add missing issue links to the project when GitHub permissions allow.
 Factory must not create or rename project fields without human approval.

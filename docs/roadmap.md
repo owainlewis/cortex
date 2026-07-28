@@ -190,7 +190,7 @@ Release notes should focus on install, update, CI, and release workflow changes.
 
 ## Editor Quality
 
-Status: Planned.
+Status: In progress.
 
 Goal: keep editing correct, safe, and fast as the editor grows.
 
@@ -201,33 +201,33 @@ Likely includes:
 - Rendering and Unicode correctness.
 
 Tracking issues:
-- [open] [#50 Add diffed rendering](https://github.com/owainlewis/cortex/issues/50)
+- [closed] [#50 Add diffed rendering](https://github.com/owainlewis/cortex/issues/50)
 - [open] [#51 Add latency and large-file performance checks](https://github.com/owainlewis/cortex/issues/51)
 - [closed] [#58 Allow literal slash insertion without losing command entry](https://github.com/owainlewis/cortex/issues/58)
 - [closed] [#59 Harden atomic-save temporary file creation](https://github.com/owainlewis/cortex/issues/59)
 - [closed] [#60 Preserve file permissions and define symlink save behavior](https://github.com/owainlewis/cortex/issues/60)
 - [open] [#61 Remove whole-buffer work from input and render paths](https://github.com/owainlewis/cortex/issues/61)
-- [open] [#62 Preserve syntax highlight context across viewport boundaries](https://github.com/owainlewis/cortex/issues/62)
+- [closed] [#62 Preserve syntax highlight context across viewport boundaries](https://github.com/owainlewis/cortex/issues/62)
 - [open] [#63 Render Unicode grapheme clusters and combining marks correctly](https://github.com/owainlewis/cortex/issues/63)
-- [open] [#64 Mark final-newline-only changes in the gutter](https://github.com/owainlewis/cortex/issues/64)
+- [closed] [#64 Mark final-newline-only changes in the gutter](https://github.com/owainlewis/cortex/issues/64)
 
 ## Repository Quality
 
-Status: In progress.
+Status: Done.
 
 Goal: keep project tracking, contribution flow, CI, security, and releases dependable.
 
 Tracking issues:
 - [closed] [#52 Reconcile README, roadmap, and issue state with shipped behavior](https://github.com/owainlewis/cortex/issues/52)
 - [closed] [#65 Protect main with required Rust checks](https://github.com/owainlewis/cortex/issues/65)
-- [open] [#66 Create active roadmap tracking with milestones and a Cortex Project](https://github.com/owainlewis/cortex/issues/66)
-- [open] [#67 Enable dependency vulnerability scanning and update automation](https://github.com/owainlewis/cortex/issues/67)
-- [open] [#68 Add the repository labels required by STANDARDS.md](https://github.com/owainlewis/cortex/issues/68)
-- [open] [#69 Gate tagged releases on formatting, clippy, tests, and build](https://github.com/owainlewis/cortex/issues/69)
-- [open] [#70 Pin GitHub Actions and add release provenance](https://github.com/owainlewis/cortex/issues/70)
+- [closed] [#66 Create active roadmap tracking with milestones and a Cortex Project](https://github.com/owainlewis/cortex/issues/66)
+- [closed] [#67 Enable dependency vulnerability scanning and update automation](https://github.com/owainlewis/cortex/issues/67)
+- [closed] [#68 Add the repository labels required by STANDARDS.md](https://github.com/owainlewis/cortex/issues/68)
+- [closed] [#69 Gate tagged releases on formatting, clippy, tests, and build](https://github.com/owainlewis/cortex/issues/69)
+- [closed] [#70 Pin GitHub Actions and add release provenance](https://github.com/owainlewis/cortex/issues/70)
 - [closed] [#71 Standardize merge strategy and clean stale branches](https://github.com/owainlewis/cortex/issues/71)
 - [closed] [#72 Add contributing, security, and issue-reporting guidance](https://github.com/owainlewis/cortex/issues/72)
-- [open] [#73 Make the macOS arm64 build target deterministic](https://github.com/owainlewis/cortex/issues/73)
+- [closed] [#73 Make the macOS arm64 build target deterministic](https://github.com/owainlewis/cortex/issues/73)
 
 ## Rules
 
