@@ -21,17 +21,17 @@ impl View {
     }
 
     pub fn set_point(&mut self, point: usize, buffer: &Buffer) {
-        self.point = point.min(buffer.len_chars());
+        self.point = buffer.grapheme_boundary_at_or_before(point);
         self.clear_preferred_column();
     }
 
     pub fn move_forward_char(&mut self, buffer: &Buffer) {
-        self.point = self.point.saturating_add(1).min(buffer.len_chars());
+        self.point = buffer.next_grapheme_boundary(self.point);
         self.clear_preferred_column();
     }
 
-    pub fn move_backward_char(&mut self) {
-        self.point = self.point.saturating_sub(1);
+    pub fn move_backward_char(&mut self, buffer: &Buffer) {
+        self.point = buffer.previous_grapheme_boundary(self.point);
         self.clear_preferred_column();
     }
 
@@ -81,17 +81,12 @@ impl View {
         let preferred_column = self
             .preferred_column
             .unwrap_or_else(|| self.current_column(buffer));
-        let target_start = buffer.line_start_char(target_line);
-        let target_end = buffer.line_end_char(target_line);
-        let target_len = target_end - target_start;
-
-        self.point = target_start + preferred_column.min(target_len);
+        self.point = buffer.char_at_display_column(target_line, preferred_column);
         self.preferred_column = Some(preferred_column);
     }
 
     fn current_column(&self, buffer: &Buffer) -> usize {
-        let line_idx = buffer.line_for_char(self.point);
-        self.point - buffer.line_start_char(line_idx)
+        buffer.display_column(self.point)
     }
 
     fn clear_preferred_column(&mut self) {
@@ -132,12 +127,29 @@ mod tests {
         view.move_forward_char(&buffer);
         view.move_forward_char(&buffer);
 
-        view.move_backward_char();
+        view.move_backward_char(&buffer);
         assert_eq!(view.point(), 1);
 
-        view.move_backward_char();
-        view.move_backward_char();
+        view.move_backward_char(&buffer);
+        view.move_backward_char(&buffer);
         assert_eq!(view.point(), 0);
+    }
+
+    #[test]
+    fn horizontal_movement_and_point_clamping_keep_graphemes_whole() {
+        let buffer = buffer_with_text("e\u{301}👨‍💻🇺🇸👍🏽✈️界");
+        let mut view = View::new();
+        let expected_boundaries = [2, 5, 7, 9, 11, 12];
+
+        for boundary in expected_boundaries {
+            view.move_forward_char(&buffer);
+            assert_eq!(view.point(), boundary);
+        }
+
+        view.set_point(10, &buffer);
+        assert_eq!(view.point(), 9);
+        view.move_backward_char(&buffer);
+        assert_eq!(view.point(), 7);
     }
 
     #[test]
@@ -146,7 +158,7 @@ mod tests {
         let mut view = View::new();
 
         view.move_forward_char(&buffer);
-        view.move_backward_char();
+        view.move_backward_char(&buffer);
         view.move_next_line(&buffer);
         view.move_previous_line(&buffer);
         view.move_to_line_start(&buffer);
@@ -214,6 +226,25 @@ mod tests {
     }
 
     #[test]
+    fn vertical_movement_preserves_display_columns_without_splitting_graphemes() {
+        let buffer = buffer_with_text("a界b\nae\u{301}b\na👨‍💻b\n");
+        let mut view = View::new();
+
+        view.move_forward_char(&buffer);
+        view.move_forward_char(&buffer);
+        assert_eq!(view.point(), 2);
+
+        view.move_next_line(&buffer);
+        assert_eq!(view.point(), 8);
+
+        view.move_next_line(&buffer);
+        assert_eq!(view.point(), 13);
+
+        view.move_previous_line(&buffer);
+        assert_eq!(view.point(), 8);
+    }
+
+    #[test]
     fn horizontal_movement_resets_preferred_column() {
         let buffer = buffer_with_text("abcdef\nxy\nabcdef\n");
         let mut view = View::new();
@@ -222,7 +253,7 @@ mod tests {
         }
         view.move_next_line(&buffer);
 
-        view.move_backward_char();
+        view.move_backward_char(&buffer);
         view.move_next_line(&buffer);
 
         assert_eq!(view.point(), 11);

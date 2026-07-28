@@ -42,29 +42,31 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
     match command {
         Command::Insert(ch) => {
             let point = view.point();
-            buffer.insert(point, &ch.to_string());
-            view.set_point(point + 1, buffer);
+            let point_after = buffer.insert(point, &ch.to_string());
+            view.set_point(point_after, buffer);
             CommandOutcome::default()
         }
         Command::InsertNewline => {
             let point = view.point();
-            buffer.insert(point, "\n");
-            view.set_point(point + 1, buffer);
+            let point_after = buffer.insert(point, "\n");
+            view.set_point(point_after, buffer);
             CommandOutcome::default()
         }
         Command::DeleteBackward => {
             let point = view.point();
             if point > 0 {
-                buffer.delete_with_points(point - 1..point, point, point - 1);
-                view.set_point(point - 1, buffer);
+                let start = buffer.previous_grapheme_boundary(point);
+                let point_after = buffer.delete_with_points(start..point, point, start);
+                view.set_point(point_after, buffer);
             }
             CommandOutcome::default()
         }
         Command::DeleteForward => {
             let point = view.point();
             if point < buffer.len_chars() {
-                buffer.delete_with_points(point..point + 1, point, point);
-                view.set_point(point, buffer);
+                let end = buffer.next_grapheme_boundary(point);
+                let point_after = buffer.delete_with_points(point..end, point, point);
+                view.set_point(point_after, buffer);
             }
             CommandOutcome::default()
         }
@@ -94,7 +96,7 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
             CommandOutcome::default()
         }
         Command::MoveBackwardChar => {
-            view.move_backward_char();
+            view.move_backward_char(buffer);
             CommandOutcome::default()
         }
         Command::MoveNextLine => {
@@ -137,14 +139,12 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
 
 fn reload_buffer(buffer: &mut Buffer, view: &mut View) -> CommandOutcome {
     let line = buffer.line_for_char(view.point());
-    let column = view.point() - buffer.line_start_char(line);
+    let column = buffer.display_column(view.point());
 
     match buffer.reload() {
         Ok(()) => {
             let line = line.min(buffer.len_lines().saturating_sub(1));
-            let line_start = buffer.line_start_char(line);
-            let line_len = buffer.line_end_char(line) - line_start;
-            view.set_point(line_start + column.min(line_len), buffer);
+            view.set_point(buffer.char_at_display_column(line, column), buffer);
             CommandOutcome {
                 status_message: Some(format!("Reloaded {}", buffer.path().display())),
                 ..CommandOutcome::default()
@@ -202,6 +202,23 @@ mod tests {
     }
 
     #[test]
+    fn sequential_unicode_input_keeps_point_after_the_complete_grapheme() {
+        let mut buffer = buffer_with_text("notes.txt", "");
+        let mut view = View::new();
+
+        for ch in "e\u{301}👨‍💻".chars() {
+            dispatch(Command::Insert(ch), &mut buffer, &mut view);
+        }
+
+        assert_eq!(buffer.text(), "e\u{301}👨‍💻");
+        assert_eq!(view.point(), 5);
+        view.move_backward_char(&buffer);
+        assert_eq!(view.point(), 2);
+        view.move_backward_char(&buffer);
+        assert_eq!(view.point(), 0);
+    }
+
+    #[test]
     fn delete_commands_remove_backward_and_forward() {
         let mut buffer = buffer_with_text("notes.txt", "abcd");
         let mut view = View::new();
@@ -216,6 +233,30 @@ mod tests {
         dispatch(Command::DeleteForward, &mut buffer, &mut view);
         assert_eq!(buffer.text(), "ad");
         assert_eq!(view.point(), 1);
+    }
+
+    #[test]
+    fn delete_and_undo_keep_extended_graphemes_whole() {
+        for grapheme in ["e\u{301}", "👨‍💻", "🇺🇸", "👍🏽", "✈️", "界"] {
+            let original = format!("a{grapheme}b");
+            let mut buffer = buffer_with_text("notes.txt", &original);
+            let mut view = View::new();
+            view.move_forward_char(&buffer);
+            view.move_forward_char(&buffer);
+
+            dispatch(Command::DeleteBackward, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), "ab");
+            assert_eq!(view.point(), 1);
+
+            dispatch(Command::Undo, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), original);
+            assert_eq!(view.point(), 1 + grapheme.chars().count());
+
+            view.move_backward_char(&buffer);
+            dispatch(Command::DeleteForward, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), "ab");
+            assert_eq!(view.point(), 1);
+        }
     }
 
     #[test]
