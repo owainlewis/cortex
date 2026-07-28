@@ -995,6 +995,9 @@ mod tests {
         let mut view = View::new();
 
         start_dirty_quit_prompt(&mut app, &mut keymap, &mut buffer, &mut view);
+        assert!(app.dirty_quit_prompt);
+        assert_eq!(app.status_message.as_deref(), Some(DIRTY_QUIT_PROMPT));
+        assert_eq!(app.status_kind, Some(StatusKind::Prompt));
         let action = app.handle_key(Key::Char('y'), &mut keymap, &mut buffer, &mut view);
 
         assert_eq!(action, AppAction::ForceQuit);
@@ -1010,6 +1013,9 @@ mod tests {
             let mut view = View::new();
 
             start_dirty_quit_prompt(&mut app, &mut keymap, &mut buffer, &mut view);
+            assert!(app.dirty_quit_prompt);
+            assert_eq!(app.status_message.as_deref(), Some(DIRTY_QUIT_PROMPT));
+            assert_eq!(app.status_kind, Some(StatusKind::Prompt));
             let action = app.handle_key(key, &mut keymap, &mut buffer, &mut view);
 
             assert_eq!(action, AppAction::Continue);
