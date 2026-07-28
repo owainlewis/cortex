@@ -9,11 +9,11 @@ Repository:
 - Base branch: main
 
 Project tracking:
-- GitHub Project: Cortex v0.1
+- GitHub Project: Cortex
 - Project URL: https://github.com/users/owainlewis/projects/13
 - Project number: 13
 - Project owner: owainlewis
-- Status lanes: Todo, In Progress, Done
+- Status lanes: Todo, In Progress, Reviewing, Done
 
 Source of truth:
 - docs/prd.md
@@ -36,11 +36,12 @@ Project status rules:
 - Keep the project board current as work progresses.
 - Before starting each issue, confirm the project item exists on GitHub Project #13.
 - When you start active work on an issue, move its project status to `In Progress`.
-- Leave the issue in `In Progress` while planning, coding, reviewing, fixing, opening the PR, and waiting for checks.
-- Move the issue to `Done` only after the PR has been merged into `main`.
+- Leave the issue in `In Progress` while planning, coding, fixing, running local checks, and preparing the PR.
+- Move the issue to `Reviewing` after its pull request opens and while it awaits review, required checks, fixes from review, or merge.
+- Move the issue to `Done` only after the PR has been merged into `main`, acceptance criteria are verified, and the issue is closed.
 - If an issue becomes blocked, leave it in `In Progress` and add a GitHub issue comment explaining the blocker, unless the work never actually started.
 - If the work never actually started, leave the item in `Todo`.
-- If a PR is opened but not merged because of a blocker, leave the item in `In Progress`.
+- If an open PR is blocked on review, checks, a decision, or merge, leave the item in `Reviewing`.
 - In the final report for each issue, include the final project status.
 
 Project status update mechanics:
@@ -111,6 +112,7 @@ Workflow for each issue:
 - Commit only intended changes.
 - Push the branch.
 - Open a PR against main.
+- Move the project item to `Reviewing`.
 - PR body must include:
   - Linked issue
   - Summary
@@ -125,7 +127,7 @@ Workflow for each issue:
 - Before merging, ensure tests pass locally and GitHub checks are passing if checks exist.
 - If checks fail, inspect and fix them.
 - Use squash merge unless the repo already indicates a different preference.
-- After the PR is merged, move the project item to `Done`.
+- After the PR is merged and the issue is closed with its acceptance criteria verified, move the project item to `Done`.
 - After merge, update local main before starting the next issue.
 
 Execution order:
