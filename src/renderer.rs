@@ -472,48 +472,53 @@ impl Renderer {
         }
 
         if frame.size.cols > 0 && frame.size.rows > 0 {
-            let previous = self.last_frame.borrow();
-            let cell_changed = |index: usize| {
-                full_redraw
-                    || previous
-                        .as_ref()
-                        .is_none_or(|previous| previous.cells[index] != frame.cells[index])
-            };
             let width = frame.size.cols as usize;
-            let mut index = 0;
-            while index < frame.cells.len() {
-                if !cell_changed(index) {
-                    index += 1;
-                    continue;
-                }
-                let cell = &frame.cells[index];
-                let CellContent::Text(text) = &cell.content else {
-                    index += 1;
-                    continue;
+            if frame.requires_full_redraw {
+                paint_rows_sequentially(writer, &frame, width)?;
+            } else {
+                let previous = self.last_frame.borrow();
+                let cell_changed = |index: usize| {
+                    full_redraw
+                        || previous
+                            .as_ref()
+                            .is_none_or(|previous| previous.cells[index] != frame.cells[index])
                 };
-                let row = (index / width) as u16;
-                let col = (index % width) as u16;
-                let row_end = index - (index % width) + width;
-                let mut run = text.to_string();
-                let mut next = index + 1;
-                while next < row_end && cell_changed(next) && frame.cells[next].style == cell.style
-                {
-                    if let CellContent::Text(text) = &frame.cells[next].content {
-                        run.push(*text);
+                let mut index = 0;
+                while index < frame.cells.len() {
+                    if !cell_changed(index) {
+                        index += 1;
+                        continue;
                     }
-                    next += 1;
+                    let cell = &frame.cells[index];
+                    let CellContent::Text(text) = &cell.content else {
+                        index += 1;
+                        continue;
+                    };
+                    let row = (index / width) as u16;
+                    let col = (index % width) as u16;
+                    let row_end = index - (index % width) + width;
+                    let mut run = text.to_string();
+                    let mut next = index + 1;
+                    while next < row_end
+                        && cell_changed(next)
+                        && frame.cells[next].style == cell.style
+                    {
+                        if let CellContent::Text(text) = &frame.cells[next].content {
+                            run.push(*text);
+                        }
+                        next += 1;
+                    }
+                    queue!(
+                        writer,
+                        cursor::MoveTo(col, row),
+                        SetAttribute(Attribute::Reset),
+                        ResetColor
+                    )?;
+                    apply_text_style(writer, cell.style)?;
+                    queue!(writer, Print(run))?;
+                    index = next;
                 }
-                queue!(
-                    writer,
-                    cursor::MoveTo(col, row),
-                    SetAttribute(Attribute::Reset),
-                    ResetColor
-                )?;
-                apply_text_style(writer, cell.style)?;
-                queue!(writer, Print(run))?;
-                index = next;
             }
-            drop(previous);
         }
 
         queue!(
@@ -527,6 +532,38 @@ impl Renderer {
         self.last_frame.replace(Some(frame));
         Ok(())
     }
+}
+
+fn paint_rows_sequentially<W: Write>(
+    writer: &mut W,
+    frame: &CellFrame,
+    width: usize,
+) -> io::Result<()> {
+    for (row, cells) in frame.cells.chunks(width).enumerate() {
+        queue!(writer, cursor::MoveTo(0, row as u16))?;
+
+        let mut index = 0;
+        while index < cells.len() {
+            let cell = &cells[index];
+            let CellContent::Text(text) = &cell.content else {
+                index += 1;
+                continue;
+            };
+            let mut run = text.to_string();
+            let mut next = index + 1;
+            while next < cells.len() && cells[next].style == cell.style {
+                if let CellContent::Text(text) = &cells[next].content {
+                    run.push(*text);
+                }
+                next += 1;
+            }
+            queue!(writer, SetAttribute(Attribute::Reset), ResetColor)?;
+            apply_text_style(writer, cell.style)?;
+            queue!(writer, Print(run))?;
+            index = next;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1915,6 +1952,27 @@ mod tests {
 
         assert!(output.contains("\x1b[2J"));
         assert!(output.contains("👨‍💻B"));
+    }
+
+    #[test]
+    fn paint_streams_unsafe_rows_across_style_boundaries() {
+        let renderer = Renderer::new();
+        let size = TerminalSize { cols: 10, rows: 1 };
+        let mut frame = painted_text_frame("👨‍💻;", size);
+        for cell in &mut frame.cells[..5] {
+            cell.style.bold = true;
+        }
+        frame.cells[5].style = plain_style(THEME.syntax_punctuation);
+        let mut output = Vec::new();
+
+        renderer.paint(&mut output, frame).unwrap();
+        let output = String::from_utf8_lossy(&output);
+        let grapheme_end = output.find("👨‍💻").unwrap() + "👨‍💻".len();
+        let semicolon = grapheme_end + output[grapheme_end..].find(';').unwrap();
+
+        assert!(output.contains("\x1b[2J"));
+        assert!(output[grapheme_end..semicolon].contains("\x1b[0m"));
+        assert!(!output.contains("\x1b[1;6H"));
     }
 
     #[test]
