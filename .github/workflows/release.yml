@@ -16,6 +16,8 @@ jobs:
   checks:
     name: Release checks
     runs-on: macos-latest
+    env:
+      TARGET_TRIPLE: aarch64-apple-darwin
     permissions:
       attestations: write
       contents: read
@@ -42,6 +44,7 @@ jobs:
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
+          targets: aarch64-apple-darwin
 
       - name: Check formatting
         run: cargo fmt --check
@@ -52,8 +55,8 @@ jobs:
       - name: Run tests
         run: cargo test
 
-      - name: Build release binary
-        run: cargo build --release
+      - name: Build arm64 release binary
+        run: cargo build --release --target "${TARGET_TRIPLE}"
 
       - name: Package binary
         id: package
@@ -62,20 +65,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          case "$(uname -m)" in
-            arm64) target_triple="aarch64-apple-darwin" ;;
-            x86_64) target_triple="x86_64-apple-darwin" ;;
-            *)
-              echo "Unsupported macOS architecture: $(uname -m)" >&2
-              exit 1
-              ;;
-          esac
-
-          archive="cortex-${TAG_NAME}-${target_triple}.tar.gz"
-          mkdir -p dist
-          cp target/release/cortex dist/cortex
-          tar -czf "${archive}" -C dist cortex
-          shasum -a 256 "${archive}" > "${archive}.sha256"
+          archive="cortex-${TAG_NAME}-${TARGET_TRIPLE}.tar.gz"
+          .github/scripts/package-macos-arm64.sh \
+            "target/${TARGET_TRIPLE}/release/cortex" \
+            "${archive}"
 
           {
             echo "archive=${archive}"

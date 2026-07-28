@@ -181,7 +181,7 @@ Other file types render as plain text.
 ## Releases And Nightlies
 
 Stable releases are built from tags like `v0.1.0`.
-The release workflow publishes a GitHub Release with a macOS tarball and matching `.sha256` checksum.
+The release workflow publishes an arm64 macOS tarball and matching `.sha256` checksum.
 
 Nightly builds are unstable test artifacts from `main`.
 They are downloadable from the Nightly workflow run artifacts and are not used by the stable installer.

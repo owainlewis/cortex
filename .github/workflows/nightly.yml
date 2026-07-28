@@ -16,6 +16,8 @@ jobs:
   macos:
     name: macOS nightly
     runs-on: macos-latest
+    env:
+      TARGET_TRIPLE: aarch64-apple-darwin
 
     steps:
       - name: Check out main
@@ -25,37 +27,28 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: aarch64-apple-darwin
 
-      - name: Build release binary
-        run: cargo build --release
+      - name: Build arm64 release binary
+        run: cargo build --release --target "${TARGET_TRIPLE}"
 
       - name: Package nightly artifact
         env:
           RUN_NUMBER: ${{ github.run_number }}
-          SHORT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
-          case "$(uname -m)" in
-            arm64) target_triple="aarch64-apple-darwin" ;;
-            x86_64) target_triple="x86_64-apple-darwin" ;;
-            *)
-              echo "Unsupported macOS architecture: $(uname -m)" >&2
-              exit 1
-              ;;
-          esac
-
           short_sha="$(git rev-parse --short=12 HEAD)"
-          archive="cortex-nightly-${RUN_NUMBER}-${short_sha}-${target_triple}.tar.gz"
-          mkdir -p dist
-          cp target/release/cortex dist/cortex
-          tar -czf "${archive}" -C dist cortex
-          shasum -a 256 "${archive}" > "${archive}.sha256"
+          archive="cortex-nightly-${RUN_NUMBER}-${short_sha}-${TARGET_TRIPLE}.tar.gz"
+          .github/scripts/package-macos-arm64.sh \
+            "target/${TARGET_TRIPLE}/release/cortex" \
+            "${archive}"
 
           {
             echo "archive=${archive}"
             echo "checksum=${archive}.sha256"
-            echo "artifact_name=cortex-nightly-${RUN_NUMBER}-${target_triple}"
+            echo "artifact_name=cortex-nightly-${RUN_NUMBER}-${TARGET_TRIPLE}"
             echo "short_sha=${short_sha}"
           } >> "${GITHUB_ENV}"
 
