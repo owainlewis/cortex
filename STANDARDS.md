@@ -105,6 +105,18 @@ Factory must explain any check it could not run.
 Factory may open PRs for small CI fixes.
 Factory must stop and ask before changing release, signing, publishing, or secret-related workflows.
 
+### Repository History
+
+- Feature and maintenance pull requests must use squash merge.
+- Merge commits and rebase merges must remain disabled unless a documented release or repository-administration verification requires a temporary exception.
+- Any temporary merge-method exception must preserve `main` protection, required checks, and non-bypassable enforcement, and the normal settings must be restored immediately after verification.
+- GitHub must automatically delete merged head branches.
+- Active pull request branches must be retained.
+- Merged or abandoned branches with no unique work should be deleted.
+- Tags and releases must not be removed as part of branch cleanup.
+- Repository Markdown is the documentation source of truth.
+- The wiki must remain disabled while it is unused.
+
 ### Agent Instructions
 
 - `AGENTS.md` must exist.
