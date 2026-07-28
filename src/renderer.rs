@@ -423,6 +423,10 @@ impl Renderer {
         size.rows.saturating_sub(1) as usize
     }
 
+    pub fn viewport_width(&self, buffer: &Buffer, size: TerminalSize) -> usize {
+        (size.cols as usize).saturating_sub(editor_gutter_width(buffer, size.cols as usize))
+    }
+
     pub(crate) fn invalidate(&self) {
         self.last_frame.borrow_mut().take();
     }
@@ -604,19 +608,33 @@ fn build_frame_with_highlights(
     for screen_row in 0..viewport_height {
         let line_idx = view.scroll_line().saturating_add(screen_row);
         let screen_line = if line_idx < buffer.len_lines() {
-            let raw_text = buffer.line_prefix_for_width(line_idx, text_width);
-            let line_start = buffer.line_start_char(line_idx);
+            let window = buffer.line_window(line_idx, view.scroll_column(), text_width);
+            let left_padding = window
+                .start_column
+                .saturating_sub(view.scroll_column())
+                .min(text_width);
             let spans = highlighted_lines
                 .get(screen_row)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let segments = fit_line_segments(
-                &raw_text,
+            let mut segments = Vec::new();
+            push_segment(&mut segments, &" ".repeat(left_padding), None, false);
+            for segment in fit_line_segments(
+                &window.text,
                 spans,
-                text_width,
-                line_start,
+                text_width.saturating_sub(left_padding),
+                window.start_char,
+                window.start_byte,
+                window.start_column,
                 selection_range.as_ref(),
-            );
+            ) {
+                push_segment(
+                    &mut segments,
+                    &segment.text,
+                    segment.highlight,
+                    segment.selected,
+                );
+            }
             let text = segments_text(&segments);
             ScreenLine {
                 text,
@@ -744,12 +762,20 @@ fn cursor_position(
 
     let point_line = buffer.line_for_char(view.point());
     let text_width = (size.cols as usize).saturating_sub(gutter_width);
-    let point_cell_col = buffer.display_column(view.point());
+    let point_cell_col = buffer
+        .display_column(view.point())
+        .saturating_sub(view.scroll_column());
     let point_cell_col = if point_cell_col < text_width {
         point_cell_col
     } else {
-        let cursor_point = buffer.char_at_display_column(point_line, text_width.saturating_sub(1));
-        buffer.display_column(cursor_point)
+        let cursor_point = buffer.char_at_display_column(
+            point_line,
+            view.scroll_column()
+                .saturating_add(text_width.saturating_sub(1)),
+        );
+        buffer
+            .display_column(cursor_point)
+            .saturating_sub(view.scroll_column())
     };
     let viewport_height = size.rows.saturating_sub(1) as usize;
     let row = point_line
@@ -1169,6 +1195,8 @@ fn fit_line_segments(
     highlight_spans: &[HighlightSpan],
     width: usize,
     line_start: usize,
+    line_byte_start: usize,
+    initial_column: usize,
     selection_range: Option<&Range<usize>>,
 ) -> Vec<StyledSegment> {
     let mut segments = Vec::new();
@@ -1181,17 +1209,18 @@ fn fit_line_segments(
         }
 
         let char_idx = line_start + line_char_idx;
-        let highlight = highlight_for_byte(highlight_spans, byte_idx);
+        let highlight =
+            highlight_for_byte(highlight_spans, line_byte_start.saturating_add(byte_idx));
         let selected = selection_range.is_some_and(|range| range.contains(&char_idx));
         if grapheme == "\t" {
-            let spaces = tab_spaces(cells).min(width - cells);
+            let spaces = tab_spaces(initial_column.saturating_add(cells)).min(width - cells);
             push_segment(&mut segments, &" ".repeat(spaces), highlight, selected);
             cells += spaces;
             line_char_idx += 1;
             continue;
         }
 
-        let grapheme_width = text::grapheme_width(grapheme, cells);
+        let grapheme_width = text::grapheme_width(grapheme, initial_column.saturating_add(cells));
         if cells + grapheme_width > width {
             break;
         }
@@ -1382,9 +1411,9 @@ fn tab_spaces(current_col: usize) -> usize {
 mod tests {
     use super::{
         build_frame, build_frame_with_selection, build_picker_frame, fill_row, fit_line_cells,
-        fit_status_line, measure_cells, plain_style, push_cells, CellFrame, CursorPosition, Frame,
-        ModelineStyle, Renderer, ScreenLineKind, StatusKind, TerminalSize, COMMAND_LINE_HINT,
-        THEME,
+        fit_status_line, measure_cells, modeline_text, plain_style, push_cells, CellFrame,
+        CursorPosition, Frame, ModelineStyle, Renderer, ScreenLineKind, StatusKind, TerminalSize,
+        COMMAND_LINE_HINT, THEME,
     };
     use crate::{
         buffer::Buffer,
@@ -1540,7 +1569,7 @@ mod tests {
 
         view.move_next_line(&buffer);
         view.move_next_line(&buffer);
-        view.ensure_point_visible(&buffer, 2);
+        view.ensure_point_visible(&buffer, 2, 34);
 
         let frame = build_frame(
             &buffer,
@@ -1567,7 +1596,7 @@ mod tests {
         buffer.insert(changed_start, "x");
         let mut view = View::new();
         view.set_point(changed_start, &buffer);
-        view.ensure_point_visible(&buffer, 5);
+        view.ensure_point_visible(&buffer, 5, 31);
 
         let frame = build_frame(
             &buffer,
@@ -1592,6 +1621,27 @@ mod tests {
     }
 
     #[test]
+    fn repeated_deep_horizontal_frames_reuse_line_column_anchors() {
+        let long_line = format!("{}tail\n", "x".repeat(10_000));
+        let buffer = buffer_with_text("large.txt", &long_line.repeat(12));
+        let mut view = View::new();
+        view.move_to_line_end(&buffer);
+        buffer.take_line_column_graphemes_visited();
+
+        let size = TerminalSize { cols: 20, rows: 11 };
+        view.ensure_point_visible(&buffer, 10, 14);
+        let first = build_frame(&buffer, &view, size, None, None, None);
+        let first_walk = buffer.take_line_column_graphemes_visited();
+        view.ensure_point_visible(&buffer, 10, 14);
+        let repeated = build_frame(&buffer, &view, size, None, None, None);
+        let repeated_walk = buffer.take_line_column_graphemes_visited();
+
+        assert_eq!(line_texts(&first), line_texts(&repeated));
+        assert!(first_walk >= 80_000);
+        assert_eq!(repeated_walk, 0);
+    }
+
+    #[test]
     fn frame_truncates_long_lines_and_modeline_to_width() {
         let mut buffer = buffer_with_text("notes.txt", "abcdef");
         buffer.insert(0, "z");
@@ -1608,6 +1658,79 @@ mod tests {
         assert_eq!(line_texts(&frame), vec!["zabc"]);
         assert_eq!(frame.modeline.chars().count(), 4);
         assert_eq!(frame.cursor, CursorPosition { col: 0, row: 0 });
+    }
+
+    #[test]
+    fn frame_keeps_point_visible_at_the_end_of_a_long_line() {
+        let buffer = buffer_with_text("notes.txt", "abcdefghij");
+        let mut view = View::new();
+        view.move_to_line_end(&buffer);
+        view.ensure_point_visible(&buffer, 1, 6);
+
+        let frame = build_frame(
+            &buffer,
+            &view,
+            TerminalSize { cols: 6, rows: 2 },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(line_texts(&frame), vec!["fghij"]);
+        assert_eq!(frame.cursor, CursorPosition { col: 5, row: 0 });
+    }
+
+    #[test]
+    fn horizontal_window_never_draws_half_a_grapheme() {
+        let buffer = buffer_with_text("notes.txt", "abcdef\n界abcdef");
+        let mut view = View::new();
+        view.move_to_line_end(&buffer);
+        view.ensure_point_visible(&buffer, 2, 6);
+
+        let frame = build_frame(
+            &buffer,
+            &view,
+            TerminalSize { cols: 6, rows: 3 },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(view.scroll_column(), 1);
+        assert_eq!(line_texts(&frame), vec!["bcdef", " abcde"]);
+        assert_eq!(frame.cursor, CursorPosition { col: 5, row: 0 });
+    }
+
+    #[test]
+    fn horizontal_window_preserves_tab_stops_and_cluster_widths() {
+        let buffer = buffer_with_text("notes.txt", "\t界\u{301}x");
+        let mut view = View::new();
+        view.move_to_line_end(&buffer);
+        view.ensure_point_visible(&buffer, 1, 5);
+
+        let frame = build_frame(
+            &buffer,
+            &view,
+            TerminalSize { cols: 5, rows: 2 },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(view.scroll_column(), 4);
+        assert_eq!(line_texts(&frame), vec!["界\u{301}x"]);
+        assert_eq!(frame.cursor, CursorPosition { col: 3, row: 0 });
+    }
+
+    #[test]
+    fn modeline_column_stays_buffer_relative_after_horizontal_scroll() {
+        let buffer = buffer_with_text("notes.txt", "abcdefghij");
+        let mut view = View::new();
+        view.move_to_line_end(&buffer);
+        view.ensure_point_visible(&buffer, 1, 6);
+
+        assert_eq!(view.scroll_column(), 5);
+        assert!(modeline_text(&buffer, &view, None).contains("Col 11"));
     }
 
     #[test]
@@ -1734,6 +1857,33 @@ mod tests {
             .map(|segment| segment.text.as_str())
             .collect();
         assert_eq!(selected, "👨‍💻");
+    }
+
+    #[test]
+    fn horizontal_window_keeps_selection_at_its_buffer_position() {
+        let buffer = buffer_with_text("notes.txt", "aébcdef");
+        let mut view = View::new();
+        view.move_to_line_end(&buffer);
+        view.ensure_point_visible(&buffer, 1, 4);
+
+        let frame = build_frame_with_selection(
+            &buffer,
+            &view,
+            TerminalSize { cols: 4, rows: 2 },
+            None,
+            None,
+            Some(4..5),
+            None,
+        );
+
+        assert_eq!(frame.lines[0].text, "def");
+        let selected: String = frame.lines[0]
+            .segments
+            .iter()
+            .filter(|segment| segment.selected)
+            .map(|segment| segment.text.as_str())
+            .collect();
+        assert_eq!(selected, "d");
     }
 
     #[test]

@@ -273,6 +273,29 @@ mod tests {
     }
 
     #[test]
+    fn switching_buffers_preserves_each_horizontal_view() {
+        let dir = test_dir("horizontal-view");
+        let first = dir.join("first.txt");
+        let second = dir.join("second.txt");
+        fs::write(&first, "abcdefghij").unwrap();
+        fs::write(&second, "klmnopqrst").unwrap();
+
+        let mut editor = Editor::new(Buffer::open(&first).unwrap()).unwrap();
+        {
+            let (buffer, view) = editor.active_mut();
+            view.move_to_line_end(buffer);
+            view.ensure_point_visible(buffer, 1, 6);
+            assert_eq!(view.scroll_column(), 5);
+        }
+
+        editor.open(&second).unwrap();
+        assert_eq!(editor.active().1.scroll_column(), 0);
+        editor.switch_to("first.txt").unwrap();
+        assert_eq!(editor.active().1.scroll_column(), 5);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn opening_an_existing_buffer_switches_without_reloading_it() {
         let dir = test_dir("already-open");
         let first = dir.join("first.txt");

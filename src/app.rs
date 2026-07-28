@@ -750,7 +750,11 @@ fn render<W: io::Write>(
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
     let size = TerminalSize { cols, rows };
     let prompt_text = app_state.prompt_text();
-    view.ensure_point_visible(buffer, renderer.viewport_height(size));
+    view.ensure_point_visible(
+        buffer,
+        renderer.viewport_height(size),
+        renderer.viewport_width(buffer, size),
+    );
     renderer.render(
         writer,
         buffer,

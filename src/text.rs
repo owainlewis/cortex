@@ -166,6 +166,7 @@ pub(crate) fn previous_rope_boundary(text: RopeSlice<'_>, char_index: usize) -> 
     }
 }
 
+#[cfg(test)]
 pub(crate) fn measure_rope_width(text: RopeSlice<'_>, max_width: usize) -> usize {
     let mut width = 0;
 
@@ -199,13 +200,83 @@ pub(crate) fn rope_char_index_at_column(text: RopeSlice<'_>, target_column: usiz
     boundary
 }
 
-pub(crate) fn rope_prefix_for_width(text: RopeSlice<'_>, max_width: usize) -> String {
+#[cfg(test)]
+pub(crate) fn rope_char_index_at_or_after_column(
+    text: RopeSlice<'_>,
+    target_column: usize,
+) -> (usize, usize) {
+    let (char_index, column, _, _) = rope_column_at_or_after_from(text, target_column, 0);
+    (char_index, column)
+}
+
+pub(crate) fn rope_column_at_or_after_from(
+    text: RopeSlice<'_>,
+    target_column: usize,
+    initial_column: usize,
+) -> (usize, usize, Vec<(usize, usize)>, usize) {
+    const CHECKPOINT_GRAPHEMES: usize = 1_024;
+
+    let mut column = initial_column;
+    let mut boundary = 0;
+    let mut visited = 0;
+    let mut checkpoints = Vec::new();
+
+    for grapheme in RopeGraphemes::new(text) {
+        if column >= target_column {
+            break;
+        }
+        let width = with_rope_slice_str(grapheme, |grapheme| grapheme_width(grapheme, column));
+        column = column.saturating_add(width);
+        boundary += grapheme.len_chars();
+        visited += 1;
+        if visited % CHECKPOINT_GRAPHEMES == 0 {
+            checkpoints.push((boundary, column));
+        }
+    }
+
+    (boundary, column, checkpoints, visited)
+}
+
+pub(crate) fn rope_column_for_char_from(
+    text: RopeSlice<'_>,
+    target_chars: usize,
+    initial_column: usize,
+) -> (usize, Vec<(usize, usize)>, usize) {
+    const CHECKPOINT_GRAPHEMES: usize = 1_024;
+
+    let mut column = initial_column;
+    let mut boundary = 0;
+    let mut visited = 0;
+    let mut checkpoints = Vec::new();
+
+    for grapheme in RopeGraphemes::new(text) {
+        if boundary >= target_chars {
+            break;
+        }
+        let width = with_rope_slice_str(grapheme, |grapheme| grapheme_width(grapheme, column));
+        column = column.saturating_add(width);
+        boundary += grapheme.len_chars();
+        visited += 1;
+        if visited % CHECKPOINT_GRAPHEMES == 0 {
+            checkpoints.push((boundary, column));
+        }
+    }
+
+    (column, checkpoints, visited)
+}
+
+pub(crate) fn rope_prefix_for_width(
+    text: RopeSlice<'_>,
+    max_width: usize,
+    initial_column: usize,
+) -> String {
     let mut prefix = String::new();
     let mut width = 0;
 
     for grapheme in RopeGraphemes::new(text) {
-        let grapheme_width =
-            with_rope_slice_str(grapheme, |grapheme| grapheme_width(grapheme, width));
+        let grapheme_width = with_rope_slice_str(grapheme, |grapheme| {
+            grapheme_width(grapheme, initial_column.saturating_add(width))
+        });
         if width.saturating_add(grapheme_width) > max_width {
             break;
         }
@@ -253,7 +324,7 @@ mod tests {
     use super::{
         grapheme_char_indices, measure_rope_width, measure_width, next_rope_boundary, pop_grapheme,
         previous_rope_boundary, rope_boundary_at_or_after, rope_boundary_at_or_before,
-        rope_char_index_at_column, rope_prefix_for_width,
+        rope_char_index_at_column, rope_char_index_at_or_after_column, rope_prefix_for_width,
     };
 
     #[test]
@@ -296,6 +367,8 @@ mod tests {
         assert_eq!(rope_char_index_at_column(text, 2), 1);
         assert_eq!(rope_char_index_at_column(text, 3), 2);
         assert_eq!(rope_char_index_at_column(text, 4), 3);
+        assert_eq!(rope_char_index_at_or_after_column(text, 2), (2, 3));
+        assert_eq!(rope_char_index_at_or_after_column(text, 3), (2, 3));
     }
 
     #[test]
@@ -327,7 +400,7 @@ mod tests {
     fn rope_column_helpers_stop_after_the_visible_prefix() {
         let rope = Rope::from_str(&format!("👨‍💻{}", "x".repeat(1_000_000)));
         let text = rope.slice(..);
-        let prefix = rope_prefix_for_width(text, 80);
+        let prefix = rope_prefix_for_width(text, 80, 0);
 
         assert_eq!(measure_width(&prefix, usize::MAX), 80);
         assert_eq!(prefix.chars().count(), 81);
