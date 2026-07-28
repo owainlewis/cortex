@@ -212,7 +212,7 @@ Tracking issues:
 - [closed] [#64 Mark final-newline-only changes in the gutter](https://github.com/owainlewis/cortex/issues/64)
 - [closed] [#110 Reconcile README and roadmap after final audit](https://github.com/owainlewis/cortex/issues/110)
 - [closed] [#111 Restore terminal state on catchable termination signals](https://github.com/owainlewis/cortex/issues/111)
-- [open] [#112 Bound highlighting work at deep viewports](https://github.com/owainlewis/cortex/issues/112)
+- [closed] [#112 Bound highlighting work at deep viewports](https://github.com/owainlewis/cortex/issues/112)
 - [closed] [#113 Keep point visible while editing long lines](https://github.com/owainlewis/cortex/issues/113)
 - [open] [#114 Avoid full long-line comparisons during rendering](https://github.com/owainlewis/cortex/issues/114)
 

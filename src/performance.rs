@@ -140,11 +140,34 @@ fn large_visible_highlighting() {
     let markdown = (0..20_000)
         .map(|line| format!("# Heading {line}\n\nParagraph with `code_{line}`.\n"))
         .collect::<String>();
-    let rust_fixture = Fixture::new("large.rs", &rust);
-    let markdown_fixture = Fixture::new("large.md", &markdown);
+    let mut rust_fixture = Fixture::new("large.rs", &rust);
+    let mut markdown_fixture = Fixture::new("large.md", &markdown);
     let mut highlighter = SyntaxHighlighter::new();
 
-    let (rust_lines, markdown_lines) = measured("large visible highlighting", || {
+    let (rust_lines, markdown_lines) = measured("initial deep visible highlighting", || {
+        (
+            highlight_deep_viewport(&mut highlighter, &rust_fixture.buffer),
+            highlight_deep_viewport(&mut highlighter, &markdown_fixture.buffer),
+        )
+    });
+
+    assert_eq!(rust_lines.len(), 40);
+    assert_eq!(markdown_lines.len(), 40);
+    assert!(contains_kind(&rust_lines, HighlightKind::Keyword));
+    assert!(contains_kind(&markdown_lines, HighlightKind::MarkupHeading));
+
+    let rust_line = rust_fixture.buffer.len_lines().saturating_sub(20);
+    let markdown_line = markdown_fixture.buffer.len_lines().saturating_sub(20);
+    rust_fixture.buffer.insert(
+        rust_fixture.buffer.line_end_char(rust_line),
+        " // performance edit",
+    );
+    markdown_fixture.buffer.insert(
+        markdown_fixture.buffer.line_end_char(markdown_line),
+        " performance edit",
+    );
+
+    let (rust_lines, markdown_lines) = measured("edited deep visible highlighting", || {
         (
             highlight_deep_viewport(&mut highlighter, &rust_fixture.buffer),
             highlight_deep_viewport(&mut highlighter, &markdown_fixture.buffer),
