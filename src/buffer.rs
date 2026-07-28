@@ -903,14 +903,34 @@ impl Buffer {
             EditDirection::Forward => (&edit.inserted, &edit.deleted),
             EditDirection::Backward => (&edit.deleted, &edit.inserted),
         };
-        let start = self.line_for_char(edit.start);
-        let inserted_lines = inserted.bytes().filter(|byte| *byte == b'\n').count();
-        let deleted_lines = deleted.bytes().filter(|byte| *byte == b'\n').count();
+        let previous = edit
+            .start
+            .checked_sub(1)
+            .and_then(|char_idx| self.text.get_char(char_idx));
+        let following = self
+            .text
+            .get_char(edit.start.saturating_add(inserted.chars().count()));
+        let inserted_forms_left_crlf = forms_crlf_at_left_seam(inserted, previous, following);
+        let deleted_forms_left_crlf = forms_crlf_at_left_seam(deleted, previous, following);
+        let left_crlf_changed = inserted_forms_left_crlf != deleted_forms_left_crlf;
+        let start_char = edit.start.saturating_sub(usize::from(left_crlf_changed));
+        let start = self.line_for_char(start_char);
+        let inserted_lines = structural_line_break_contribution(inserted, previous, following);
+        let deleted_lines = structural_line_break_contribution(deleted, previous, following);
         let end = if inserted_lines == deleted_lines {
-            start
-                .saturating_add(inserted_lines)
+            let affected_lines = inserted_lines
                 .saturating_add(1)
-                .min(self.len_lines())
+                .max(edited_line_span(
+                    inserted,
+                    left_crlf_changed,
+                    inserted_forms_left_crlf,
+                ))
+                .max(edited_line_span(
+                    deleted,
+                    left_crlf_changed,
+                    deleted_forms_left_crlf,
+                ));
+            start.saturating_add(affected_lines).min(self.len_lines())
         } else if self.len_lines() > self.clean_text.len_lines()
             && self
                 .text
@@ -924,6 +944,47 @@ impl Buffer {
         };
         start..end.max(start + 1)
     }
+}
+
+fn structural_line_break_count(text: &str) -> usize {
+    RopeSlice::from(text).len_lines().saturating_sub(1)
+}
+
+fn structural_line_break_contribution(
+    text: &str,
+    previous: Option<char>,
+    following: Option<char>,
+) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+
+    let mut count = structural_line_break_count(text);
+    if previous == Some('\r') && text.starts_with('\n') {
+        count -= 1;
+    }
+    if text.ends_with('\r') && following == Some('\n') {
+        count -= 1;
+    }
+    if previous == Some('\r') && following == Some('\n') {
+        count += 1;
+    }
+    count
+}
+
+fn forms_crlf_at_left_seam(text: &str, previous: Option<char>, following: Option<char>) -> bool {
+    previous == Some('\r') && text.chars().next().or(following) == Some('\n')
+}
+
+fn edited_line_span(text: &str, left_crlf_changed: bool, forms_left_crlf: bool) -> usize {
+    let slice = RopeSlice::from(text);
+    if slice.len_chars() == 0 {
+        return 1;
+    }
+
+    usize::from(left_crlf_changed && !forms_left_crlf)
+        .saturating_add(slice.char_to_line(slice.len_chars() - 1))
+        .saturating_add(1)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1902,8 +1963,8 @@ fn ensure_parent_directory_exists(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        disk_stamp, temp_path_for, write_atomically_with, write_atomically_with_metadata, Buffer,
-        BufferChange, ChangedLines,
+        disk_stamp, structural_line_break_count, temp_path_for, write_atomically_with,
+        write_atomically_with_metadata, Buffer, BufferChange, ChangedLines,
     };
     use std::{
         fs::{self, FileTimes},
@@ -1914,6 +1975,17 @@ mod tests {
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    const ROPEY_LINE_BREAKS: [(&str, &str); 8] = [
+        ("lf", "\n"),
+        ("cr", "\r"),
+        ("crlf", "\r\n"),
+        ("vt", "\u{000B}"),
+        ("ff", "\u{000C}"),
+        ("nel", "\u{0085}"),
+        ("line-separator", "\u{2028}"),
+        ("paragraph-separator", "\u{2029}"),
+    ];
 
     #[test]
     fn loads_existing_files_into_the_buffer() {
@@ -2190,6 +2262,190 @@ mod tests {
         assert!(!deleted.line_changed(0));
         assert!(deleted.line_changed(1));
         assert!(deleted.line_changed(2));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn line_changed_tracks_every_ropey_line_break_form() {
+        let dir = test_dir("line-changed-ropey-breaks");
+
+        for (name, line_break) in ROPEY_LINE_BREAKS {
+            let inserted_path = dir.join(format!("{name}-inserted.txt"));
+            let deleted_path = dir.join(format!("{name}-deleted.txt"));
+            fs::write(&inserted_path, "alpha\nbeta\ngamma").unwrap();
+            fs::write(
+                &deleted_path,
+                format!("alpha{line_break}beta{line_break}gamma"),
+            )
+            .unwrap();
+            let mut inserted = Buffer::open(&inserted_path).unwrap();
+            let mut deleted = Buffer::open(&deleted_path).unwrap();
+
+            inserted.insert(inserted.line_start_char(1), &format!("new{line_break}"));
+            deleted.delete(5..5 + line_break.chars().count());
+
+            assert!(
+                !inserted.line_changed(0),
+                "{name} insertion marked the preceding line"
+            );
+            assert!(
+                (1..inserted.len_lines()).all(|line| inserted.line_changed(line)),
+                "{name} insertion did not mark the shifted tail"
+            );
+            assert!(
+                (0..deleted.len_lines()).all(|line| deleted.line_changed(line)),
+                "{name} deletion did not mark the shifted tail"
+            );
+        }
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn structural_line_break_count_uses_ropey_semantics() {
+        for (_, line_break) in ROPEY_LINE_BREAKS {
+            assert_eq!(structural_line_break_count(line_break), 1);
+        }
+        assert_eq!(structural_line_break_count("\r\n\r\n"), 2);
+        assert_eq!(structural_line_break_count("plain text"), 0);
+    }
+
+    #[test]
+    fn non_lf_structural_changes_survive_undo_redo_and_save_rebasing() {
+        let dir = test_dir("line-changed-non-lf-history");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\nbeta\ngamma").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(buffer.line_start_char(1), "new\u{2028}");
+        assert!((1..buffer.len_lines()).all(|line| buffer.line_changed(line)));
+
+        buffer.undo();
+        assert!((0..buffer.len_lines()).all(|line| !buffer.line_changed(line)));
+
+        buffer.redo();
+        assert!((1..buffer.len_lines()).all(|line| buffer.line_changed(line)));
+
+        buffer.save().unwrap();
+        assert!((0..buffer.len_lines()).all(|line| !buffer.line_changed(line)));
+
+        buffer.undo();
+        assert!(!buffer.line_changed(0));
+        assert!((1..buffer.len_lines()).all(|line| buffer.line_changed(line)));
+
+        buffer.redo();
+        assert!((0..buffer.len_lines()).all(|line| !buffer.line_changed(line)));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn non_lf_structural_edit_absorbs_later_marker_ranges() {
+        let dir = test_dir("line-changed-non-lf-shifted-range");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\nbeta\ngamma\ndelta").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(buffer.line_start_char(3), "x");
+        buffer.insert(buffer.line_start_char(1), "new\r");
+
+        assert!(!buffer.line_changed(0));
+        assert!((1..buffer.len_lines()).all(|line| buffer.line_changed(line)));
+        assert_eq!(buffer.changed_lines.ranges, vec![1..buffer.len_lines()]);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn crlf_seam_changes_keep_shifted_ranges_aligned_through_history_and_save() {
+        let dir = test_dir("line-changed-crlf-seam-history");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "a\rX\nb\nc").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(buffer.line_start_char(3), "z");
+        buffer.delete(2..3);
+
+        assert_eq!(buffer.text(), "a\r\nb\nzc");
+        assert!((0..buffer.len_lines()).all(|line| buffer.line_changed(line)));
+
+        buffer.undo();
+        assert_eq!(buffer.text(), "a\rX\nb\nzc");
+        assert!((0..3).all(|line| !buffer.line_changed(line)));
+        assert!(buffer.line_changed(3));
+
+        buffer.redo();
+        assert!((0..buffer.len_lines()).all(|line| buffer.line_changed(line)));
+
+        buffer.save().unwrap();
+        buffer.undo();
+        assert_eq!(buffer.text(), "a\rX\nb\nzc");
+        assert!((0..buffer.len_lines()).all(|line| buffer.line_changed(line)));
+
+        buffer.redo();
+        assert!((0..buffer.len_lines()).all(|line| !buffer.line_changed(line)));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn completing_a_crlf_pair_does_not_mark_the_unchanged_tail() {
+        let dir = test_dir("line-changed-complete-crlf");
+        let cases = [
+            ("insert-lf", "a\rb\nc", 2, "\n"),
+            ("insert-cr", "a\nb\nc", 1, "\r"),
+        ];
+
+        for (name, text, char_idx, inserted) in cases {
+            let path = dir.join(format!("{name}.txt"));
+            fs::write(&path, text).unwrap();
+            let mut buffer = Buffer::open(&path).unwrap();
+
+            buffer.insert(char_idx, inserted);
+
+            assert!(
+                buffer.line_changed(0),
+                "{name} did not mark the edited line"
+            );
+            assert!(
+                (1..buffer.len_lines()).all(|line| !buffer.line_changed(line)),
+                "{name} marked an unchanged tail"
+            );
+        }
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn crlf_seam_edits_mark_content_after_the_absorbed_break() {
+        let dir = test_dir("line-changed-crlf-seam-content");
+        let inserted_path = dir.join("inserted.txt");
+        let deleted_path = dir.join("deleted.txt");
+        fs::write(&inserted_path, "a\rb\nc").unwrap();
+        fs::write(&deleted_path, "a\r\nXb\nc").unwrap();
+        let mut inserted = Buffer::open(&inserted_path).unwrap();
+        let mut deleted = Buffer::open(&deleted_path).unwrap();
+
+        inserted.insert(2, "\nX");
+        deleted.delete(2..4);
+
+        assert_eq!(inserted.text(), "a\r\nXb\nc");
+        assert_eq!(deleted.text(), "a\rb\nc");
+        for buffer in [&inserted, &deleted] {
+            assert!(buffer.line_changed(0));
+            assert!(buffer.line_changed(1));
+            assert!(!buffer.line_changed(2));
+        }
+
+        inserted.undo();
+        assert!((0..inserted.len_lines()).all(|line| !inserted.line_changed(line)));
+        inserted.redo();
+        assert!(inserted.line_changed(0));
+        assert!(inserted.line_changed(1));
+        assert!(!inserted.line_changed(2));
+
+        deleted.save().unwrap();
+        deleted.undo();
+        assert!(deleted.line_changed(0));
+        assert!(deleted.line_changed(1));
+        assert!(!deleted.line_changed(2));
+        deleted.redo();
+        assert!((0..deleted.len_lines()).all(|line| !deleted.line_changed(line)));
         remove_dir(dir);
     }
 

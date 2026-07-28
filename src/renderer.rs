@@ -1769,6 +1769,26 @@ mod tests {
     }
 
     #[test]
+    fn frame_marks_the_shifted_tail_after_a_unicode_line_break() {
+        let mut buffer = buffer_with_text("notes.txt", "alpha\nbeta\ngamma");
+        buffer.insert(buffer.line_start_char(1), "new\u{2028}");
+
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 40, rows: 5 },
+            None,
+            None,
+            None,
+        );
+
+        assert!(!frame.lines[0].gutter.starts_with('+'));
+        assert!(frame.lines[1..]
+            .iter()
+            .all(|line| line.gutter.starts_with('+')));
+    }
+
+    #[test]
     fn frame_uses_scroll_line_to_keep_point_visible() {
         let buffer = buffer_with_text("notes.txt", "one\ntwo\nthree\nfour\n");
         let mut view = View::new();
