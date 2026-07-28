@@ -126,6 +126,42 @@ fn nested_picker_restores_terminal_after_mixed_termination_signals() {
     }
 }
 
+#[test]
+fn oversized_editor_render_restores_terminal() {
+    let fixture = Fixture::new("oversized-editor");
+    let path = fixture.path().join("file.txt");
+    fs::write(&path, "before\n").expect("write oversized editor fixture");
+    assert_oversized_render_restores_terminal(
+        PtySession::spawn_with_size(&path, u16::MAX, u16::MAX),
+        "editor",
+    );
+}
+
+#[test]
+fn oversized_picker_render_restores_terminal() {
+    let fixture = Fixture::new("oversized-picker");
+    assert_oversized_render_restores_terminal(
+        PtySession::spawn_with_size(fixture.path(), u16::MAX, u16::MAX),
+        "picker",
+    );
+}
+
+fn assert_oversized_render_restores_terminal(mut session: PtySession, surface: &str) {
+    let status = session.wait_for_exit();
+
+    assert!(!status.success(), "oversized {surface} render must fail");
+    session.assert_raw_mode_restored();
+    assert_contains(&session.output, ALT_SCREEN_ENTER, "alternate screen enter");
+    assert_contains(&session.output, CURSOR_HIDE, "cursor hide");
+    assert_contains(&session.output, ALT_SCREEN_LEAVE, "alternate screen leave");
+    assert_contains(&session.output, CURSOR_SHOW, "cursor show");
+    assert_contains(
+        &session.output,
+        b"terminal size 65535x65535",
+        "unsupported terminal size error",
+    );
+}
+
 struct PtySession {
     child: Child,
     master: File,
@@ -135,7 +171,12 @@ struct PtySession {
 
 impl PtySession {
     fn spawn(path: &Path) -> Self {
-        let (master, slave, original_termios) = open_pty().expect("open PTY");
+        Self::spawn_with_size(path, 80, 24)
+    }
+
+    fn spawn_with_size(path: &Path, cols: u16, rows: u16) -> Self {
+        let (master, slave, original_termios) =
+            open_pty(cols, rows).expect("open PTY with requested size");
         let stdin = slave.try_clone().expect("clone PTY slave for stdin");
         let stdout = slave.try_clone().expect("clone PTY slave for stdout");
         let mut command = Command::new(env!("CARGO_BIN_EXE_cortex"));
@@ -253,12 +294,12 @@ impl Drop for PtySession {
     }
 }
 
-fn open_pty() -> io::Result<(File, File, libc::termios)> {
+fn open_pty(cols: u16, rows: u16) -> io::Result<(File, File, libc::termios)> {
     let mut master_fd = -1;
     let mut slave_fd = -1;
     let mut window_size = libc::winsize {
-        ws_row: 24,
-        ws_col: 80,
+        ws_row: rows,
+        ws_col: cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };

@@ -25,6 +25,11 @@ const EMPTY_SPACE_MARKER: &str = " ~";
 const MODELINE_BRAND: &str = "CORTEX";
 const MIN_GUTTER_TOTAL_WIDTH: usize = 12;
 const MAX_PICKER_INDENT_DEPTH: usize = 4;
+/// Maximum cells in one dense retained frame.
+///
+/// The current and previous frame coexist while diffing, so arbitrary `u16`
+/// dimensions could otherwise retain billions of `Cell` values.
+const MAX_RETAINED_FRAME_CELLS: usize = 1_000_000;
 const COMMAND_LINE_HINT: &str =
     "/help  /commands  /open <path>  /search <text>  /next  /reload  /save  /undo  /redo  /quit  /quit!";
 
@@ -444,6 +449,7 @@ impl Renderer {
         command_line: Option<&str>,
         keycast: Option<&str>,
     ) -> io::Result<()> {
+        let cells = retained_cell_buffer(size)?;
         let viewport_height = self.viewport_height(size);
         let first_visible_line = view.scroll_line();
         let highlighted_lines = self.highlighter.borrow_mut().highlight_visible_lines(
@@ -462,7 +468,7 @@ impl Renderer {
             &highlighted_lines,
         );
 
-        self.paint(writer, paint_editor_frame(frame, size))
+        self.paint(writer, paint_editor_frame(frame, size, cells))
     }
 
     pub fn render_directory_picker<W: Write>(
@@ -471,9 +477,10 @@ impl Renderer {
         picker: &DirectoryPicker,
         size: TerminalSize,
     ) -> io::Result<()> {
+        let cells = retained_cell_buffer(size)?;
         let frame = build_picker_frame(picker, size);
 
-        self.paint(writer, paint_picker_frame(frame, size))
+        self.paint(writer, paint_picker_frame(frame, size, cells))
     }
 
     fn paint<W: Write>(&self, writer: &mut W, frame: CellFrame) -> io::Result<()> {
@@ -900,9 +907,45 @@ fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFra
     }
 }
 
-fn paint_editor_frame(frame: Frame, size: TerminalSize) -> CellFrame {
+fn retained_cell_count(size: TerminalSize) -> io::Result<usize> {
+    let cell_count = usize::from(size.cols)
+        .checked_mul(usize::from(size.rows))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "terminal size {}x{} overflows retained-frame cell count",
+                    size.cols, size.rows
+                ),
+            )
+        })?;
+    if cell_count > MAX_RETAINED_FRAME_CELLS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "terminal size {}x{} requires {cell_count} retained cells; supported maximum is {MAX_RETAINED_FRAME_CELLS}",
+                size.cols, size.rows
+            ),
+        ));
+    }
+
+    Ok(cell_count)
+}
+
+fn retained_cell_buffer(size: TerminalSize) -> io::Result<Vec<Cell>> {
+    let cell_count = retained_cell_count(size)?;
+    let mut cells = Vec::new();
+    cells.try_reserve_exact(cell_count).map_err(|error| {
+        io::Error::other(format!(
+            "could not reserve {cell_count} retained cells for terminal size {}x{}: {error}",
+            size.cols, size.rows
+        ))
+    })?;
+    Ok(cells)
+}
+
+fn paint_editor_frame(frame: Frame, size: TerminalSize, mut cells: Vec<Cell>) -> CellFrame {
     let width = size.cols as usize;
-    let mut cells = Vec::with_capacity(width.saturating_mul(size.rows as usize));
 
     for line in &frame.lines {
         let row_start = cells.len();
@@ -955,9 +998,8 @@ fn paint_editor_frame(frame: Frame, size: TerminalSize) -> CellFrame {
     }
 }
 
-fn paint_picker_frame(frame: PickerFrame, size: TerminalSize) -> CellFrame {
+fn paint_picker_frame(frame: PickerFrame, size: TerminalSize, mut cells: Vec<Cell>) -> CellFrame {
     let width = size.cols as usize;
-    let mut cells = Vec::with_capacity(width.saturating_mul(size.rows as usize));
 
     for line in &frame.lines {
         let row_start = cells.len();
@@ -1411,9 +1453,10 @@ fn tab_spaces(current_col: usize) -> usize {
 mod tests {
     use super::{
         build_frame, build_frame_with_selection, build_picker_frame, fill_row, fit_line_cells,
-        fit_status_line, measure_cells, modeline_text, plain_style, push_cells, CellFrame,
-        CursorPosition, Frame, ModelineStyle, Renderer, ScreenLineKind, StatusKind, TerminalSize,
-        COMMAND_LINE_HINT, THEME,
+        fit_status_line, measure_cells, modeline_text, plain_style, push_cells,
+        retained_cell_count, CellFrame, CursorPosition, Frame, ModelineStyle, Renderer,
+        ScreenLineKind, StatusKind, TerminalSize, COMMAND_LINE_HINT, MAX_RETAINED_FRAME_CELLS,
+        THEME,
     };
     use crate::{
         buffer::Buffer,
@@ -2172,6 +2215,211 @@ mod tests {
 
         assert!(output.contains("\x1b[2J"));
         assert!(output.contains("ABC"));
+    }
+
+    #[test]
+    fn editor_rejects_maximum_terminal_dimensions_before_rendering() {
+        let renderer = Renderer::new();
+        let buffer = buffer_with_text("maximum-editor.txt", "text\n");
+        let mut output = Vec::new();
+
+        let error = renderer
+            .render(
+                &mut output,
+                &buffer,
+                &View::new(),
+                TerminalSize {
+                    cols: u16::MAX,
+                    rows: u16::MAX,
+                },
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("terminal size 65535x65535"));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn picker_rejects_maximum_terminal_dimensions_before_rendering() {
+        let renderer = Renderer::new();
+        let picker = DirectoryPicker::new(PathBuf::from("/tmp/project"), Vec::new());
+        let mut output = Vec::new();
+
+        let error = renderer
+            .render_directory_picker(
+                &mut output,
+                &picker,
+                TerminalSize {
+                    cols: u16::MAX,
+                    rows: u16::MAX,
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("terminal size 65535x65535"));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn editor_rejects_a_frame_above_the_retained_cell_limit() {
+        let renderer = Renderer::new();
+        let buffer = buffer_with_text("oversized-editor.txt", "text\n");
+        let mut output = Vec::new();
+
+        let error = renderer
+            .render(
+                &mut output,
+                &buffer,
+                &View::new(),
+                TerminalSize {
+                    cols: 1_001,
+                    rows: 1_000,
+                },
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn editor_and_picker_accept_the_retained_frame_limit() {
+        let at_limit = TerminalSize {
+            cols: 1_000,
+            rows: 1_000,
+        };
+        assert_eq!(
+            retained_cell_count(at_limit).unwrap(),
+            MAX_RETAINED_FRAME_CELLS
+        );
+
+        {
+            let renderer = Renderer::new();
+            let buffer = buffer_with_text("maximum-accepted-editor.txt", "text\n");
+            renderer
+                .render(
+                    &mut std::io::sink(),
+                    &buffer,
+                    &View::new(),
+                    at_limit,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        {
+            let renderer = Renderer::new();
+            let picker = DirectoryPicker::new(PathBuf::from("/tmp/project"), Vec::new());
+            renderer
+                .render_directory_picker(&mut std::io::sink(), &picker, at_limit)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn retained_frame_limit_rejects_the_next_size() {
+        let above_limit = TerminalSize {
+            cols: 101,
+            rows: 9_901,
+        };
+
+        let error = retained_cell_count(above_limit).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("1000001 retained cells"));
+        assert!(error.to_string().contains("maximum is 1000000"));
+    }
+
+    #[test]
+    fn rejected_resize_preserves_the_last_valid_frame() {
+        let renderer = Renderer::new();
+        let buffer = buffer_with_text("resize-recovery.txt", "abc\n");
+        let view = View::new();
+        let mut output = Vec::new();
+
+        renderer
+            .render(
+                &mut output,
+                &buffer,
+                &view,
+                TerminalSize { cols: 2, rows: 2 },
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        output.clear();
+
+        let error = renderer
+            .render(
+                &mut output,
+                &buffer,
+                &view,
+                TerminalSize {
+                    cols: u16::MAX,
+                    rows: u16::MAX,
+                },
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(output.is_empty());
+
+        renderer
+            .render(
+                &mut output,
+                &buffer,
+                &view,
+                TerminalSize { cols: 2, rows: 2 },
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let unchanged_output = String::from_utf8_lossy(&output);
+        assert!(!unchanged_output.contains("\x1b[2J"));
+        assert!(!unchanged_output.contains("ab"));
+
+        output.clear();
+        renderer
+            .render(
+                &mut output,
+                &buffer,
+                &view,
+                TerminalSize { cols: 3, rows: 2 },
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("\x1b[2J"));
+        assert!(output.contains("abc"));
     }
 
     #[test]
