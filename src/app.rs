@@ -6,6 +6,7 @@ use crate::{
     keymap::{Keymap, KeymapResult},
     picker::{DirectoryPicker, DirectoryPickerAction},
     renderer::{Renderer, StatusKind, TerminalSize},
+    signals::TerminationSignals,
     terminal::TerminalSession,
     text,
     view::View,
@@ -23,6 +24,7 @@ use std::{
 
 const DIRTY_QUIT_PROMPT: &str = "Buffers modified; quit without saving? (y or n)";
 const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const SIGNAL_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 const COMMAND_HELP: &str =
     "Commands: /help, /commands, /open <path>, /search <text>, /next, /reload, /save, /undo, /redo, /quit, /quit!";
 
@@ -65,25 +67,41 @@ enum AppControl {
 }
 
 pub fn run(path: &Path) -> io::Result<()> {
+    let signals = TerminationSignals::register()?;
+    let result = run_until_exit(path, &signals);
+    let received_signal = signals.received_signal();
+    drop(signals);
+
+    if let Some(signal) = received_signal {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            format!("termination signal {signal} received"),
+        ));
+    }
+
+    result
+}
+
+fn run_until_exit(path: &Path, signals: &TerminationSignals) -> io::Result<()> {
     if is_directory_path(path)? {
-        return run_directory_path(path);
+        return run_directory_path(path, signals);
     }
 
     let buffer = Buffer::open(path)?;
     let mut terminal = TerminalSession::enter(io::stdout())?;
-    run_editor(&mut terminal, buffer)
+    run_editor(&mut terminal, buffer, signals)
 }
 
-fn run_directory_path(path: &Path) -> io::Result<()> {
+fn run_directory_path(path: &Path, signals: &TerminationSignals) -> io::Result<()> {
     let picker = DirectoryPicker::read(path)?;
     let mut terminal = TerminalSession::enter(io::stdout())?;
 
-    let Some(path) = run_directory_picker(&mut terminal, picker)? else {
+    let Some(path) = run_directory_picker(&mut terminal, picker, signals)? else {
         return Ok(());
     };
 
     let buffer = Buffer::open(path)?;
-    run_editor(&mut terminal, buffer)
+    run_editor(&mut terminal, buffer, signals)
 }
 
 fn is_directory_path(path: &Path) -> io::Result<bool> {
@@ -94,7 +112,11 @@ fn is_directory_path(path: &Path) -> io::Result<bool> {
     }
 }
 
-fn run_editor<W: io::Write>(terminal: &mut TerminalSession<W>, buffer: Buffer) -> io::Result<()> {
+fn run_editor<W: io::Write>(
+    terminal: &mut TerminalSession<W>,
+    buffer: Buffer,
+    signals: &TerminationSignals,
+) -> io::Result<()> {
     let mut editor = Editor::new(buffer)?;
     let mut keymap = Keymap::new();
     let renderer = Renderer::new();
@@ -107,8 +129,8 @@ fn run_editor<W: io::Write>(terminal: &mut TerminalSession<W>, buffer: Buffer) -
         &mut app_state,
     )?;
 
-    loop {
-        match event::read()? {
+    while let Some(event) = next_event(signals)? {
+        match event {
             Event::Key(key) => {
                 if key.kind == KeyEventKind::Press {
                     let key = key_from_event(key);
@@ -124,7 +146,11 @@ fn run_editor<W: io::Write>(terminal: &mut TerminalSession<W>, buffer: Buffer) -
                                 &mut editor,
                                 &path,
                                 &mut app_state,
+                                signals,
                             )?;
+                            if signals.received() {
+                                break;
+                            }
                             renderer.invalidate();
                         }
                         AppControl::Quit => break,
@@ -189,6 +215,7 @@ fn browse_directory_in_editor<W: io::Write>(
     editor: &mut Editor,
     path: &Path,
     app_state: &mut AppState,
+    signals: &TerminationSignals,
 ) -> io::Result<()> {
     let picker = match DirectoryPicker::read(path) {
         Ok(picker) => picker,
@@ -198,7 +225,10 @@ fn browse_directory_in_editor<W: io::Write>(
         }
     };
 
-    let Some(path) = run_directory_picker(terminal, picker)? else {
+    let Some(path) = run_directory_picker(terminal, picker, signals)? else {
+        if signals.received() {
+            return Ok(());
+        }
         app_state.set_status("Open canceled", StatusKind::Info);
         return Ok(());
     };
@@ -251,13 +281,14 @@ fn switch_buffer(editor: &mut Editor, name: &str, app_state: &mut AppState) {
 fn run_directory_picker<W: io::Write>(
     terminal: &mut TerminalSession<W>,
     mut picker: DirectoryPicker,
+    signals: &TerminationSignals,
 ) -> io::Result<Option<PathBuf>> {
     let renderer = Renderer::new();
 
     render_directory_picker(&renderer, terminal.writer_mut(), &picker)?;
 
-    loop {
-        match event::read()? {
+    while let Some(event) = next_event(signals)? {
+        match event {
             Event::Key(key) => {
                 if key.kind == KeyEventKind::Press {
                     let key = key_from_event(key);
@@ -284,6 +315,26 @@ fn run_directory_picker<W: io::Write>(
                 render_directory_picker(&renderer, terminal.writer_mut(), &picker)?
             }
             _ => {}
+        }
+    }
+
+    Ok(None)
+}
+
+fn next_event(signals: &TerminationSignals) -> io::Result<Option<Event>> {
+    loop {
+        if signals.received() {
+            return Ok(None);
+        }
+
+        match event::poll(SIGNAL_CHECK_INTERVAL) {
+            Ok(true) if signals.received() => return Ok(None),
+            Ok(true) => return event::read().map(Some),
+            Ok(false) => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted && signals.received() => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
         }
     }
 }

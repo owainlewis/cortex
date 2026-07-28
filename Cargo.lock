@@ -41,6 +41,7 @@ dependencies = [
  "getrandom",
  "libc",
  "ropey",
+ "signal-hook",
  "tree-sitter",
  "tree-sitter-highlight",
  "tree-sitter-javascript",
