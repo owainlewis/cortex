@@ -9,6 +9,7 @@ mod keymap;
 mod picker;
 pub mod renderer;
 mod terminal;
+mod text;
 mod update;
 pub mod view;
 

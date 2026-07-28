@@ -7,6 +7,7 @@ use crate::{
     picker::{DirectoryPicker, DirectoryPickerAction},
     renderer::{Renderer, StatusKind, TerminalSize},
     terminal::TerminalSession,
+    text,
     view::View,
 };
 use crossterm::{
@@ -351,8 +352,8 @@ impl AppState {
 
     fn active_region(&self, buffer: &Buffer, view: &View) -> Option<Range<usize>> {
         let len_chars = buffer.len_chars();
-        let mark = self.mark?.min(len_chars);
-        let point = view.point().min(len_chars);
+        let mark = buffer.grapheme_boundary_at_or_before(self.mark?.min(len_chars));
+        let point = buffer.grapheme_boundary_at_or_before(view.point().min(len_chars));
 
         if mark == point {
             return None;
@@ -374,8 +375,8 @@ impl AppState {
         };
 
         let text = buffer.text_range(region.clone());
-        buffer.delete_with_points(region.clone(), view.point(), region.start);
-        view.set_point(region.start, buffer);
+        let point_after = buffer.delete_with_points(region.clone(), view.point(), region.start);
+        view.set_point(point_after, buffer);
         self.kill_ring = Some(text);
         self.mark = None;
         self.set_status("Cut region", StatusKind::Success);
@@ -390,8 +391,8 @@ impl AppState {
         };
 
         let text = buffer.text_range(region.clone());
-        buffer.delete_with_points(region, point, point);
-        view.set_point(point, buffer);
+        let point_after = buffer.delete_with_points(region, point, point);
+        view.set_point(point_after, buffer);
         self.kill_ring = Some(text);
         self.mark = None;
         self.set_status("Cut line", StatusKind::Success);
@@ -405,8 +406,8 @@ impl AppState {
         };
 
         let point = view.point();
-        buffer.insert(point, &text);
-        view.set_point(point + text.chars().count(), buffer);
+        let point_after = buffer.insert(point, &text);
+        view.set_point(point_after, buffer);
         self.mark = None;
         self.set_status("Yanked", StatusKind::Success);
         AppAction::Continue
@@ -427,7 +428,7 @@ impl AppState {
             }
             crate::input::Key::Backspace => {
                 if let Some(input) = self.command_line.as_mut() {
-                    input.pop();
+                    text::pop_grapheme(input);
                 }
                 AppAction::Continue
             }
@@ -534,7 +535,7 @@ impl AppState {
             return AppAction::Continue;
         };
 
-        let start = view.point().saturating_add(1).min(buffer.len_chars());
+        let start = buffer.next_grapheme_boundary(view.point());
         self.find_search_match(buffer, view, &query, start)
     }
 
@@ -752,7 +753,7 @@ fn kill_line_range(buffer: &Buffer, point: usize) -> Option<Range<usize>> {
     if point < line_end {
         Some(point..line_end)
     } else {
-        Some(point..point + 1)
+        Some(point..buffer.next_grapheme_boundary(point))
     }
 }
 
@@ -1013,6 +1014,24 @@ mod tests {
     }
 
     #[test]
+    fn command_line_backspace_removes_one_complete_grapheme() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        app.handle_key(Key::Meta('x'), &mut keymap, &mut buffer, &mut view);
+        for ch in "e\u{301}👨‍💻".chars() {
+            app.handle_key(Key::Char(ch), &mut keymap, &mut buffer, &mut view);
+        }
+
+        app.handle_key(Key::Backspace, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.command_line.as_deref(), Some("/e\u{301}"));
+        app.handle_key(Key::Backspace, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.command_line.as_deref(), Some("/"));
+    }
+
+    #[test]
     fn bare_slash_and_help_commands_list_available_commands() {
         for command in ["/", "/help", "/commands"] {
             let mut app = AppState::default();
@@ -1099,6 +1118,62 @@ mod tests {
         assert_eq!(app.kill_ring.as_deref(), Some("bc"));
         assert_eq!(app.mark, None);
         assert_eq!(app.status_message.as_deref(), Some("Cut region"));
+    }
+
+    #[test]
+    fn selection_cut_yank_and_undo_keep_graphemes_whole() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "a👨‍💻🇺🇸b");
+        let mut view = View::new();
+
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl(' '), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.active_region(&buffer, &view), Some(1..6));
+
+        app.handle_key(Key::Ctrl('w'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "ab");
+        assert_eq!(app.kill_ring.as_deref(), Some("👨‍💻🇺🇸"));
+        assert_eq!(view.point(), 1);
+
+        app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "a👨‍💻🇺🇸b");
+        assert_eq!(view.point(), 6);
+
+        app.handle_key(Key::Command('z'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "ab");
+        assert_eq!(view.point(), 1);
+    }
+
+    #[test]
+    fn cut_and_history_keep_point_after_graphemes_merged_by_the_edit() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "🇦x🇧");
+        let mut view = View::new();
+
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl(' '), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('w'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "🇦🇧");
+        assert_eq!(view.point(), 2);
+
+        app.dispatch_command(crate::commands::Command::Undo, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "🇦x🇧");
+        assert_eq!(view.point(), 2);
+        app.dispatch_command(crate::commands::Command::Redo, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "🇦🇧");
+        assert_eq!(view.point(), 2);
+
+        let mut buffer = buffer_with_text("notes.txt", "e\n\u{301}x");
+        let mut view = View::new();
+        view.move_forward_char(&buffer);
+        app.handle_key(Key::Ctrl('k'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "e\u{301}x");
+        assert_eq!(view.point(), 2);
     }
 
     #[test]

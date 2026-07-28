@@ -1,3 +1,4 @@
+use crate::text;
 use ropey::{Rope, RopeSlice};
 use std::{
     ffi::{CString, OsStr, OsString},
@@ -200,6 +201,72 @@ impl Buffer {
         line.slice(..content_len.min(max_chars)).to_string()
     }
 
+    pub fn line_text(&self, line_idx: usize) -> String {
+        let line_idx = self.clamp_line_idx(line_idx);
+        let line = self.text.line(line_idx);
+        line.slice(..line_content_len_chars(line)).to_string()
+    }
+
+    pub fn grapheme_boundary_at_or_before(&self, char_idx: usize) -> usize {
+        let char_idx = char_idx.min(self.len_chars());
+        if char_idx == self.len_chars() {
+            return char_idx;
+        }
+
+        let line_idx = self.line_for_char(char_idx);
+        let line_start = self.line_start_char(line_idx);
+        let line = self.text.line(line_idx).to_string();
+        line_start + text::boundary_at_or_before(&line, char_idx - line_start)
+    }
+
+    pub fn grapheme_boundary_at_or_after(&self, char_idx: usize) -> usize {
+        let char_idx = char_idx.min(self.len_chars());
+        if char_idx == self.len_chars() {
+            return char_idx;
+        }
+
+        let line_idx = self.line_for_char(char_idx);
+        let line_start = self.line_start_char(line_idx);
+        let line = self.text.line(line_idx).to_string();
+        line_start + text::boundary_at_or_after(&line, char_idx - line_start)
+    }
+
+    pub fn next_grapheme_boundary(&self, char_idx: usize) -> usize {
+        let char_idx = char_idx.min(self.len_chars());
+        if char_idx == self.len_chars() {
+            return char_idx;
+        }
+
+        let line_idx = self.line_for_char(char_idx);
+        let line_start = self.line_start_char(line_idx);
+        let line = self.text.line(line_idx).to_string();
+        line_start + text::next_boundary(&line, char_idx - line_start)
+    }
+
+    pub fn previous_grapheme_boundary(&self, char_idx: usize) -> usize {
+        let char_idx = char_idx.min(self.len_chars());
+        if char_idx == 0 {
+            return 0;
+        }
+
+        let line_idx = self.line_for_char(char_idx - 1);
+        let line_start = self.line_start_char(line_idx);
+        let line = self.text.line(line_idx).to_string();
+        line_start + text::previous_boundary(&line, char_idx - line_start)
+    }
+
+    pub fn display_column(&self, char_idx: usize) -> usize {
+        let char_idx = self.grapheme_boundary_at_or_before(char_idx);
+        let line_idx = self.line_for_char(char_idx);
+        let line_start = self.line_start_char(line_idx);
+        text::measure_width(&self.text_range(line_start..char_idx), usize::MAX)
+    }
+
+    pub fn char_at_display_column(&self, line_idx: usize, column: usize) -> usize {
+        let line_start = self.line_start_char(line_idx);
+        line_start + text::char_index_at_column(&self.line_text(line_idx), column)
+    }
+
     pub fn line_changed(&self, line_idx: usize) -> bool {
         let line_idx = self.clamp_line_idx(line_idx);
         let current_line = self.text.line(line_idx);
@@ -259,13 +326,14 @@ impl Buffer {
         self.text.slice(start..end).to_string()
     }
 
-    pub fn insert(&mut self, char_idx: usize, text: &str) {
+    pub fn insert(&mut self, char_idx: usize, text: &str) -> usize {
         if text.is_empty() {
-            return;
+            return self.grapheme_boundary_at_or_before(char_idx);
         }
 
+        let char_idx = self.grapheme_boundary_at_or_before(char_idx);
         let point_after = char_idx + text.chars().count();
-        self.replace_with_points(char_idx..char_idx, text, char_idx, point_after);
+        self.replace_with_points(char_idx..char_idx, text, char_idx, point_after)
     }
 
     pub fn delete(&mut self, char_range: Range<usize>) {
@@ -277,12 +345,12 @@ impl Buffer {
         char_range: Range<usize>,
         point_before: usize,
         point_after: usize,
-    ) {
+    ) -> usize {
         if char_range.is_empty() {
-            return;
+            return self.grapheme_boundary_at_or_before(point_after);
         }
 
-        self.replace_with_points(char_range, "", point_before, point_after);
+        self.replace_with_points(char_range, "", point_before, point_after)
     }
 
     pub fn undo(&mut self) -> Option<usize> {
@@ -367,10 +435,10 @@ impl Buffer {
         inserted: &str,
         point_before: usize,
         point_after: usize,
-    ) {
+    ) -> usize {
         let deleted = self.text.slice(char_range.clone()).to_string();
         let state_after = self.allocate_history_state();
-        let edit = Edit {
+        let mut edit = Edit {
             start: char_range.start,
             deleted,
             inserted: inserted.to_string(),
@@ -381,8 +449,11 @@ impl Buffer {
         };
 
         self.apply_edit(&edit);
+        edit.point_after = self.grapheme_boundary_at_or_after(edit.point_after);
+        let point_after = edit.point_after;
         self.undo_stack.push(edit);
         self.redo_stack.clear();
+        point_after
     }
 
     fn apply_edit(&mut self, edit: &Edit) {

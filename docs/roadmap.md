@@ -208,7 +208,7 @@ Tracking issues:
 - [closed] [#60 Preserve file permissions and define symlink save behavior](https://github.com/owainlewis/cortex/issues/60)
 - [closed] [#61 Remove whole-buffer work from input and render paths](https://github.com/owainlewis/cortex/issues/61)
 - [closed] [#62 Preserve syntax highlight context across viewport boundaries](https://github.com/owainlewis/cortex/issues/62)
-- [open] [#63 Render Unicode grapheme clusters and combining marks correctly](https://github.com/owainlewis/cortex/issues/63)
+- [closed] [#63 Render Unicode grapheme clusters and combining marks correctly](https://github.com/owainlewis/cortex/issues/63)
 - [closed] [#64 Mark final-newline-only changes in the gutter](https://github.com/owainlewis/cortex/issues/64)
 
 ## Repository Quality

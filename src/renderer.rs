@@ -2,6 +2,7 @@ use crate::{
     buffer::Buffer,
     highlighter::{language_label_for_path, HighlightKind, HighlightSpan, SyntaxHighlighter},
     picker::{DirectoryEntryKind, DirectoryPicker, DirectoryPickerRow},
+    text,
     view::View,
 };
 use crossterm::{
@@ -13,12 +14,13 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use std::{
+    borrow::Cow,
     cell::RefCell,
     io::{self, Write},
     ops::Range,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
-const TAB_WIDTH: usize = 4;
 const EMPTY_SPACE_MARKER: &str = " ~";
 const MODELINE_BRAND: &str = "CORTEX";
 const MIN_GUTTER_TOTAL_WIDTH: usize = 12;
@@ -290,19 +292,30 @@ struct CellFrame {
     size: TerminalSize,
     cells: Vec<Cell>,
     cursor: CursorPosition,
-    requires_full_redraw: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Cell {
     content: CellContent,
     style: TextStyle,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum CellContent {
     Text(char),
+    Grapheme(String),
     Continuation,
+}
+
+impl CellContent {
+    fn append_to(&self, text: &mut String) -> bool {
+        match self {
+            Self::Text(ch) => text.push(*ch),
+            Self::Grapheme(grapheme) => text.push_str(grapheme),
+            Self::Continuation => return false,
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -462,62 +475,54 @@ impl Renderer {
     fn paint<W: Write>(&self, writer: &mut W, frame: CellFrame) -> io::Result<()> {
         queue!(writer, cursor::Hide)?;
 
-        let full_redraw = self.last_frame.borrow().as_ref().is_none_or(|previous| {
-            previous.size != frame.size
-                || previous.requires_full_redraw
-                || frame.requires_full_redraw
-        });
+        let full_redraw = self
+            .last_frame
+            .borrow()
+            .as_ref()
+            .is_none_or(|previous| previous.size != frame.size);
         if full_redraw {
             queue!(writer, terminal::Clear(ClearType::All))?;
         }
 
         if frame.size.cols > 0 && frame.size.rows > 0 {
             let width = frame.size.cols as usize;
-            if frame.requires_full_redraw {
-                paint_rows_sequentially(writer, &frame, width)?;
-            } else {
-                let previous = self.last_frame.borrow();
-                let cell_changed = |index: usize| {
-                    full_redraw
-                        || previous
-                            .as_ref()
-                            .is_none_or(|previous| previous.cells[index] != frame.cells[index])
-                };
-                let mut index = 0;
-                while index < frame.cells.len() {
-                    if !cell_changed(index) {
-                        index += 1;
-                        continue;
-                    }
-                    let cell = &frame.cells[index];
-                    let CellContent::Text(text) = &cell.content else {
-                        index += 1;
-                        continue;
-                    };
-                    let row = (index / width) as u16;
-                    let col = (index % width) as u16;
-                    let row_end = index - (index % width) + width;
-                    let mut run = text.to_string();
-                    let mut next = index + 1;
-                    while next < row_end
-                        && cell_changed(next)
-                        && frame.cells[next].style == cell.style
-                    {
-                        if let CellContent::Text(text) = &frame.cells[next].content {
-                            run.push(*text);
-                        }
-                        next += 1;
-                    }
-                    queue!(
-                        writer,
-                        cursor::MoveTo(col, row),
-                        SetAttribute(Attribute::Reset),
-                        ResetColor
-                    )?;
-                    apply_text_style(writer, cell.style)?;
-                    queue!(writer, Print(run))?;
-                    index = next;
+            let previous = self.last_frame.borrow();
+            let cell_changed = |index: usize| {
+                full_redraw
+                    || previous
+                        .as_ref()
+                        .is_none_or(|previous| previous.cells[index] != frame.cells[index])
+            };
+            let mut index = 0;
+            while index < frame.cells.len() {
+                if !cell_changed(index) {
+                    index += 1;
+                    continue;
                 }
+                let cell = &frame.cells[index];
+                let mut run = String::new();
+                if !cell.content.append_to(&mut run) {
+                    index += 1;
+                    continue;
+                }
+                let row = (index / width) as u16;
+                let col = (index % width) as u16;
+                let row_end = index - (index % width) + width;
+                let mut next = index + 1;
+                while next < row_end && cell_changed(next) && frame.cells[next].style == cell.style
+                {
+                    frame.cells[next].content.append_to(&mut run);
+                    next += 1;
+                }
+                queue!(
+                    writer,
+                    cursor::MoveTo(col, row),
+                    SetAttribute(Attribute::Reset),
+                    ResetColor
+                )?;
+                apply_text_style(writer, cell.style)?;
+                queue!(writer, Print(run))?;
+                index = next;
             }
         }
 
@@ -532,38 +537,6 @@ impl Renderer {
         self.last_frame.replace(Some(frame));
         Ok(())
     }
-}
-
-fn paint_rows_sequentially<W: Write>(
-    writer: &mut W,
-    frame: &CellFrame,
-    width: usize,
-) -> io::Result<()> {
-    for (row, cells) in frame.cells.chunks(width).enumerate() {
-        queue!(writer, cursor::MoveTo(0, row as u16))?;
-
-        let mut index = 0;
-        while index < cells.len() {
-            let cell = &cells[index];
-            let CellContent::Text(text) = &cell.content else {
-                index += 1;
-                continue;
-            };
-            let mut run = text.to_string();
-            let mut next = index + 1;
-            while next < cells.len() && cells[next].style == cell.style {
-                if let CellContent::Text(text) = &cells[next].content {
-                    run.push(*text);
-                }
-                next += 1;
-            }
-            queue!(writer, SetAttribute(Attribute::Reset), ResetColor)?;
-            apply_text_style(writer, cell.style)?;
-            queue!(writer, Print(run))?;
-            index = next;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -631,7 +604,7 @@ fn build_frame_with_highlights(
     for screen_row in 0..viewport_height {
         let line_idx = view.scroll_line().saturating_add(screen_row);
         let screen_line = if line_idx < buffer.len_lines() {
-            let raw_text = buffer.line_prefix_text(line_idx, text_width);
+            let raw_text = buffer.line_text(line_idx);
             let line_start = buffer.line_start_char(line_idx);
             let spans = highlighted_lines
                 .get(screen_row)
@@ -770,10 +743,14 @@ fn cursor_position(
     }
 
     let point_line = buffer.line_for_char(view.point());
-    let point_col = view.point() - buffer.line_start_char(point_line);
     let text_width = (size.cols as usize).saturating_sub(gutter_width);
-    let line_prefix = buffer.line_prefix_text(point_line, point_col.min(text_width));
-    let point_cell_col = measure_cells(&line_prefix, text_width);
+    let point_cell_col = buffer.display_column(view.point());
+    let point_cell_col = if point_cell_col < text_width {
+        point_cell_col
+    } else {
+        let cursor_point = buffer.char_at_display_column(point_line, text_width.saturating_sub(1));
+        buffer.display_column(cursor_point)
+    };
     let viewport_height = size.rows.saturating_sub(1) as usize;
     let row = point_line
         .saturating_sub(view.scroll_line())
@@ -787,7 +764,7 @@ fn cursor_position(
 
 fn modeline_text(buffer: &Buffer, view: &View, status_message: Option<&str>) -> String {
     let line_idx = buffer.line_for_char(view.point());
-    let column = view.point() - buffer.line_start_char(line_idx);
+    let column = buffer.display_column(view.point());
     let dirty_state = if buffer.is_dirty() {
         "MODIFIED"
     } else {
@@ -900,12 +877,6 @@ fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFra
 fn paint_editor_frame(frame: Frame, size: TerminalSize) -> CellFrame {
     let width = size.cols as usize;
     let mut cells = Vec::with_capacity(width.saturating_mul(size.rows as usize));
-    let requires_full_redraw = frame
-        .lines
-        .iter()
-        .flat_map(|line| line.segments.iter())
-        .any(|segment| has_context_dependent_width(&segment.text))
-        || has_context_dependent_width(&frame.modeline);
 
     for line in &frame.lines {
         let row_start = cells.len();
@@ -955,18 +926,12 @@ fn paint_editor_frame(frame: Frame, size: TerminalSize) -> CellFrame {
         size,
         cells,
         cursor: frame.cursor,
-        requires_full_redraw,
     }
 }
 
 fn paint_picker_frame(frame: PickerFrame, size: TerminalSize) -> CellFrame {
     let width = size.cols as usize;
     let mut cells = Vec::with_capacity(width.saturating_mul(size.rows as usize));
-    let requires_full_redraw = frame
-        .lines
-        .iter()
-        .any(|line| has_context_dependent_width(&line.text))
-        || has_context_dependent_width(&frame.modeline);
 
     for line in &frame.lines {
         let row_start = cells.len();
@@ -1000,7 +965,6 @@ fn paint_picker_frame(frame: PickerFrame, size: TerminalSize) -> CellFrame {
         size,
         cells,
         cursor: frame.cursor,
-        requires_full_redraw,
     }
 }
 
@@ -1038,17 +1002,14 @@ fn paint_modeline(cells: &mut Vec<Cell>, modeline: &str, style: ModelineStyle, w
 
 fn push_cells(cells: &mut Vec<Cell>, text: &str, style: TextStyle, max_cells: usize) {
     let mut used: usize = 0;
-    for ch in text.chars() {
-        let cell_width = char_cell_width(ch);
-        if cell_width == 0 {
-            continue;
-        }
+    for (_, grapheme) in text::grapheme_char_indices(text) {
+        let cell_width = text::grapheme_width(grapheme, used);
         if used.saturating_add(cell_width) > max_cells {
             break;
         }
 
         cells.push(Cell {
-            content: CellContent::Text(ch),
+            content: grapheme_cell_content(grapheme),
             style,
         });
         for _ in 1..cell_width {
@@ -1071,18 +1032,29 @@ fn fill_row(cells: &mut Vec<Cell>, row_start: usize, width: usize, style: TextSt
     );
 }
 
-fn has_context_dependent_width(text: &str) -> bool {
-    text.chars().any(|ch| {
-        matches!(
-            ch as u32,
-            0x200C..=0x200D
-                | 0xFE00..=0xFE0F
-                | 0x1F1E6..=0x1F1FF
-                | 0x1F3FB..=0x1F3FF
-                | 0xE0020..=0xE007F
-                | 0xE0100..=0xE01EF
-        )
-    })
+fn grapheme_cell_content(grapheme: &str) -> CellContent {
+    let grapheme = display_grapheme(grapheme);
+    if let Some(ch) = single_char(&grapheme) {
+        CellContent::Text(ch)
+    } else {
+        CellContent::Grapheme(grapheme.into_owned())
+    }
+}
+
+fn single_char(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    let ch = chars.next()?;
+    chars.next().is_none().then_some(ch)
+}
+
+fn display_grapheme(grapheme: &str) -> Cow<'_, str> {
+    if grapheme.chars().any(char::is_control) {
+        Cow::Borrowed(" ")
+    } else if text::grapheme_has_zero_width(grapheme) {
+        Cow::Owned(format!("◌{grapheme}"))
+    } else {
+        Cow::Borrowed(grapheme)
+    }
 }
 
 fn keycast_text(keycast: &str) -> String {
@@ -1202,7 +1174,8 @@ fn fit_line_segments(
     let mut segments = Vec::new();
     let mut cells = 0;
 
-    for (line_char_idx, (byte_idx, ch)) in line.char_indices().enumerate() {
+    let mut line_char_idx = 0;
+    for (byte_idx, grapheme) in line.grapheme_indices(true) {
         if cells >= width {
             break;
         }
@@ -1210,30 +1183,27 @@ fn fit_line_segments(
         let char_idx = line_start + line_char_idx;
         let highlight = highlight_for_byte(highlight_spans, byte_idx);
         let selected = selection_range.is_some_and(|range| range.contains(&char_idx));
-        if ch == '\t' {
+        if grapheme == "\t" {
             let spaces = tab_spaces(cells).min(width - cells);
             push_segment(&mut segments, &" ".repeat(spaces), highlight, selected);
             cells += spaces;
+            line_char_idx += 1;
             continue;
         }
 
-        let char_width = char_cell_width(ch);
-        if char_width == 0 {
-            continue;
-        }
-
-        if cells + char_width > width {
+        let grapheme_width = text::grapheme_width(grapheme, cells);
+        if cells + grapheme_width > width {
             break;
         }
 
-        let display_char = if ch.is_control() { ' ' } else { ch };
         push_segment(
             &mut segments,
-            &display_char.to_string(),
+            &display_grapheme(grapheme),
             highlight,
             selected,
         );
-        cells += char_width;
+        cells += grapheme_width;
+        line_char_idx += grapheme.chars().count();
     }
 
     segments
@@ -1365,29 +1335,25 @@ fn fit_line_cells(line: &str, width: usize) -> String {
     let mut fitted = String::new();
     let mut cells = 0;
 
-    for ch in line.chars() {
+    for (_, grapheme) in text::grapheme_char_indices(line) {
         if cells >= width {
             break;
         }
 
-        if ch == '\t' {
+        if grapheme == "\t" {
             let spaces = tab_spaces(cells).min(width - cells);
             fitted.push_str(&" ".repeat(spaces));
             cells += spaces;
             continue;
         }
 
-        let char_width = char_cell_width(ch);
-        if char_width == 0 {
-            continue;
-        }
-
-        if cells + char_width > width {
+        let grapheme_width = text::grapheme_width(grapheme, cells);
+        if cells + grapheme_width > width {
             break;
         }
 
-        fitted.push(if ch.is_control() { ' ' } else { ch });
-        cells += char_width;
+        fitted.push_str(&display_grapheme(grapheme));
+        cells += grapheme_width;
     }
 
     fitted
@@ -1405,73 +1371,20 @@ fn empty_space_line(width: usize) -> String {
 }
 
 fn measure_cells(line: &str, max_width: usize) -> usize {
-    let mut cells = 0;
-
-    for ch in line.chars() {
-        if cells >= max_width {
-            break;
-        }
-
-        let char_width = if ch == '\t' {
-            tab_spaces(cells)
-        } else {
-            char_cell_width(ch)
-        };
-
-        cells = cells.saturating_add(char_width).min(max_width);
-    }
-
-    cells
+    text::measure_width(line, max_width)
 }
 
 fn tab_spaces(current_col: usize) -> usize {
-    TAB_WIDTH - (current_col % TAB_WIDTH)
-}
-
-fn char_cell_width(ch: char) -> usize {
-    if is_zero_width(ch) {
-        0
-    } else if is_wide(ch) {
-        2
-    } else {
-        1
-    }
-}
-
-fn is_zero_width(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x0300..=0x036F
-            | 0x1AB0..=0x1AFF
-            | 0x1DC0..=0x1DFF
-            | 0x20D0..=0x20FF
-            | 0xFE20..=0xFE2F
-    )
-}
-
-fn is_wide(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x1100..=0x115F
-            | 0x2329..=0x232A
-            | 0x2E80..=0xA4CF
-            | 0xAC00..=0xD7A3
-            | 0xF900..=0xFAFF
-            | 0xFE10..=0xFE19
-            | 0xFE30..=0xFE6F
-            | 0xFF00..=0xFF60
-            | 0xFFE0..=0xFFE6
-            | 0x1F300..=0x1FAFF
-    )
+    text::grapheme_width("\t", current_col)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         build_frame, build_frame_with_selection, build_picker_frame, fill_row, fit_line_cells,
-        fit_status_line, has_context_dependent_width, measure_cells, plain_style, push_cells,
-        CellFrame, CursorPosition, Frame, ModelineStyle, Renderer, ScreenLineKind, StatusKind,
-        TerminalSize, COMMAND_LINE_HINT, THEME,
+        fit_status_line, measure_cells, plain_style, push_cells, CellFrame, CursorPosition, Frame,
+        ModelineStyle, Renderer, ScreenLineKind, StatusKind, TerminalSize, COMMAND_LINE_HINT,
+        THEME,
     };
     use crate::{
         buffer::Buffer,
@@ -1500,6 +1413,23 @@ mod tests {
         assert_eq!(fit_line_cells("界界界", 5), "界界");
         assert_eq!(measure_cells("\tab", 8), 6);
         assert_eq!(measure_cells("界界界", 5), 5);
+    }
+
+    #[test]
+    fn fit_line_cells_preserves_and_clips_complete_graphemes() {
+        assert_eq!(fit_line_cells("e\u{301}x", 1), "e\u{301}");
+        assert_eq!(fit_line_cells("👨‍💻x", 2), "👨‍💻");
+        assert_eq!(fit_line_cells("🇺🇸x", 2), "🇺🇸");
+        assert_eq!(fit_line_cells("👍🏽x", 2), "👍🏽");
+        assert_eq!(fit_line_cells("✈️x", 2), "✈️");
+        assert_eq!(fit_line_cells("a界b", 2), "a");
+        assert_eq!(fit_line_cells("a界b", 3), "a界");
+    }
+
+    #[test]
+    fn fit_line_cells_gives_standalone_zero_width_clusters_a_visible_cell() {
+        assert_eq!(fit_line_cells("\u{301}x", 1), "◌\u{301}");
+        assert_eq!(measure_cells("\u{301}x", 1), 1);
     }
 
     #[test]
@@ -1700,6 +1630,46 @@ mod tests {
     }
 
     #[test]
+    fn frame_cursor_uses_complete_grapheme_widths() {
+        let buffer = buffer_with_text("notes.txt", "e\u{301}👨‍💻界x\n");
+        let mut view = View::new();
+
+        view.move_forward_char(&buffer);
+        view.move_forward_char(&buffer);
+        view.move_forward_char(&buffer);
+        let frame = build_frame(
+            &buffer,
+            &view,
+            TerminalSize { cols: 40, rows: 3 },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(line_texts(&frame), vec!["e\u{301}👨‍💻界x", ""]);
+        assert_eq!(frame.cursor, CursorPosition { col: 11, row: 0 });
+        assert!(frame.modeline.contains("Col 6"));
+    }
+
+    #[test]
+    fn frame_cursor_never_clamps_into_a_wide_grapheme() {
+        let buffer = buffer_with_text("notes.txt", "界");
+        let mut view = View::new();
+        view.move_forward_char(&buffer);
+
+        let frame = build_frame(
+            &buffer,
+            &view,
+            TerminalSize { cols: 2, rows: 2 },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(frame.cursor, CursorPosition { col: 0, row: 0 });
+    }
+
+    #[test]
     fn frame_marks_empty_space_after_end_of_buffer() {
         let buffer = buffer_with_text("notes.txt", "alpha");
 
@@ -1741,6 +1711,29 @@ mod tests {
             .segments
             .iter()
             .any(|segment| segment.selected && segment.text.contains("b")));
+    }
+
+    #[test]
+    fn frame_selection_styles_complete_graphemes() {
+        let buffer = buffer_with_text("notes.txt", "a👨‍💻b\n");
+
+        let frame = build_frame_with_selection(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 20, rows: 3 },
+            None,
+            None,
+            Some(1..4),
+            None,
+        );
+
+        let selected: String = frame.lines[0]
+            .segments
+            .iter()
+            .filter(|segment| segment.selected)
+            .map(|segment| segment.text.as_str())
+            .collect();
+        assert_eq!(selected, "👨‍💻");
     }
 
     #[test]
@@ -1971,7 +1964,7 @@ mod tests {
     }
 
     #[test]
-    fn paint_keeps_full_redraw_for_context_dependent_widths() {
+    fn paint_diffs_zwj_graphemes_without_a_full_redraw() {
         let renderer = Renderer::new();
         let size = TerminalSize { cols: 10, rows: 1 };
         let mut output = Vec::new();
@@ -1985,33 +1978,31 @@ mod tests {
             .unwrap();
         let output = String::from_utf8_lossy(&output);
 
-        assert!(output.contains("\x1b[2J"));
-        assert!(output.contains("👨‍💻B"));
+        assert!(!output.contains("\x1b[2J"));
+        assert!(output.contains('B'));
+        assert!(!output.contains("👨‍💻"));
     }
 
     #[test]
-    fn paint_streams_unsafe_rows_across_style_boundaries() {
+    fn paint_keeps_graphemes_whole_across_style_boundaries() {
         let renderer = Renderer::new();
         let size = TerminalSize { cols: 10, rows: 1 };
         let mut frame = painted_text_frame("👨‍💻;", size);
-        for cell in &mut frame.cells[..5] {
-            cell.style.bold = true;
-        }
-        frame.cells[5].style = plain_style(THEME.syntax_punctuation);
+        frame.cells[0].style.bold = true;
+        frame.cells[1].style.bold = true;
+        frame.cells[2].style = plain_style(THEME.syntax_punctuation);
         let mut output = Vec::new();
 
         renderer.paint(&mut output, frame).unwrap();
         let output = String::from_utf8_lossy(&output);
-        let grapheme_end = output.find("👨‍💻").unwrap() + "👨‍💻".len();
-        let semicolon = grapheme_end + output[grapheme_end..].find(';').unwrap();
 
         assert!(output.contains("\x1b[2J"));
-        assert!(output[grapheme_end..semicolon].contains("\x1b[0m"));
-        assert!(!output.contains("\x1b[1;6H"));
+        assert!(output.contains("👨‍💻"));
+        assert!(output.contains("\x1b[1;3H"));
     }
 
     #[test]
-    fn paint_keeps_full_redraw_for_regional_indicator_flags() {
+    fn paint_diffs_regional_indicator_flags_without_a_full_redraw() {
         let renderer = Renderer::new();
         let size = TerminalSize { cols: 10, rows: 1 };
         let mut output = Vec::new();
@@ -2025,8 +2016,51 @@ mod tests {
             .unwrap();
         let output = String::from_utf8_lossy(&output);
 
-        assert!(output.contains("\x1b[2J"));
-        assert!(output.contains("🇺🇦A"));
+        assert!(!output.contains("\x1b[2J"));
+        assert!(output.contains("🇺🇦"));
+        assert!(!output.contains('A'));
+    }
+
+    #[test]
+    fn paint_diffs_width_expansion_and_contraction_without_stale_cells() {
+        let renderer = Renderer::new();
+        let size = TerminalSize { cols: 4, rows: 1 };
+        let mut output = Vec::new();
+
+        renderer
+            .paint(&mut output, painted_text_frame("✈︎A", size))
+            .unwrap();
+        output.clear();
+        renderer
+            .paint(&mut output, painted_text_frame("✈️A", size))
+            .unwrap();
+        let expanded = String::from_utf8_lossy(&output);
+        assert!(!expanded.contains("\x1b[2J"));
+        assert!(expanded.contains("✈️A"));
+        assert!(!expanded.contains("\x1b[1;2H"));
+
+        output.clear();
+        renderer
+            .paint(&mut output, painted_text_frame("✈︎A", size))
+            .unwrap();
+        let contracted = String::from_utf8_lossy(&output);
+        assert!(!contracted.contains("\x1b[2J"));
+        assert!(contracted.contains("✈︎A "));
+        assert!(!contracted.contains("\x1b[1;2H"));
+    }
+
+    #[test]
+    fn paint_emits_a_spacing_base_for_standalone_zero_width_clusters() {
+        let renderer = Renderer::new();
+        let size = TerminalSize { cols: 3, rows: 1 };
+        let mut output = Vec::new();
+
+        renderer
+            .paint(&mut output, painted_text_frame("\u{301}A", size))
+            .unwrap();
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(output.contains("◌\u{301}A"));
     }
 
     #[test]
@@ -2177,7 +2211,6 @@ mod tests {
             size,
             cells,
             cursor: CursorPosition { col: 0, row: 0 },
-            requires_full_redraw: has_context_dependent_width(text),
         }
     }
 

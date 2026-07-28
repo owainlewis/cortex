@@ -174,6 +174,8 @@ Both a *file window* and a *terminal pane* are leaves in the same window-layout 
 | Terminal I/O | `crossterm` | Raw mode, key events, 24-bit truecolor, cursor control, cross-platform. |
 | Rendering | hand-rolled on crossterm | Editors need fine cursor control + minimal diffed repaints. (`ratatui` optional for chrome only — modeline/minibuffer.) |
 | Text buffer | `ropey` | O(log n) edits and slices on million-line files; cheap to view-slice for rendering. |
+| Text boundaries | `unicode-segmentation` | Extended grapheme clusters are the user-visible editing unit. |
+| Display width | `unicode-width` | Complete grapheme clusters map to terminal cells without splitting Unicode sequences. |
 | Syntax highlighting | `tree-sitter` + `tree-sitter-highlight` | Incremental, fast, LSP-independent; the core aesthetic win. |
 | Fuzzy finding | `nucleo` | Helix's matcher; powers find-file and buffer switching. |
 | File watching | `notify` | inotify/FSEvents/etc. for the (optional, later) auto-reload path. |
@@ -192,11 +194,16 @@ Both a *file window* and a *terminal pane* are leaves in the same window-layout 
 - Backed by a `ropey::Rope`. (A `Vec<String>` is acceptable for the very first prototype, but `ropey` is the intended default and the migration is cheap.)
 - Tracks: the rope, a dirty flag, the file path, and file metadata needed for save/reload behavior.
 - Point, mark, and scroll offset belong to the window/editor view state, not solely to the buffer.
+- Point and mark use Rope character indices but may rest only at extended grapheme cluster boundaries.
+- Horizontal movement, deletion, selection, kill, yank, undo, and redo operate on complete extended grapheme clusters.
+- Vertical movement preserves terminal cell columns and never places point inside a grapheme cluster.
 - Multiple buffers held in a buffer list; one is active.
 - Undo/redo: an edit-history stack (group keystrokes into sensible undo units; Emacs-style undo can come later).
 
 ### 6.2 Renderer
 - **Diffed paint.** Maintain a shadow of the last drawn screen; only emit escape codes for cells that changed. This is the difference between flicker and butter, and it directly serves the latency goal.
+- Display width is measured for complete grapheme clusters, and clipping includes or excludes each cluster as a whole.
+- Tabs keep four-column tab stops, normal clusters use their reported one or two cells, and standalone zero-width clusters use one visible editor cell.
 - Viewport: scroll offset + visible range derived from point.
 - Line wrapping handled explicitly (soft-wrap toggle is a later nicety).
 - Generous padding; block/bar cursor styles; truecolor throughout.
