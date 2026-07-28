@@ -9,6 +9,7 @@ pub enum Command {
     InsertNewline,
     DeleteBackward,
     DeleteForward,
+    OpenCommandLine,
     KillLine,
     KillRegion,
     MoveForwardChar,
@@ -69,6 +70,7 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
         }
         Command::KillLine
         | Command::KillRegion
+        | Command::OpenCommandLine
         | Command::OpenFile
         | Command::SetMark
         | Command::SwitchBuffer

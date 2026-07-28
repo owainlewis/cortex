@@ -302,14 +302,8 @@ impl AppState {
             return self.handle_command_line_key(key, buffer, view);
         }
 
-        if key == crate::input::Key::Char('/') && !keymap.has_pending_prefix() {
-            self.command_line = Some("/".to_string());
-            self.prompt_kind = Some(PromptKind::Command);
-            self.clear_status();
-            return AppAction::Continue;
-        }
-
         match keymap.resolve(key) {
+            KeymapResult::Command(commands::Command::OpenCommandLine) => self.start_command_line(),
             KeymapResult::Command(commands::Command::SetMark) => self.set_mark(view),
             KeymapResult::Command(commands::Command::KillRegion) => self.kill_region(buffer, view),
             KeymapResult::Command(commands::Command::KillLine) => self.kill_line(buffer, view),
@@ -329,6 +323,13 @@ impl AppState {
                 AppAction::Continue
             }
         }
+    }
+
+    fn start_command_line(&mut self) -> AppAction {
+        self.command_line = Some("/".to_string());
+        self.prompt_kind = Some(PromptKind::Command);
+        self.clear_status();
+        AppAction::Continue
     }
 
     fn start_find_file(&mut self) -> AppAction {
@@ -723,6 +724,7 @@ fn keycast_text(key: crate::input::Key) -> Option<String> {
         crate::input::Key::Char(ch) => Some(ch.to_string()),
         crate::input::Key::Ctrl(' ') => Some("C-Space".to_string()),
         crate::input::Key::Ctrl(ch) => Some(format!("C-{ch}")),
+        crate::input::Key::Meta(ch) => Some(format!("M-{ch}")),
         crate::input::Key::Command(ch) => Some(format!("Cmd-{ch}")),
         crate::input::Key::Enter => Some("Enter".to_string()),
         crate::input::Key::Escape => Some("Esc".to_string()),
@@ -976,13 +978,30 @@ mod tests {
     }
 
     #[test]
-    fn slash_starts_command_line_without_editing_the_buffer() {
+    fn slash_inserts_at_point_without_starting_command_line() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "ac");
+        let mut view = View::new();
+        view.move_forward_char(&buffer);
+
+        let action = app.handle_key(Key::Char('/'), &mut keymap, &mut buffer, &mut view);
+
+        assert_eq!(action, AppAction::Continue);
+        assert_eq!(app.command_line, None);
+        assert_eq!(buffer.text(), "a/c");
+        assert_eq!(view.point(), 2);
+        assert!(buffer.is_dirty());
+    }
+
+    #[test]
+    fn meta_x_starts_command_line_without_editing_the_buffer() {
         let mut app = AppState::default();
         let mut keymap = Keymap::new();
         let mut buffer = buffer_with_text("notes.txt", "old");
         let mut view = View::new();
 
-        let action = app.handle_key(Key::Char('/'), &mut keymap, &mut buffer, &mut view);
+        let action = app.handle_key(Key::Meta('x'), &mut keymap, &mut buffer, &mut view);
 
         assert_eq!(action, AppAction::Continue);
         assert_eq!(app.command_line.as_deref(), Some("/"));
@@ -1331,7 +1350,7 @@ mod tests {
         let mut buffer = buffer_with_text("notes.txt", "old");
         let mut view = View::new();
 
-        app.handle_key(Key::Char('/'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Meta('x'), &mut keymap, &mut buffer, &mut view);
         app.handle_key(Key::Char('s'), &mut keymap, &mut buffer, &mut view);
         let action = app.handle_key(Key::Escape, &mut keymap, &mut buffer, &mut view);
 
@@ -1656,7 +1675,8 @@ mod tests {
         buffer: &mut Buffer,
         view: &mut View,
     ) -> AppAction {
-        for ch in command.chars() {
+        app.handle_key(Key::Meta('x'), keymap, buffer, view);
+        for ch in command.strip_prefix('/').unwrap_or(command).chars() {
             app.handle_key(Key::Char(ch), keymap, buffer, view);
         }
         app.handle_key(Key::Enter, keymap, buffer, view)
