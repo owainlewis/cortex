@@ -25,6 +25,7 @@ jobs:
     outputs:
       archive: ${{ steps.package.outputs.archive }}
       checksum: ${{ steps.package.outputs.checksum }}
+      notes: ${{ steps.package.outputs.notes }}
 
     steps:
       - name: Check out repository
@@ -66,6 +67,9 @@ jobs:
           set -euo pipefail
 
           archive="cortex-${TAG_NAME}-${TARGET_TRIPLE}.tar.gz"
+          notes="docs/releases/${TAG_NAME}.md"
+          test -f "${notes}"
+
           .github/scripts/package-macos-arm64.sh \
             "target/${TARGET_TRIPLE}/release/cortex" \
             "${archive}"
@@ -78,6 +82,7 @@ jobs:
           {
             echo "archive=${archive}"
             echo "checksum=${archive}.sha256"
+            echo "notes=${notes}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Attest release archive
@@ -92,6 +97,7 @@ jobs:
           path: |
             ${{ env.archive }}
             ${{ env.checksum }}
+            ${{ steps.package.outputs.notes }}
           if-no-files-found: error
 
   publish:
@@ -114,6 +120,7 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
           ARCHIVE: release-package/${{ needs.checks.outputs.archive }}
           CHECKSUM: release-package/${{ needs.checks.outputs.checksum }}
+          NOTES: release-package/${{ needs.checks.outputs.notes }}
         run: |
           set -euo pipefail
 
@@ -142,4 +149,4 @@ jobs:
           gh release create "${TAG_NAME}" "${ARCHIVE}" "${CHECKSUM}" \
             --verify-tag \
             --title "${TAG_NAME}" \
-            --notes "Cortex ${TAG_NAME}"
+            --notes-file "${NOTES}"

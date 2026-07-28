@@ -5,19 +5,21 @@ This document explains how to publish stable releases and test nightly builds.
 ## Stable Releases
 
 Stable releases are built from version tags.
-Use tags in the form `vX.Y.Z`, for example `v0.1.0`.
+Use tags in the form `vX.Y.Z`, for example `v0.2.0`.
 
 Before tagging, make sure `main` is green in GitHub Actions.
 Run the local checks you need for the change you are releasing.
 Update the package version in `Cargo.toml` before tagging when the release version changes.
+Add the reviewed release notes at `docs/releases/vX.Y.Z.md`.
+The release workflow requires that file and publishes it as the GitHub Release body.
 
 Create and push the tag:
 
 ```sh
 git checkout main
 git pull --ff-only origin main
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 Pushing the tag starts the `Release` workflow.
@@ -42,19 +44,19 @@ Rerunning the workflow for an already published tag therefore fails without chan
 Verify the release after the workflow completes:
 
 ```sh
-gh release view v0.1.0 --repo owainlewis/cortex
+gh release view v0.2.0 --repo owainlewis/cortex
 ```
 
 Download the archive and checksum.
 Verify the checksum and signed provenance before running the binary:
 
 ```sh
-shasum -a 256 -c cortex-v0.1.0-aarch64-apple-darwin.tar.gz.sha256
-gh attestation verify cortex-v0.1.0-aarch64-apple-darwin.tar.gz \
+shasum -a 256 -c cortex-v0.2.0-aarch64-apple-darwin.tar.gz.sha256
+gh attestation verify cortex-v0.2.0-aarch64-apple-darwin.tar.gz \
   --repo owainlewis/cortex \
   --signer-workflow owainlewis/cortex/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.1.0
-tar -xzf cortex-v0.1.0-aarch64-apple-darwin.tar.gz
+  --source-ref refs/tags/v0.2.0
+tar -xzf cortex-v0.2.0-aarch64-apple-darwin.tar.gz
 ./cortex --version
 ```
 

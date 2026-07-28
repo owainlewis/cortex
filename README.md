@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/owainlewis/cortex/main/install.sh |
 To install a specific stable release, pass its tag:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/owainlewis/cortex/main/install.sh | bash -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/owainlewis/cortex/main/install.sh | bash -s -- --version v0.2.0
 ```
 
 You can also download the release tarball and `.sha256` file directly from GitHub Releases.
@@ -180,7 +180,7 @@ Other file types render as plain text.
 
 ## Releases And Nightlies
 
-Stable releases are built from tags like `v0.1.0`.
+Stable releases are built from tags like `v0.2.0`.
 The release workflow publishes an arm64 macOS tarball and matching `.sha256` checksum.
 
 Nightly builds are unstable test artifacts from `main`.
