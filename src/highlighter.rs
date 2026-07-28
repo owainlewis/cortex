@@ -138,6 +138,7 @@ enum HighlightCache {
 
 struct WindowedHighlightCache {
     language: CheckpointLanguage,
+    // Line zero stays pinned at the front. Other entries are ordered by recent use.
     checkpoints: VecDeque<ContextCheckpoint>,
     window: Option<HighlightWindow>,
 }
@@ -181,8 +182,22 @@ enum MarkdownContext {
         marker: u8,
         marker_len: usize,
         info: String,
+        quote_depth: usize,
         rust: Option<RustContext>,
     },
+}
+
+struct MarkdownFence {
+    marker: u8,
+    marker_len: usize,
+    info: String,
+    quote_depth: usize,
+}
+
+enum MarkdownOverflowBoundary {
+    TruncatedLine(usize),
+    FenceCloser(usize),
+    ContainerEnd(usize),
 }
 
 impl HighlightedDocument {
@@ -273,8 +288,8 @@ impl WindowedHighlightCache {
         let checkpoint = self
             .checkpoints
             .iter()
-            .rev()
-            .find(|checkpoint| checkpoint.line <= target_line)
+            .filter(|checkpoint| checkpoint.line <= target_line)
+            .max_by_key(|checkpoint| checkpoint.line)
             .cloned()
             .unwrap_or_else(|| ContextCheckpoint {
                 line: 0,
@@ -282,6 +297,7 @@ impl WindowedHighlightCache {
             });
         let mut context = checkpoint.context;
         let mut scanned_lines = 0;
+        let mut strategic_checkpoint = None;
 
         for line_idx in checkpoint.line..target_line {
             let line = buffer.line_prefix_text(line_idx, MAX_HIGHLIGHT_LINE_CHARS);
@@ -291,27 +307,53 @@ impl WindowedHighlightCache {
 
             let next_line = line_idx + 1;
             if next_line % CONTEXT_CHECKPOINT_LINES == 0 {
-                self.push_checkpoint(next_line, context.clone());
+                strategic_checkpoint = Some(ContextCheckpoint {
+                    line: next_line,
+                    context: context.clone(),
+                });
             }
         }
 
+        if let Some(checkpoint) = strategic_checkpoint {
+            self.push_checkpoint(checkpoint.line, checkpoint.context);
+        }
+        self.push_checkpoint(target_line, context.clone());
         (context, scanned_lines)
     }
 
     fn push_checkpoint(&mut self, line: usize, context: SyntaxContext) {
-        if self
-            .checkpoints
-            .back()
-            .is_some_and(|checkpoint| checkpoint.line == line)
-        {
+        if line == 0 {
+            if let Some(checkpoint) = self
+                .checkpoints
+                .iter_mut()
+                .find(|checkpoint| checkpoint.line == 0)
+            {
+                checkpoint.context = context;
+            } else {
+                self.checkpoints
+                    .push_front(ContextCheckpoint { line, context });
+            }
             return;
         }
 
-        self.checkpoints.retain(|checkpoint| checkpoint.line < line);
+        if let Some(position) = self
+            .checkpoints
+            .iter()
+            .position(|checkpoint| checkpoint.line == line)
+        {
+            self.checkpoints.remove(position);
+        }
         self.checkpoints
             .push_back(ContextCheckpoint { line, context });
         while self.checkpoints.len() > MAX_RECENT_CHECKPOINTS + 1 {
-            self.checkpoints.remove(1);
+            let Some(position) = self
+                .checkpoints
+                .iter()
+                .position(|checkpoint| checkpoint.line != 0)
+            else {
+                break;
+            };
+            self.checkpoints.remove(position);
         }
     }
 }
@@ -334,7 +376,7 @@ impl SyntaxContext {
                 scan_rust_line(*context, line)
             }),
             Self::Markdown(context) => Self::Markdown(if truncated {
-                MarkdownContext::Normal
+                context.after_truncated_line(line)
             } else {
                 scan_markdown_line(context.clone(), line)
             }),
@@ -349,10 +391,15 @@ impl SyntaxContext {
                 marker,
                 marker_len,
                 info,
+                quote_depth,
                 rust,
             }) => {
-                let mut seed = String::from_utf8(vec![*marker; *marker_len])
-                    .expect("Markdown fence marker should be ASCII");
+                let quote_prefix = markdown_quote_prefix(*quote_depth);
+                let mut seed = quote_prefix.clone();
+                seed.push_str(
+                    &String::from_utf8(vec![*marker; *marker_len])
+                        .expect("Markdown fence marker should be ASCII"),
+                );
                 if !info.is_empty() {
                     seed.push(' ');
                     seed.push_str(info);
@@ -360,18 +407,48 @@ impl SyntaxContext {
                 let rust_wrapper = rust.and_then(rust_wrapper);
                 if let Some((rust_seed, _)) = &rust_wrapper {
                     seed.push('\n');
+                    seed.push_str(&quote_prefix);
                     seed.push_str(rust_seed);
                 }
                 let mut suffix = String::new();
                 if let Some((_, rust_suffix)) = rust_wrapper {
+                    suffix.push_str(&quote_prefix);
                     suffix.push_str(&rust_suffix);
                     suffix.push('\n');
                 }
+                suffix.push_str(&quote_prefix);
                 suffix.push_str(
                     &String::from_utf8(vec![*marker; *marker_len])
                         .expect("Markdown fence marker should be ASCII"),
                 );
                 Some((seed, suffix))
+            }
+        }
+    }
+}
+
+impl MarkdownContext {
+    fn after_truncated_line(&self, line: &str) -> Self {
+        match self {
+            Self::Normal => Self::Normal,
+            Self::Fence {
+                marker,
+                marker_len,
+                info,
+                quote_depth,
+                rust,
+            } => {
+                if markdown_container_content(line, *quote_depth).is_none() {
+                    Self::Normal
+                } else {
+                    Self::Fence {
+                        marker: *marker,
+                        marker_len: *marker_len,
+                        info: info.clone(),
+                        quote_depth: *quote_depth,
+                        rust: rust.map(|_| RustContext::Code),
+                    }
+                }
             }
         }
     }
@@ -577,11 +654,12 @@ fn raw_string_closes(bytes: &[u8], start: usize, hashes: usize) -> bool {
 fn scan_markdown_line(context: MarkdownContext, line: &str) -> MarkdownContext {
     match context {
         MarkdownContext::Normal => markdown_fence(line).map_or(MarkdownContext::Normal, |fence| {
-            let rust = markdown_fence_is_rust(&fence.2).then_some(RustContext::Code);
+            let rust = markdown_fence_is_rust(&fence.info).then_some(RustContext::Code);
             MarkdownContext::Fence {
-                marker: fence.0,
-                marker_len: fence.1,
-                info: fence.2,
+                marker: fence.marker,
+                marker_len: fence.marker_len,
+                info: fence.info,
+                quote_depth: fence.quote_depth,
                 rust,
             }
         }),
@@ -589,30 +667,37 @@ fn scan_markdown_line(context: MarkdownContext, line: &str) -> MarkdownContext {
             marker,
             marker_len,
             info,
+            quote_depth,
             mut rust,
         } => {
-            if markdown_fence_closes(line, marker, marker_len) {
+            if markdown_fence_closes(line, marker, marker_len, quote_depth) {
                 MarkdownContext::Normal
-            } else {
+            } else if let Some(content) = markdown_container_content(line, quote_depth) {
                 if let Some(context) = &mut rust {
-                    *context = scan_rust_line(*context, line);
+                    *context = scan_rust_line(*context, content);
                 }
                 MarkdownContext::Fence {
                     marker,
                     marker_len,
                     info,
+                    quote_depth,
                     rust,
                 }
+            } else {
+                scan_markdown_line(MarkdownContext::Normal, line)
             }
         }
     }
 }
 
-fn markdown_fence(line: &str) -> Option<(u8, usize, String)> {
-    let trimmed = line.trim_start_matches(' ');
-    if line.len().saturating_sub(trimmed.len()) > 3 {
-        return None;
+fn markdown_fence(line: &str) -> Option<MarkdownFence> {
+    let mut quote_depth = 0;
+    let mut content = line;
+    while let Some(remainder) = strip_one_markdown_quote(content) {
+        quote_depth += 1;
+        content = remainder;
     }
+    let trimmed = markdown_indented_content(content)?;
     let marker = *trimmed.as_bytes().first()?;
     if !matches!(marker, b'`' | b'~') {
         return None;
@@ -626,20 +711,49 @@ fn markdown_fence(line: &str) -> Option<(u8, usize, String)> {
         return None;
     }
     let info = trimmed[marker_len..].trim().to_string();
-    Some((marker, marker_len, info))
+    Some(MarkdownFence {
+        marker,
+        marker_len,
+        info,
+        quote_depth,
+    })
 }
 
-fn markdown_fence_closes(line: &str, marker: u8, marker_len: usize) -> bool {
-    let trimmed = line.trim_start_matches(' ');
-    if line.len().saturating_sub(trimmed.len()) > 3 {
+fn markdown_fence_closes(line: &str, marker: u8, marker_len: usize, quote_depth: usize) -> bool {
+    let Some(content) = markdown_container_content(line, quote_depth) else {
         return false;
-    }
+    };
+    let Some(trimmed) = markdown_indented_content(content) else {
+        return false;
+    };
     let closing_len = trimmed
         .as_bytes()
         .iter()
         .take_while(|byte| **byte == marker)
         .count();
     closing_len >= marker_len && trimmed[closing_len..].trim().is_empty()
+}
+
+fn markdown_container_content(mut line: &str, quote_depth: usize) -> Option<&str> {
+    for _ in 0..quote_depth {
+        line = strip_one_markdown_quote(line)?;
+    }
+    Some(line)
+}
+
+fn strip_one_markdown_quote(line: &str) -> Option<&str> {
+    let content = markdown_indented_content(line)?;
+    let content = content.strip_prefix('>')?;
+    Some(content.strip_prefix(' ').unwrap_or(content))
+}
+
+fn markdown_indented_content(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start_matches(' ');
+    (line.len().saturating_sub(trimmed.len()) <= 3).then_some(trimmed)
+}
+
+fn markdown_quote_prefix(depth: usize) -> String {
+    "> ".repeat(depth)
 }
 
 fn markdown_fence_is_rust(info: &str) -> bool {
@@ -788,15 +902,22 @@ impl SyntaxHighlighter {
     ) -> Vec<Vec<HighlightSpan>> {
         match context {
             SyntaxContext::Rust(RustContext::BlockCommentOverflow) => {
-                overflowed_rust_comment_lines(buffer, line_range)
+                self.highlight_overflowed_rust(buffer, line_range)
             }
             SyntaxContext::Markdown(MarkdownContext::Fence {
                 marker,
                 marker_len,
                 info,
+                quote_depth,
                 rust: Some(RustContext::BlockCommentOverflow),
-            }) => self
-                .highlight_overflowed_markdown_rust(buffer, line_range, marker, marker_len, info),
+            }) => self.highlight_overflowed_markdown_rust(
+                buffer,
+                line_range,
+                marker,
+                marker_len,
+                info,
+                quote_depth,
+            ),
             context => {
                 let expected_lines = line_range.end.saturating_sub(line_range.start);
                 let (source, context_barriers) = text_line_range(buffer, line_range);
@@ -817,6 +938,29 @@ impl SyntaxHighlighter {
         }
     }
 
+    fn highlight_overflowed_rust(
+        &mut self,
+        buffer: &Buffer,
+        line_range: Range<usize>,
+    ) -> Vec<Vec<HighlightSpan>> {
+        let barrier_line = line_range
+            .clone()
+            .find(|line_idx| line_is_truncated(buffer, *line_idx));
+        let Some(barrier_line) = barrier_line else {
+            return overflowed_rust_comment_lines(buffer, line_range);
+        };
+
+        let suffix_start = barrier_line.saturating_add(1);
+        let mut lines = overflowed_rust_comment_lines(buffer, line_range.start..suffix_start);
+        let mut suffix = self.highlight_window(
+            buffer,
+            suffix_start..line_range.end,
+            SyntaxContext::Rust(RustContext::Code),
+        );
+        lines.append(&mut suffix);
+        lines
+    }
+
     fn highlight_overflowed_markdown_rust(
         &mut self,
         buffer: &Buffer,
@@ -824,35 +968,51 @@ impl SyntaxHighlighter {
         marker: u8,
         marker_len: usize,
         info: String,
+        quote_depth: usize,
     ) -> Vec<Vec<HighlightSpan>> {
-        let closing_line = (line_range.start..line_range.end).find(|line_idx| {
-            let line = buffer.line_prefix_text(*line_idx, MAX_HIGHLIGHT_LINE_CHARS);
-            markdown_fence_closes(&line, marker, marker_len)
+        let boundary = line_range.clone().find_map(|line_idx| {
+            let line = buffer.line_prefix_text(line_idx, MAX_HIGHLIGHT_LINE_CHARS);
+            if markdown_container_content(&line, quote_depth).is_none() {
+                return Some(MarkdownOverflowBoundary::ContainerEnd(line_idx));
+            }
+            if line_is_truncated(buffer, line_idx) {
+                return Some(MarkdownOverflowBoundary::TruncatedLine(line_idx));
+            }
+            markdown_fence_closes(&line, marker, marker_len, quote_depth)
+                .then_some(MarkdownOverflowBoundary::FenceCloser(line_idx))
         });
-        let Some(closing_line) = closing_line else {
+        let Some(boundary) = boundary else {
             return overflowed_rust_comment_lines(buffer, line_range);
         };
 
-        let mut lines = overflowed_rust_comment_lines(buffer, line_range.start..closing_line);
-        let expected_suffix_lines = line_range.end.saturating_sub(closing_line);
-        let (source, context_barriers) = text_line_range(buffer, closing_line..line_range.end);
-        let closing_context = SyntaxContext::Markdown(MarkdownContext::Fence {
-            marker,
-            marker_len,
-            info,
-            rust: None,
-        });
-        let (source, context_barriers, seed_lines) =
-            seeded_source(closing_context, source, context_barriers);
-        #[cfg(test)]
-        {
-            self.last_request_bytes = source.len();
-        }
+        let (suffix_start, suffix_context) = match boundary {
+            MarkdownOverflowBoundary::TruncatedLine(line) => (
+                line.saturating_add(1),
+                SyntaxContext::Markdown(MarkdownContext::Fence {
+                    marker,
+                    marker_len,
+                    info,
+                    quote_depth,
+                    rust: Some(RustContext::Code),
+                }),
+            ),
+            MarkdownOverflowBoundary::FenceCloser(line) => (
+                line,
+                SyntaxContext::Markdown(MarkdownContext::Fence {
+                    marker,
+                    marker_len,
+                    info,
+                    quote_depth,
+                    rust: None,
+                }),
+            ),
+            MarkdownOverflowBoundary::ContainerEnd(line) => {
+                (line, SyntaxContext::Markdown(MarkdownContext::Normal))
+            }
+        };
+        let mut lines = overflowed_rust_comment_lines(buffer, line_range.start..suffix_start);
         let mut suffix =
-            self.highlight_document_segments(buffer.path(), &source, &context_barriers);
-        suffix.drain(..seed_lines.min(suffix.len()));
-        suffix.truncate(expected_suffix_lines);
-        suffix.resize_with(expected_suffix_lines, Vec::new);
+            self.highlight_window(buffer, suffix_start..line_range.end, suffix_context);
         lines.append(&mut suffix);
         lines
     }
@@ -1037,6 +1197,10 @@ fn overflowed_rust_comment_lines(
             }
         })
         .collect()
+}
+
+fn line_is_truncated(buffer: &Buffer, line_idx: usize) -> bool {
+    buffer.line_len_chars(line_idx) > MAX_HIGHLIGHT_LINE_CHARS
 }
 
 impl Default for SyntaxHighlighter {
@@ -1317,6 +1481,7 @@ mod tests {
     use crate::buffer::Buffer;
     use std::{
         fs,
+        ops::Range,
         path::{Path, PathBuf},
         sync::atomic::{AtomicUsize, Ordering},
     };
@@ -1694,6 +1859,113 @@ mod tests {
     }
 
     #[test]
+    fn rust_comment_overflow_stops_at_truncated_line_barrier_after_edits() {
+        let oversized = "x".repeat(super::MAX_HIGHLIGHT_LINE_CHARS + 1);
+        let mut lines = vec!["comment".to_string(); 1_024];
+        lines[0] = "/*".repeat(usize::from(super::MAX_RUST_BLOCK_COMMENT_DEPTH) + 1);
+        lines[256] = oversized.clone();
+        lines[257] = "let visible = 42;".to_string();
+        let (mut buffer, dir) = buffer_with_text("overflow-barrier.rs", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+        let viewport = 256..258;
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(line_has_kind(&highlighted[0], HighlightKind::Comment));
+        assert!(line_has_kind(&highlighted[1], HighlightKind::Keyword));
+        assert_bounded_rebuild_work(&highlighter, buffer.id());
+
+        buffer.insert(buffer.line_end_char(255), " edited");
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(line_has_kind(&highlighted[1], HighlightKind::Keyword));
+        assert_bounded_rebuild_work(&highlighter, buffer.id());
+
+        let barrier_start = buffer.line_start_char(256);
+        buffer.delete(barrier_start..barrier_start + oversized.chars().count());
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(line_has_kind(&highlighted[1], HighlightKind::Comment));
+        assert!(!line_has_kind(&highlighted[1], HighlightKind::Keyword));
+        assert_bounded_rebuild_work(&highlighter, buffer.id());
+
+        buffer.insert(barrier_start, &oversized);
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport);
+        assert!(line_has_kind(&highlighted[1], HighlightKind::Keyword));
+        assert_bounded_rebuild_work(&highlighter, buffer.id());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn markdown_rust_overflow_stops_at_truncated_line_barrier_after_edits() {
+        let oversized = "x".repeat(super::MAX_HIGHLIGHT_LINE_CHARS + 1);
+        let mut lines = vec!["comment".to_string(); 1_024];
+        lines[0] = "```rust".to_string();
+        lines[1] = "/*".repeat(usize::from(super::MAX_RUST_BLOCK_COMMENT_DEPTH) + 1);
+        lines[256] = oversized.clone();
+        lines[257] = "let visible = 42;".to_string();
+        lines[300] = "```".to_string();
+        let (mut buffer, dir) = buffer_with_text("overflow-barrier.md", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+        let viewport = 256..258;
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(line_has_kind(&highlighted[0], HighlightKind::Comment));
+        assert!(line_has_kind(&highlighted[1], HighlightKind::Keyword));
+        assert_bounded_rebuild_work(&highlighter, buffer.id());
+
+        buffer.insert(buffer.line_end_char(255), " edited");
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(line_has_kind(&highlighted[1], HighlightKind::Keyword));
+        assert_bounded_rebuild_work(&highlighter, buffer.id());
+
+        let barrier_start = buffer.line_start_char(256);
+        buffer.delete(barrier_start..barrier_start + oversized.chars().count());
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(line_has_kind(&highlighted[1], HighlightKind::Comment));
+        assert!(!line_has_kind(&highlighted[1], HighlightKind::Keyword));
+        assert_bounded_rebuild_work(&highlighter, buffer.id());
+
+        buffer.insert(barrier_start, &oversized);
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport);
+        assert!(line_has_kind(&highlighted[1], HighlightKind::Keyword));
+        assert_bounded_rebuild_work(&highlighter, buffer.id());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn quoted_markdown_overflow_respects_container_edits_at_a_barrier() {
+        let oversized = "x".repeat(super::MAX_HIGHLIGHT_LINE_CHARS + 1);
+        let mut lines = vec!["> comment".to_string(); 1_024];
+        lines[0] = "> ```rust".to_string();
+        lines[1] = format!(
+            "> {}",
+            "/*".repeat(usize::from(super::MAX_RUST_BLOCK_COMMENT_DEPTH) + 1)
+        );
+        lines[257] = format!("> {oversized}");
+        lines[258] = "> let visible = 42;".to_string();
+        lines[300] = "> ```".to_string();
+        let (mut buffer, dir) = buffer_with_text("quoted-overflow-barrier.md", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+        let viewport = 256..259;
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(line_has_kind(&highlighted[0], HighlightKind::Comment));
+        assert!(line_has_kind(&highlighted[2], HighlightKind::Keyword));
+        assert_bounded_rebuild_work(&highlighter, buffer.id());
+
+        let barrier_start = buffer.line_start_char(257);
+        buffer.delete(barrier_start..barrier_start + 2);
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(!line_has_kind(&highlighted[1], HighlightKind::Comment));
+        assert!(!line_has_kind(&highlighted[2], HighlightKind::Keyword));
+        assert_bounded_rebuild_work(&highlighter, buffer.id());
+
+        buffer.insert(barrier_start, "> ");
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport);
+        assert!(line_has_kind(&highlighted[2], HighlightKind::Keyword));
+        assert_bounded_rebuild_work(&highlighter, buffer.id());
+        remove_dir(dir);
+    }
+
+    #[test]
     fn viewport_inside_rust_multiline_string_keeps_document_context() {
         let (buffer, dir) = buffer_with_text(
             "string.rs",
@@ -1720,6 +1992,75 @@ mod tests {
 
         assert_eq!(highlighted.len(), 3);
         assert!(line_has_kind(&highlighted[0], HighlightKind::Keyword));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn shallow_block_quoted_backtick_and_tilde_fences_inject_rust() {
+        for marker in ["```", "~~~"] {
+            let text = format!("> {marker}rust\n> fn main() {{}}\n> {marker}\n");
+            let (buffer, dir) = buffer_with_text("quoted.md", &text);
+            let mut highlighter = SyntaxHighlighter::new();
+
+            let highlighted = highlighter.highlight_visible_lines(&buffer, 0..3);
+
+            assert!(
+                line_has_kind(&highlighted[1], HighlightKind::Keyword),
+                "{marker} quoted fence should inject Rust"
+            );
+            remove_dir(dir);
+        }
+    }
+
+    #[test]
+    fn deep_block_quoted_backtick_and_tilde_fences_keep_context_and_close() {
+        for marker in ["```", "~~~"] {
+            let mut lines = vec!["> fn item() {}".to_string(); 20_000];
+            lines[100] = format!("> {marker}rust");
+            lines[19_005] = format!("> {marker}");
+            lines[19_006] = "> # Visible heading".to_string();
+            let (buffer, dir) = buffer_with_text("deep-quoted.md", &lines.join("\n"));
+            let mut highlighter = SyntaxHighlighter::new();
+
+            let highlighted = highlighter.highlight_visible_lines(&buffer, 19_000..19_007);
+
+            assert!(
+                line_has_kind(&highlighted[0], HighlightKind::Keyword),
+                "{marker} quoted fence should retain deep injected Rust"
+            );
+            assert!(
+                line_has_kind(&highlighted[6], HighlightKind::MarkupHeading),
+                "{marker} quoted fence should close inside the visible window"
+            );
+            assert_retained_highlight_is_bounded(&highlighter, buffer.id());
+            remove_dir(dir);
+        }
+    }
+
+    #[test]
+    fn editing_quoted_fence_container_rebuilds_deep_context() {
+        let mut lines = vec!["> fn item() {}".to_string(); 20_000];
+        lines[100] = "> ```rust".to_string();
+        lines[19_900] = "> ```".to_string();
+        let (mut buffer, dir) = buffer_with_text("edited-quoted.md", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+        let viewport = 19_000..19_003;
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(line_has_kind(&highlighted[0], HighlightKind::Keyword));
+
+        let container_start = buffer.line_start_char(19_000);
+        buffer.delete(container_start..container_start + 2);
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(!line_has_kind(&highlighted[0], HighlightKind::Keyword));
+        assert!(!line_has_kind(&highlighted[1], HighlightKind::Keyword));
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+
+        buffer.insert(container_start, "> ");
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport);
+        assert!(line_has_kind(&highlighted[0], HighlightKind::Keyword));
+        assert!(line_has_kind(&highlighted[1], HighlightKind::Keyword));
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
         remove_dir(dir);
     }
 
@@ -1929,6 +2270,123 @@ mod tests {
     }
 
     #[test]
+    fn alternating_distant_rust_viewports_and_edits_keep_work_bounded() {
+        let mut lines = vec!["comment".to_string(); 20_000];
+        lines[100] = "/* opener".to_string();
+        let (mut buffer, dir) = buffer_with_text("alternating.rs", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+        let low = 4_000..4_020;
+        let high = 19_000..19_020;
+
+        highlighter.highlight_visible_lines(&buffer, high.clone());
+        highlighter.highlight_visible_lines(&buffer, low.clone());
+        assert_alternating_viewports_are_bounded(
+            &mut highlighter,
+            &buffer,
+            low.clone(),
+            high.clone(),
+            HighlightKind::Comment,
+        );
+
+        buffer.insert(buffer.line_end_char(10_000), " edited");
+        let low_highlights = highlighter.highlight_visible_lines(&buffer, low.clone());
+        assert!(line_has_kind(&low_highlights[0], HighlightKind::Comment));
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+        assert!(checkpoint_lines(&highlighter, buffer.id())
+            .into_iter()
+            .all(|line| line <= 10_000));
+
+        highlighter.highlight_visible_lines(&buffer, high.clone());
+        assert_alternating_viewports_are_bounded(
+            &mut highlighter,
+            &buffer,
+            low.clone(),
+            high.clone(),
+            HighlightKind::Comment,
+        );
+
+        highlighter.highlight_visible_lines(&buffer, high.clone());
+        buffer.insert(buffer.line_end_char(19_010), " edited");
+        let highlighted = highlighter.highlight_visible_lines(&buffer, high);
+        assert!(line_has_kind(&highlighted[0], HighlightKind::Comment));
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn four_warmed_distant_viewports_fit_the_checkpoint_cap() {
+        let text = (0..20_000)
+            .map(|idx| format!("fn item_{idx}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (buffer, dir) = buffer_with_text("four-locations.rs", &text);
+        let mut highlighter = SyntaxHighlighter::new();
+        let viewports = [2_000..2_020, 8_000..8_020, 14_000..14_020, 19_000..19_020];
+
+        for viewport in viewports.iter().rev() {
+            highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        }
+        for viewport in viewports.iter().cycle().take(viewports.len() * 2) {
+            let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+            assert!(highlighted
+                .iter()
+                .all(|line| line_has_kind(line, HighlightKind::Keyword)));
+            assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+        }
+
+        assert_eq!(
+            checkpoint_lines(&highlighter, buffer.id()).len(),
+            super::MAX_RECENT_CHECKPOINTS + 1
+        );
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn alternating_distant_markdown_viewports_and_edits_keep_work_bounded() {
+        let mut lines = vec!["fn item() {}".to_string(); 20_000];
+        lines[100] = "```rust".to_string();
+        lines[19_900] = "```".to_string();
+        let (mut buffer, dir) = buffer_with_text("alternating.md", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+        let low = 4_000..4_020;
+        let high = 19_000..19_020;
+
+        highlighter.highlight_visible_lines(&buffer, high.clone());
+        highlighter.highlight_visible_lines(&buffer, low.clone());
+        assert_alternating_viewports_are_bounded(
+            &mut highlighter,
+            &buffer,
+            low.clone(),
+            high.clone(),
+            HighlightKind::Keyword,
+        );
+
+        buffer.insert(buffer.line_end_char(10_000), " // edited");
+        let low_highlights = highlighter.highlight_visible_lines(&buffer, low.clone());
+        assert!(line_has_kind(&low_highlights[0], HighlightKind::Keyword));
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+        assert!(checkpoint_lines(&highlighter, buffer.id())
+            .into_iter()
+            .all(|line| line <= 10_000));
+
+        highlighter.highlight_visible_lines(&buffer, high.clone());
+        assert_alternating_viewports_are_bounded(
+            &mut highlighter,
+            &buffer,
+            low.clone(),
+            high.clone(),
+            HighlightKind::Keyword,
+        );
+
+        highlighter.highlight_visible_lines(&buffer, high.clone());
+        buffer.insert(buffer.line_end_char(19_010), " // edited");
+        let highlighted = highlighter.highlight_visible_lines(&buffer, high);
+        assert!(line_has_kind(&highlighted[0], HighlightKind::Keyword));
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+        remove_dir(dir);
+    }
+
+    #[test]
     fn scrolling_reuses_cached_document_highlights() {
         let (buffer, dir) = buffer_with_text("cached.rs", "fn main() {\n    let answer = 42;\n}\n");
         let mut highlighter = SyntaxHighlighter::new();
@@ -2102,7 +2560,49 @@ mod tests {
         cache.window.as_ref().expect("expected a highlight window")
     }
 
+    fn checkpoint_lines(highlighter: &SyntaxHighlighter, buffer_id: u64) -> Vec<usize> {
+        let document = &highlighter.documents[&buffer_id];
+        let super::HighlightCache::Windowed(cache) = &document.cache else {
+            panic!("expected a windowed highlight cache");
+        };
+        cache
+            .checkpoints
+            .iter()
+            .map(|checkpoint| checkpoint.line)
+            .collect()
+    }
+
+    fn assert_alternating_viewports_are_bounded(
+        highlighter: &mut SyntaxHighlighter,
+        buffer: &Buffer,
+        low: Range<usize>,
+        high: Range<usize>,
+        expected_kind: HighlightKind,
+    ) {
+        for viewport in [high.clone(), low.clone(), high, low] {
+            let highlighted = highlighter.highlight_visible_lines(buffer, viewport);
+            assert!(highlighted
+                .iter()
+                .all(|line| line_has_kind(line, expected_kind)));
+            assert_deep_refresh_is_bounded(highlighter, buffer.id());
+        }
+    }
+
     fn assert_deep_refresh_is_bounded(highlighter: &SyntaxHighlighter, buffer_id: u64) {
+        let max_window_lines = super::HIGHLIGHT_WINDOW_LINES + super::HIGHLIGHT_READ_AHEAD_LINES;
+
+        assert!(highlighter.last_scanned_lines <= max_window_lines);
+        assert_retained_highlight_is_bounded(highlighter, buffer_id);
+    }
+
+    fn assert_bounded_rebuild_work(highlighter: &SyntaxHighlighter, buffer_id: u64) {
+        let max_window_lines = super::HIGHLIGHT_WINDOW_LINES + super::HIGHLIGHT_READ_AHEAD_LINES;
+
+        assert!(highlighter.last_scanned_lines <= max_window_lines * 2);
+        assert_retained_highlight_is_bounded(highlighter, buffer_id);
+    }
+
+    fn assert_retained_highlight_is_bounded(highlighter: &SyntaxHighlighter, buffer_id: u64) {
         let document = &highlighter.documents[&buffer_id];
         let super::HighlightCache::Windowed(cache) = &document.cache else {
             panic!("expected a windowed highlight cache");
@@ -2110,7 +2610,6 @@ mod tests {
         let window = cache.window.as_ref().expect("expected a highlight window");
         let max_window_lines = super::HIGHLIGHT_WINDOW_LINES + super::HIGHLIGHT_READ_AHEAD_LINES;
 
-        assert!(highlighter.last_scanned_lines <= max_window_lines);
         assert!(highlighter.last_request_bytes <= max_window_lines * 128);
         assert!(window.lines.len() <= max_window_lines);
         assert!(cache.checkpoints.len() <= super::MAX_RECENT_CHECKPOINTS + 1);
