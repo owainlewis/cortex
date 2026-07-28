@@ -593,6 +593,28 @@ fn build_frame_with_selection(
     )
 }
 
+#[cfg(test)]
+fn build_frame_with_keycast(
+    buffer: &Buffer,
+    view: &View,
+    size: TerminalSize,
+    status_message: Option<&str>,
+    status_kind: Option<StatusKind>,
+    keycast: Option<&str>,
+) -> Frame {
+    build_frame_with_highlights(
+        buffer,
+        view,
+        size,
+        status_message,
+        status_kind,
+        None,
+        None,
+        keycast,
+        &[],
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_frame_with_highlights(
     buffer: &Buffer,
@@ -672,14 +694,15 @@ fn build_frame_with_highlights(
         lines.push(screen_line);
     }
 
-    let mut modeline = command_line
-        .map(command_line_text)
-        .unwrap_or_else(|| modeline_text(buffer, view, status_message));
-    if command_line.is_none() {
+    let modeline = if let Some(command_line) = command_line {
+        fit_status_line(&command_line_text(command_line), width)
+    } else {
+        let mut modeline = modeline_text(buffer, view, status_message);
         if let Some(keycast) = keycast {
             modeline = modeline_with_keycast(&modeline, keycast);
         }
-    }
+        fit_editor_modeline(&modeline, buffer, status_message, status_kind, width)
+    };
     let cursor = command_line
         .map(|input| command_line_cursor(input, size))
         .unwrap_or_else(|| cursor_position(buffer, view, size, gutter_width));
@@ -695,7 +718,7 @@ fn build_frame_with_highlights(
 
     Frame {
         lines,
-        modeline: fit_status_line(&modeline, width),
+        modeline,
         cursor,
         modeline_style,
     }
@@ -836,6 +859,87 @@ fn modeline_text(buffer: &Buffer, view: &View, status_message: Option<&str>) -> 
     }
 
     text
+}
+
+fn fit_editor_modeline(
+    modeline: &str,
+    buffer: &Buffer,
+    status_message: Option<&str>,
+    status_kind: Option<StatusKind>,
+    width: usize,
+) -> String {
+    if measure_cells(modeline, width.saturating_add(1)) <= width {
+        return fit_status_line(modeline, width);
+    }
+
+    let priority_text = if status_kind == Some(StatusKind::Prompt) {
+        status_message
+            .filter(|message| !message.is_empty())
+            .map(|message| fit_prompt_tail(message, width))
+    } else if buffer.disk_changed() {
+        Some(disk_change_text(buffer.is_dirty(), width))
+    } else {
+        None
+    };
+
+    priority_text.map_or_else(
+        || fit_status_line(modeline, width),
+        |text| fit_status_line(&text, width),
+    )
+}
+
+fn fit_prompt_tail(message: &str, width: usize) -> String {
+    if measure_cells(message, width.saturating_add(1)) <= width {
+        return message.to_string();
+    }
+
+    let prefix = "… ";
+    let prefix_width = measure_cells(prefix, usize::MAX);
+    if width < prefix_width {
+        return fit_line_cells(prefix, width);
+    }
+
+    let graphemes = text::grapheme_char_indices(message)
+        .map(|(_, grapheme)| grapheme)
+        .collect::<Vec<_>>();
+    let mut start = graphemes.len();
+    let mut used = prefix_width;
+    while let Some(grapheme) = start.checked_sub(1).map(|index| graphemes[index]) {
+        let grapheme_width = text::grapheme_width(grapheme, 0);
+        if used.saturating_add(grapheme_width) > width {
+            break;
+        }
+        start -= 1;
+        used += grapheme_width;
+    }
+
+    let untrimmed_start = start;
+    let is_whitespace = |grapheme: &str| grapheme.chars().all(char::is_whitespace);
+    if start > 0 && !is_whitespace(graphemes[start - 1]) {
+        while start < graphemes.len() && !is_whitespace(graphemes[start]) {
+            start += 1;
+        }
+        while start < graphemes.len() && is_whitespace(graphemes[start]) {
+            start += 1;
+        }
+    }
+    if start == graphemes.len() {
+        start = untrimmed_start;
+    }
+
+    format!("{prefix}{}", graphemes[start..].concat())
+}
+
+fn disk_change_text(dirty: bool, width: usize) -> String {
+    const DISK_CHANGED: &str = "[disk-changed]";
+    let state = if dirty { "MODIFIED" } else { "CLEAN" };
+    let with_state = format!("{state} {DISK_CHANGED}");
+
+    if measure_cells(&with_state, width.saturating_add(1)) <= width {
+        with_state
+    } else {
+        DISK_CHANGED.to_string()
+    }
 }
 
 fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFrame {
@@ -1452,9 +1556,9 @@ fn tab_spaces(current_col: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_frame, build_frame_with_selection, build_picker_frame, fill_row, fit_line_cells,
-        fit_status_line, measure_cells, modeline_text, plain_style, push_cells,
-        retained_cell_count, CellFrame, CursorPosition, Frame, ModelineStyle, Renderer,
+        build_frame, build_frame_with_keycast, build_frame_with_selection, build_picker_frame,
+        fill_row, fit_line_cells, fit_status_line, measure_cells, modeline_text, plain_style,
+        push_cells, retained_cell_count, CellFrame, CursorPosition, Frame, ModelineStyle, Renderer,
         ScreenLineKind, StatusKind, TerminalSize, COMMAND_LINE_HINT, MAX_RETAINED_FRAME_CELLS,
         THEME,
     };
@@ -1585,6 +1689,65 @@ mod tests {
         );
 
         assert!(frame.modeline.contains("[disk-changed]"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn narrow_modeline_keeps_disk_change_visible_with_a_long_unicode_file_name() {
+        let dir = test_dir("narrow-modeline-disk-changed-clean");
+        let path = dir.join("非常に長いファイル名.rs");
+        fs::write(&path, "before").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        fs::write(&path, "after with a different length").unwrap();
+        buffer.refresh_disk_changed();
+
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 20, rows: 3 },
+            None,
+            None,
+            None,
+        );
+
+        assert!(frame.modeline.contains("CLEAN"));
+        assert!(frame.modeline.contains("[disk-changed]"));
+        assert!(!frame.modeline.contains("非常に長いファイル名.rs"));
+
+        let marker_only = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 14, rows: 3 },
+            None,
+            None,
+            None,
+        );
+        assert_eq!(marker_only.modeline, "[disk-changed]");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn narrow_modeline_keeps_dirty_and_disk_change_states_visible() {
+        let dir = test_dir("narrow-modeline-disk-changed-dirty");
+        let path = dir.join("非常に長いファイル名.rs");
+        fs::write(&path, "before").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(0, "local ");
+        fs::write(&path, "external change with a different length").unwrap();
+        buffer.refresh_disk_changed();
+
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 23, rows: 3 },
+            None,
+            None,
+            None,
+        );
+
+        assert!(frame.modeline.contains("MODIFIED"));
+        assert!(frame.modeline.contains("[disk-changed]"));
+        assert_eq!(frame.modeline_style, ModelineStyle::Dirty);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2069,6 +2232,53 @@ mod tests {
         assert_eq!(success.modeline_style, ModelineStyle::Success);
         assert_eq!(prefix.modeline_style, ModelineStyle::Prefix);
         assert_eq!(prompt.modeline_style, ModelineStyle::Prompt);
+    }
+
+    #[test]
+    fn narrow_modeline_prioritizes_dirty_quit_prompt_over_informational_fields() {
+        let mut buffer = buffer_with_text("unicode-long-非常に長いファイル名.rs", "alpha\n");
+        buffer.insert(0, "z");
+
+        let frame = build_frame_with_keycast(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 34, rows: 3 },
+            Some("Buffers modified; quit without saving? (y or n)"),
+            Some(StatusKind::Prompt),
+            Some("C-c"),
+        );
+
+        assert!(frame.modeline.contains("quit without saving?"));
+        assert!(frame.modeline.contains("(y or n)"));
+        assert!(!frame.modeline.contains("KEYS"));
+        assert!(!frame.modeline.contains("unicode-long"));
+        assert_eq!(frame.modeline_style, ModelineStyle::Prompt);
+    }
+
+    #[test]
+    fn wide_modeline_keeps_the_ordinary_field_order_for_critical_states() {
+        let mut buffer = buffer_with_text("unicode-long-非常に長いファイル名.rs", "alpha\n");
+        buffer.insert(0, "z");
+
+        let frame = build_frame_with_keycast(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 240, rows: 3 },
+            Some("Buffers modified; quit without saving? (y or n)"),
+            Some(StatusKind::Prompt),
+            Some("C-c"),
+        );
+
+        assert!(frame
+            .modeline
+            .starts_with(" CORTEX  KEYS C-c  unicode-long-非常に長いファイル名.rs"));
+        assert!(frame.modeline.contains("MODIFIED"));
+        assert!(frame.modeline.contains("Ln 1, Col 1"));
+        assert!(frame.modeline.contains("RUST"));
+        assert!(frame
+            .modeline
+            .contains("Buffers modified; quit without saving? (y or n)"));
+        assert_eq!(frame.modeline_style, ModelineStyle::Prompt);
     }
 
     #[test]
