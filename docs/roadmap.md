@@ -214,7 +214,7 @@ Tracking issues:
 - [closed] [#111 Restore terminal state on catchable termination signals](https://github.com/owainlewis/cortex/issues/111)
 - [closed] [#112 Bound highlighting work at deep viewports](https://github.com/owainlewis/cortex/issues/112)
 - [closed] [#113 Keep point visible while editing long lines](https://github.com/owainlewis/cortex/issues/113)
-- [open] [#114 Avoid full long-line comparisons during rendering](https://github.com/owainlewis/cortex/issues/114)
+- [closed] [#114 Avoid full long-line comparisons during rendering](https://github.com/owainlewis/cortex/issues/114)
 
 ## Repository Quality
 

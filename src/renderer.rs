@@ -1642,6 +1642,67 @@ mod tests {
     }
 
     #[test]
+    fn million_character_line_uses_one_range_probe_per_frame() {
+        let mut buffer = buffer_with_text("large.txt", &"x".repeat(1_000_000));
+        let end = buffer.len_chars();
+        buffer.insert(end, "y");
+        let mut view = View::new();
+        view.move_to_line_end(&buffer);
+        let size = TerminalSize { cols: 20, rows: 2 };
+        view.ensure_point_visible(&buffer, 1, 14);
+        buffer.take_line_change_range_probes();
+
+        let first = build_frame(&buffer, &view, size, None, None, None);
+        let first_probes = buffer.take_line_change_range_probes();
+        let repeated = build_frame(&buffer, &view, size, None, None, None);
+        let repeated_probes = buffer.take_line_change_range_probes();
+
+        assert_eq!(line_texts(&first), line_texts(&repeated));
+        assert!(first.lines[0].gutter.starts_with("+>"));
+        assert_eq!(first_probes, 1);
+        assert_eq!(repeated_probes, 1);
+    }
+
+    #[test]
+    fn deep_viewport_queries_only_visible_line_markers() {
+        let text = format!(
+            "{}\n{}",
+            "x".repeat(1_000_000),
+            (1..100_000)
+                .map(|line| format!("line {line}\n"))
+                .collect::<String>()
+        );
+        let mut buffer = buffer_with_text("large.txt", &text);
+        let changed_line = 90_000;
+        let changed_start = buffer.line_start_char(changed_line);
+        buffer.insert(changed_start, "y");
+        let mut view = View::new();
+        view.set_point(changed_start, &buffer);
+        view.ensure_point_visible(&buffer, 5, 31);
+        buffer.take_line_change_range_probes();
+
+        let frame = build_frame(
+            &buffer,
+            &view,
+            TerminalSize { cols: 40, rows: 6 },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(buffer.take_line_change_range_probes(), 5);
+        assert_eq!(
+            frame
+                .lines
+                .iter()
+                .filter(|line| line.gutter.starts_with('+'))
+                .count(),
+            1
+        );
+        assert!(frame.lines[4].text.starts_with("yline 90000"));
+    }
+
+    #[test]
     fn frame_truncates_long_lines_and_modeline_to_width() {
         let mut buffer = buffer_with_text("notes.txt", "abcdef");
         buffer.insert(0, "z");

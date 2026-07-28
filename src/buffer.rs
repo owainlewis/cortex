@@ -47,6 +47,8 @@ pub struct Buffer {
     history_state: u64,
     clean_history_state: u64,
     next_history_state: u64,
+    line_change_epoch: u64,
+    changed_lines: ChangedLines,
     revision: u64,
     last_change: Option<BufferChange>,
     undo_stack: Vec<Edit>,
@@ -54,6 +56,8 @@ pub struct Buffer {
     line_column_cache: RefCell<LineColumnCache>,
     #[cfg(test)]
     line_column_graphemes_visited: Cell<usize>,
+    #[cfg(test)]
+    line_change_range_probes: Cell<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,7 +171,7 @@ struct SourceBaseline<'a> {
     text: &'a Rope,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct Edit {
     start: usize,
     deleted: String,
@@ -176,6 +180,100 @@ struct Edit {
     point_after: usize,
     state_before: u64,
     state_after: u64,
+    line_change: LineChangeTransition,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LineChangeTransition {
+    epoch: Option<u64>,
+    before: Vec<Range<usize>>,
+    after: Vec<Range<usize>>,
+}
+
+impl LineChangeTransition {
+    fn reversed(mut self) -> Self {
+        std::mem::swap(&mut self.before, &mut self.after);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ChangedLines {
+    ranges: Vec<Range<usize>>,
+}
+
+impl ChangedLines {
+    #[cfg(test)]
+    fn contains(&self, line_idx: usize) -> bool {
+        self.contains_with_probes(line_idx).0
+    }
+
+    fn contains_with_probes(&self, line_idx: usize) -> (bool, usize) {
+        let mut start = 0;
+        let mut end = self.ranges.len();
+        let mut probes = 0;
+        while start < end {
+            probes += 1;
+            let middle = start + (end - start) / 2;
+            if self.ranges[middle].end <= line_idx {
+                start = middle + 1;
+            } else {
+                end = middle;
+            }
+        }
+        (
+            self.ranges
+                .get(start)
+                .is_some_and(|range| range.contains(&line_idx)),
+            probes,
+        )
+    }
+
+    fn mark(&mut self, marked: Range<usize>) -> LineChangeTransition {
+        if marked.is_empty() {
+            return LineChangeTransition::default();
+        }
+
+        let mut marked = marked;
+        let start = self
+            .ranges
+            .partition_point(|range| range.end < marked.start);
+        let mut end = start;
+        while self
+            .ranges
+            .get(end)
+            .is_some_and(|range| range.start <= marked.end)
+        {
+            marked.start = marked.start.min(self.ranges[end].start);
+            marked.end = marked.end.max(self.ranges[end].end);
+            end += 1;
+        }
+        if end == start + 1 && self.ranges[start] == marked {
+            return LineChangeTransition::default();
+        }
+
+        let before = self.ranges.splice(start..end, [marked.clone()]).collect();
+        LineChangeTransition {
+            epoch: None,
+            before,
+            after: vec![marked],
+        }
+    }
+
+    fn apply(&mut self, remove: &[Range<usize>], insert: &[Range<usize>]) {
+        for range in remove {
+            let index = self
+                .ranges
+                .binary_search_by_key(&range.start, |item| item.start)
+                .expect("line-change transition range missing");
+            assert_eq!(self.ranges[index], *range);
+            self.ranges.remove(index);
+        }
+        for range in insert {
+            let index = self.ranges.partition_point(|item| item.start < range.start);
+            self.ranges.insert(index, range.clone());
+        }
+    }
 }
 
 impl Buffer {
@@ -195,6 +293,8 @@ impl Buffer {
             history_state: 0,
             clean_history_state: 0,
             next_history_state: 1,
+            line_change_epoch: 0,
+            changed_lines: ChangedLines::default(),
             revision: 0,
             last_change: None,
             undo_stack: Vec::new(),
@@ -202,6 +302,8 @@ impl Buffer {
             line_column_cache: RefCell::new(LineColumnCache::default()),
             #[cfg(test)]
             line_column_graphemes_visited: Cell::new(0),
+            #[cfg(test)]
+            line_change_range_probes: Cell::new(0),
         })
     }
 
@@ -529,11 +631,16 @@ impl Buffer {
 
     pub fn line_changed(&self, line_idx: usize) -> bool {
         let line_idx = self.clamp_line_idx(line_idx);
-        let current_line = self.text.line(line_idx);
-        self.clean_text.get_line(line_idx).map_or_else(
-            || current_line.len_chars() != 0,
-            |clean_line| current_line != clean_line,
-        )
+        let (changed, _probes) = self.changed_lines.contains_with_probes(line_idx);
+        #[cfg(test)]
+        self.line_change_range_probes
+            .set(self.line_change_range_probes.get().saturating_add(_probes));
+        changed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_line_change_range_probes(&self) -> usize {
+        self.line_change_range_probes.replace(0)
     }
 
     pub fn find_forward(&self, query: &str, start_char: usize) -> Option<usize> {
@@ -614,16 +721,18 @@ impl Buffer {
     }
 
     pub fn undo(&mut self) -> Option<usize> {
-        let edit = self.undo_stack.pop()?;
-        self.apply_inverse_edit(&edit);
+        let mut edit = self.undo_stack.pop()?;
+        self.apply_inverse_edit_text(&edit);
+        self.update_line_changes(&mut edit, EditDirection::Backward);
         let point = edit.point_before.min(self.len_chars());
         self.redo_stack.push(edit);
         Some(point)
     }
 
     pub fn redo(&mut self) -> Option<usize> {
-        let edit = self.redo_stack.pop()?;
-        self.apply_edit(&edit);
+        let mut edit = self.redo_stack.pop()?;
+        self.apply_edit_text(&edit);
+        self.update_line_changes(&mut edit, EditDirection::Forward);
         let point = edit.point_after.min(self.len_chars());
         self.undo_stack.push(edit);
         Some(point)
@@ -661,6 +770,7 @@ impl Buffer {
         self.disk_changed = false;
         self.clean_text = self.text.clone();
         self.clean_history_state = self.history_state;
+        self.reset_line_changes();
         Ok(())
     }
 
@@ -676,6 +786,7 @@ impl Buffer {
         self.history_state = 0;
         self.clean_history_state = 0;
         self.next_history_state = 1;
+        self.reset_line_changes();
         self.revision = self.revision.wrapping_add(1);
         self.last_change = None;
         self.disk_baseline = disk_baseline;
@@ -707,9 +818,11 @@ impl Buffer {
             point_after,
             state_before: self.history_state,
             state_after,
+            line_change: LineChangeTransition::default(),
         };
 
-        self.apply_edit(&edit);
+        self.apply_edit_text(&edit);
+        self.update_line_changes(&mut edit, EditDirection::Forward);
         edit.point_after = self.grapheme_boundary_at_or_after(edit.point_after);
         let point_after = edit.point_after;
         self.undo_stack.push(edit);
@@ -717,13 +830,13 @@ impl Buffer {
         point_after
     }
 
-    fn apply_edit(&mut self, edit: &Edit) {
+    fn apply_edit_text(&mut self, edit: &Edit) {
         let deleted_len = edit.deleted.chars().count();
         self.apply_change(edit.start, deleted_len, &edit.inserted);
         self.history_state = edit.state_after;
     }
 
-    fn apply_inverse_edit(&mut self, edit: &Edit) {
+    fn apply_inverse_edit_text(&mut self, edit: &Edit) {
         let inserted_len = edit.inserted.chars().count();
         self.apply_change(edit.start, inserted_len, &edit.deleted);
         self.history_state = edit.state_before;
@@ -754,6 +867,69 @@ impl Buffer {
             .expect("buffer history state exhausted");
         state
     }
+
+    fn reset_line_changes(&mut self) {
+        self.line_change_epoch = self
+            .line_change_epoch
+            .checked_add(1)
+            .expect("buffer line-change epoch exhausted");
+        self.changed_lines = ChangedLines::default();
+    }
+
+    fn update_line_changes(&mut self, edit: &mut Edit, direction: EditDirection) {
+        if edit.line_change.epoch == Some(self.line_change_epoch) {
+            let (remove, insert) = match direction {
+                EditDirection::Forward => (&edit.line_change.before, &edit.line_change.after),
+                EditDirection::Backward => (&edit.line_change.after, &edit.line_change.before),
+            };
+            self.changed_lines.apply(remove, insert);
+        } else {
+            let mut transition = self
+                .changed_lines
+                .mark(self.changed_line_range(edit, direction));
+            transition.epoch = Some(self.line_change_epoch);
+            edit.line_change = match direction {
+                EditDirection::Forward => transition,
+                EditDirection::Backward => transition.reversed(),
+            };
+        }
+        debug_assert!(
+            self.history_state != self.clean_history_state || self.changed_lines.ranges.is_empty()
+        );
+    }
+
+    fn changed_line_range(&self, edit: &Edit, direction: EditDirection) -> Range<usize> {
+        let (inserted, deleted) = match direction {
+            EditDirection::Forward => (&edit.inserted, &edit.deleted),
+            EditDirection::Backward => (&edit.deleted, &edit.inserted),
+        };
+        let start = self.line_for_char(edit.start);
+        let inserted_lines = inserted.bytes().filter(|byte| *byte == b'\n').count();
+        let deleted_lines = deleted.bytes().filter(|byte| *byte == b'\n').count();
+        let end = if inserted_lines == deleted_lines {
+            start
+                .saturating_add(inserted_lines)
+                .saturating_add(1)
+                .min(self.len_lines())
+        } else if self.len_lines() > self.clean_text.len_lines()
+            && self
+                .text
+                .line(self.len_lines().saturating_sub(1))
+                .len_chars()
+                == 0
+        {
+            self.len_lines().saturating_sub(1)
+        } else {
+            self.len_lines()
+        };
+        start..end.max(start + 1)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EditDirection {
+    Forward,
+    Backward,
 }
 
 impl Clone for Buffer {
@@ -769,6 +945,8 @@ impl Clone for Buffer {
             history_state: self.history_state,
             clean_history_state: self.clean_history_state,
             next_history_state: self.next_history_state,
+            line_change_epoch: self.line_change_epoch,
+            changed_lines: self.changed_lines.clone(),
             revision: self.revision,
             last_change: self.last_change,
             undo_stack: self.undo_stack.clone(),
@@ -779,6 +957,8 @@ impl Clone for Buffer {
             }),
             #[cfg(test)]
             line_column_graphemes_visited: Cell::new(0),
+            #[cfg(test)]
+            line_change_range_probes: Cell::new(0),
         }
     }
 }
@@ -1723,7 +1903,7 @@ fn ensure_parent_directory_exists(path: &Path) -> io::Result<()> {
 mod tests {
     use super::{
         disk_stamp, temp_path_for, write_atomically_with, write_atomically_with_metadata, Buffer,
-        BufferChange,
+        BufferChange, ChangedLines,
     };
     use std::{
         fs::{self, FileTimes},
@@ -1867,6 +2047,7 @@ mod tests {
         assert!(matches!(buffer.reload(), Err(super::ReloadError::Dirty)));
         assert_eq!(buffer.text(), "local before");
         assert!(buffer.is_dirty());
+        assert!(buffer.line_changed(0));
         remove_dir(dir);
     }
 
@@ -1888,6 +2069,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "external change");
         assert!(buffer.is_dirty());
         assert!(buffer.disk_changed());
+        assert!(buffer.line_changed(0));
         remove_dir(dir);
     }
 
@@ -1944,7 +2126,7 @@ mod tests {
     }
 
     #[test]
-    fn line_changed_compares_current_text_to_the_saved_baseline() {
+    fn line_changed_tracks_edits_until_the_next_clean_checkpoint() {
         let dir = test_dir("line-changed");
         let path = dir.join("notes.txt");
         fs::write(&path, "alpha\nbeta\n").unwrap();
@@ -1960,6 +2142,28 @@ mod tests {
 
         buffer.save().unwrap();
 
+        assert!(!buffer.line_changed(0));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn separately_recreated_saved_text_remains_marked_until_undo_or_save() {
+        let dir = test_dir("line-changed-recreated-text");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(0, "x");
+        buffer.delete(0..1);
+
+        assert_eq!(buffer.text(), "alpha\n");
+        assert!(buffer.is_dirty());
+        assert!(buffer.line_changed(0));
+
+        buffer.undo();
+        assert!(buffer.line_changed(0));
+        buffer.undo();
+        assert!(!buffer.is_dirty());
         assert!(!buffer.line_changed(0));
         remove_dir(dir);
     }
@@ -1986,6 +2190,153 @@ mod tests {
         assert!(!deleted.line_changed(0));
         assert!(deleted.line_changed(1));
         assert!(deleted.line_changed(2));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn changed_line_ranges_merge_and_lookup_without_line_text() {
+        let mut changes = ChangedLines::default();
+        changes.mark(8..10);
+        changes.mark(2..4);
+        changes.mark(4..8);
+        changes.mark(20..usize::MAX);
+
+        assert_eq!(changes.ranges, vec![2..10, 20..usize::MAX]);
+        assert!(!changes.contains(1));
+        assert!(changes.contains(2));
+        assert!(changes.contains(9));
+        assert!(!changes.contains(10));
+        assert!(changes.contains(1_000_000));
+    }
+
+    #[test]
+    fn line_changes_follow_partial_undo_and_redo() {
+        let dir = test_dir("line-changed-partial-history");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(0, "x");
+        buffer.insert(buffer.line_start_char(2), "y");
+        assert!(buffer.line_changed(0));
+        assert!(!buffer.line_changed(1));
+        assert!(buffer.line_changed(2));
+
+        buffer.undo();
+        assert!(buffer.line_changed(0));
+        assert!(!buffer.line_changed(2));
+
+        buffer.redo();
+        assert!(buffer.line_changed(0));
+        assert!(buffer.line_changed(2));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn new_edit_after_undo_keeps_only_the_active_history_markers() {
+        let dir = test_dir("line-changed-new-history-branch");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(0, "x");
+        buffer.insert(buffer.line_start_char(2), "y");
+        buffer.undo();
+        buffer.insert(buffer.line_start_char(1), "z");
+
+        assert!(buffer.line_changed(0));
+        assert!(buffer.line_changed(1));
+        assert!(!buffer.line_changed(2));
+        assert_eq!(buffer.redo(), None);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_rebases_line_changes_without_discarding_history() {
+        let dir = test_dir("line-changed-save-history");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\nbeta\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(0, "x");
+        buffer.insert(buffer.line_start_char(1), "y");
+        buffer.save().unwrap();
+        assert!(!buffer.line_changed(0));
+        assert!(!buffer.line_changed(1));
+
+        buffer.undo();
+        assert!(!buffer.line_changed(0));
+        assert!(buffer.line_changed(1));
+
+        buffer.undo();
+        assert!(buffer.line_changed(0));
+        assert!(buffer.line_changed(1));
+
+        buffer.redo();
+        assert!(!buffer.line_changed(0));
+        assert!(buffer.line_changed(1));
+
+        buffer.redo();
+        assert!(!buffer.line_changed(0));
+        assert!(!buffer.line_changed(1));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_rebases_structural_line_changes_for_undo_and_redo() {
+        let dir = test_dir("line-changed-save-structural-history");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(buffer.line_start_char(1), "new\n");
+        buffer.save().unwrap();
+        buffer.undo();
+
+        assert!(!buffer.line_changed(0));
+        assert!(buffer.line_changed(1));
+        assert!(buffer.line_changed(2));
+        assert!(buffer.line_changed(3));
+
+        buffer.redo();
+        assert!((0..buffer.len_lines()).all(|line| !buffer.line_changed(line)));
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn reload_clears_line_changes_with_edit_history() {
+        let dir = test_dir("line-changed-reload");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\nbeta\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(0, "x");
+        assert!(buffer.line_changed(0));
+        buffer.undo();
+
+        fs::write(&path, "external\ntext\n").unwrap();
+        buffer.reload().unwrap();
+
+        assert!((0..buffer.len_lines()).all(|line| !buffer.line_changed(line)));
+        assert_eq!(buffer.undo(), None);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn cloned_buffers_keep_independent_line_changes() {
+        let dir = test_dir("line-changed-clone-isolation");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\nbeta\n").unwrap();
+        let mut original = Buffer::open(&path).unwrap();
+        original.insert(0, "x");
+        let mut cloned = original.clone();
+
+        cloned.insert(cloned.line_start_char(1), "y");
+        original.undo();
+
+        assert!(!original.line_changed(0));
+        assert!(!original.line_changed(1));
+        assert!(cloned.line_changed(0));
+        assert!(cloned.line_changed(1));
         remove_dir(dir);
     }
 
