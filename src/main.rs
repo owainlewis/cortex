@@ -10,6 +10,7 @@ mod keymap;
 mod performance;
 mod picker;
 pub mod renderer;
+mod signals;
 mod terminal;
 mod text;
 mod update;
