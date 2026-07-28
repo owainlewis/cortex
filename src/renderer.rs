@@ -1627,6 +1627,41 @@ mod tests {
     }
 
     #[test]
+    fn frame_marks_a_change_deep_in_a_large_buffer() {
+        let text = (0..100_000)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>();
+        let mut buffer = buffer_with_text("large.txt", &text);
+        let changed_line = 90_000;
+        let changed_start = buffer.line_start_char(changed_line);
+        buffer.insert(changed_start, "x");
+        let mut view = View::new();
+        view.set_point(changed_start, &buffer);
+        view.ensure_point_visible(&buffer, 5);
+
+        let frame = build_frame(
+            &buffer,
+            &view,
+            TerminalSize { cols: 40, rows: 6 },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(frame.lines.len(), 5);
+        assert_eq!(
+            frame
+                .lines
+                .iter()
+                .filter(|line| line.gutter.starts_with('+'))
+                .count(),
+            1
+        );
+        assert!(frame.lines[4].text.starts_with("xline 90000"));
+        assert!(frame.lines[4].gutter.starts_with("+>"));
+    }
+
+    #[test]
     fn frame_truncates_long_lines_and_modeline_to_width() {
         let mut buffer = buffer_with_text("notes.txt", "abcdef");
         buffer.insert(0, "z");
