@@ -386,6 +386,10 @@ fn read_directory_entries(directory: &Path) -> io::Result<Vec<DirectoryEntry>> {
             DirectoryEntryKind::File
         } else if file_type.is_dir() {
             DirectoryEntryKind::Directory
+        } else if file_type.is_symlink()
+            && fs::metadata(entry.path()).is_ok_and(|metadata| metadata.is_file())
+        {
+            DirectoryEntryKind::File
         } else {
             DirectoryEntryKind::Other
         };
@@ -552,9 +556,10 @@ mod tests {
         parent_directory, DirectoryEntry, DirectoryEntryKind, DirectoryPicker,
         DirectoryPickerAction, DirectoryPickerRow,
     };
-    use crate::input::Key;
+    use crate::{buffer::Buffer, input::Key};
     use std::{
         fs,
+        os::unix::fs::symlink,
         path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
         time::{SystemTime, UNIX_EPOCH},
@@ -577,6 +582,76 @@ mod tests {
         assert_eq!(names, vec!["alpha", "Beta.txt", "zeta.txt"]);
         assert!(rows[0].is_directory());
         assert_eq!(rows[1].kind(), DirectoryEntryKind::File);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn regular_file_symlinks_open_like_direct_paths() {
+        let dir = test_dir("file-symlink");
+        let target = dir.join("target.txt");
+        let link = dir.join("link.txt");
+        fs::write(&target, "linked content").unwrap();
+        symlink("target.txt", &link).unwrap();
+
+        let mut picker = DirectoryPicker::read(&dir).unwrap();
+        let link_index = picker
+            .visible_rows()
+            .iter()
+            .position(|row| row.path() == link)
+            .unwrap();
+        for _ in 0..link_index {
+            picker.handle_key(Key::Down);
+        }
+
+        assert_eq!(
+            picker.selected_row().unwrap().kind(),
+            DirectoryEntryKind::File
+        );
+        assert_eq!(
+            picker.handle_key(Key::Enter),
+            DirectoryPickerAction::Open(link.clone())
+        );
+        assert_eq!(Buffer::open(&link).unwrap().text(), "linked content");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn non_file_symlinks_remain_non_openable() {
+        let dir = test_dir("non-file-symlinks");
+        let directory = dir.join("directory");
+        fs::create_dir(&directory).unwrap();
+        symlink("missing", dir.join("broken-link")).unwrap();
+        symlink("cycle-link", dir.join("cycle-link")).unwrap();
+        symlink("directory", dir.join("directory-link")).unwrap();
+        symlink("/dev/null", dir.join("device-link")).unwrap();
+
+        let picker = DirectoryPicker::read(&dir).unwrap();
+
+        for name in ["broken-link", "cycle-link", "device-link", "directory-link"] {
+            let mut picker = picker.clone();
+            let index = picker
+                .visible_rows()
+                .iter()
+                .position(|row| row.name() == name)
+                .unwrap();
+            for _ in 0..index {
+                picker.handle_key(Key::Down);
+            }
+
+            assert_eq!(
+                picker.selected_row().unwrap().kind(),
+                DirectoryEntryKind::Other
+            );
+            assert_eq!(
+                picker.handle_key(Key::Enter),
+                DirectoryPickerAction::Continue
+            );
+            assert_eq!(
+                picker.status_message(),
+                Some("Only regular files and directories can be opened")
+            );
+        }
+
         fs::remove_dir_all(dir).unwrap();
     }
 
