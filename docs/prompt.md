@@ -36,8 +36,9 @@ Project status rules:
 - Keep the project board current as work progresses.
 - Before starting each issue, confirm the project item exists on GitHub Project #13.
 - When you start active work on an issue, move its project status to `In Progress`.
-- Leave the issue in `In Progress` while planning, coding, fixing, running local checks, and preparing the PR.
-- Move the issue to `Reviewing` after its pull request opens and while it awaits review, required checks, fixes from review, or merge.
+- Leave the issue in `In Progress` while planning, coding, fixing, running local checks, preparing the PR, or actively addressing review feedback and failed checks.
+- Move the issue to `Reviewing` after its pull request opens and while it awaits review, required checks, a decision, or merge.
+- If review feedback or failed checks require active changes, move the issue back to `In Progress`, then return it to `Reviewing` after pushing the fixes.
 - Move the issue to `Done` only after the PR has been merged into `main`, acceptance criteria are verified, and the issue is closed.
 - If an issue becomes blocked, leave it in `In Progress` and add a GitHub issue comment explaining the blocker, unless the work never actually started.
 - If the work never actually started, leave the item in `Todo`.
@@ -125,7 +126,7 @@ Workflow for each issue:
 8. Merge
 - You are responsible for merging.
 - Before merging, ensure tests pass locally and GitHub checks are passing if checks exist.
-- If checks fail, inspect and fix them.
+- If review feedback or checks require fixes, move the project item to `In Progress`, make and verify the changes, then return it to `Reviewing` after pushing.
 - Use squash merge unless the repo already indicates a different preference.
 - After the PR is merged and the issue is closed with its acceptance criteria verified, move the project item to `Done`.
 - After merge, update local main before starting the next issue.
