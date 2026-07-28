@@ -7,7 +7,7 @@ Add opt-in local performance checks for representative large-buffer editor work 
 ## Acceptance criteria
 
 - One documented command runs all local performance checks.
-- Generated fixtures cover repeated rope insert and delete work, large-file viewport rendering, visible Rust and Markdown highlighting, and simple large-buffer search.
+- Generated fixtures cover repeated rope insert and delete work, large-file viewport rendering, deep visible Rust and Markdown highlighting, and simple large-buffer search.
 - Pass and fail decisions use deterministic correctness or structural output bounds.
 - Elapsed times are diagnostic only and are never universal thresholds.
 - Normal `cargo test` does not run the slower checks.

@@ -52,6 +52,14 @@ fn contains_kind(lines: &[Vec<crate::highlighter::HighlightSpan>], kind: Highlig
         .any(|highlight| highlight.kind == kind)
 }
 
+fn highlight_deep_viewport(
+    highlighter: &mut SyntaxHighlighter,
+    buffer: &Buffer,
+) -> Vec<Vec<crate::highlighter::HighlightSpan>> {
+    let end = buffer.len_lines().saturating_sub(1);
+    highlighter.highlight_visible_lines(buffer, end.saturating_sub(40)..end)
+}
+
 #[test]
 #[ignore = "run with the documented local performance command"]
 fn large_rope_edits() {
@@ -134,8 +142,8 @@ fn large_visible_highlighting() {
 
     let (rust_lines, markdown_lines) = measured("large visible highlighting", || {
         (
-            highlighter.highlight_visible_lines(&rust_fixture.buffer, 0..40),
-            highlighter.highlight_visible_lines(&markdown_fixture.buffer, 0..40),
+            highlight_deep_viewport(&mut highlighter, &rust_fixture.buffer),
+            highlight_deep_viewport(&mut highlighter, &markdown_fixture.buffer),
         )
     });
 
