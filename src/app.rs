@@ -117,12 +117,15 @@ fn run_editor<W: io::Write>(terminal: &mut TerminalSession<W>, buffer: Buffer) -
                     };
                     match apply_app_action(&mut editor, &mut app_state, action) {
                         AppControl::Continue => {}
-                        AppControl::BrowseDirectory(path) => browse_directory_in_editor(
-                            terminal,
-                            &mut editor,
-                            &path,
-                            &mut app_state,
-                        )?,
+                        AppControl::BrowseDirectory(path) => {
+                            browse_directory_in_editor(
+                                terminal,
+                                &mut editor,
+                                &path,
+                                &mut app_state,
+                            )?;
+                            renderer.invalidate();
+                        }
                         AppControl::Quit => break,
                     }
                     render_editor(
