@@ -8,7 +8,7 @@ description = "A fast, lightweight, macOS-only terminal code editor."
 
 [dependencies]
 crossterm = "0.27"
-getrandom = "0.3"
+getrandom = "0.4"
 libc = "0.2"
 ropey = "1.6"
 signal-hook = "0.3"
