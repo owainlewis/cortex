@@ -201,7 +201,6 @@ The directory picker can expand directories, but it is still a minimal picker.
 The slash command `/open <path>` opens files only, not directories.
 There are no splits, tabs, command registry, config, plugins, LSP, AI integration, or embedded terminal pane yet.
 Long lines are clipped to the terminal width instead of wrapped.
-The renderer uses a simple full-screen redraw rather than diffed rendering.
 Syntax highlighting can lose context when the viewport begins inside a multiline construct.
 Unicode grapheme handling is incomplete.
 Saving an existing file does not yet guarantee preservation of permissions, macOS metadata, or symlink behavior.

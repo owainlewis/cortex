@@ -290,6 +290,7 @@ struct CellFrame {
     size: TerminalSize,
     cells: Vec<Cell>,
     cursor: CursorPosition,
+    requires_full_redraw: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -461,11 +462,11 @@ impl Renderer {
     fn paint<W: Write>(&self, writer: &mut W, frame: CellFrame) -> io::Result<()> {
         queue!(writer, cursor::Hide)?;
 
-        let full_redraw = self
-            .last_frame
-            .borrow()
-            .as_ref()
-            .is_none_or(|previous| previous.size != frame.size);
+        let full_redraw = self.last_frame.borrow().as_ref().is_none_or(|previous| {
+            previous.size != frame.size
+                || previous.requires_full_redraw
+                || frame.requires_full_redraw
+        });
         if full_redraw {
             queue!(writer, terminal::Clear(ClearType::All))?;
         }
@@ -862,6 +863,12 @@ fn build_picker_frame(picker: &DirectoryPicker, size: TerminalSize) -> PickerFra
 fn paint_editor_frame(frame: Frame, size: TerminalSize) -> CellFrame {
     let width = size.cols as usize;
     let mut cells = Vec::with_capacity(width.saturating_mul(size.rows as usize));
+    let requires_full_redraw = frame
+        .lines
+        .iter()
+        .flat_map(|line| line.segments.iter())
+        .any(|segment| has_context_dependent_width(&segment.text))
+        || has_context_dependent_width(&frame.modeline);
 
     for line in &frame.lines {
         let row_start = cells.len();
@@ -911,12 +918,18 @@ fn paint_editor_frame(frame: Frame, size: TerminalSize) -> CellFrame {
         size,
         cells,
         cursor: frame.cursor,
+        requires_full_redraw,
     }
 }
 
 fn paint_picker_frame(frame: PickerFrame, size: TerminalSize) -> CellFrame {
     let width = size.cols as usize;
     let mut cells = Vec::with_capacity(width.saturating_mul(size.rows as usize));
+    let requires_full_redraw = frame
+        .lines
+        .iter()
+        .any(|line| has_context_dependent_width(&line.text))
+        || has_context_dependent_width(&frame.modeline);
 
     for line in &frame.lines {
         let row_start = cells.len();
@@ -950,6 +963,7 @@ fn paint_picker_frame(frame: PickerFrame, size: TerminalSize) -> CellFrame {
         size,
         cells,
         cursor: frame.cursor,
+        requires_full_redraw,
     }
 }
 
@@ -1018,6 +1032,19 @@ fn fill_row(cells: &mut Vec<Cell>, row_start: usize, width: usize, style: TextSt
             style,
         },
     );
+}
+
+fn has_context_dependent_width(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(
+            ch as u32,
+            0x200C..=0x200D
+                | 0xFE00..=0xFE0F
+                | 0x1F3FB..=0x1F3FF
+                | 0xE0020..=0xE007F
+                | 0xE0100..=0xE01EF
+        )
+    })
 }
 
 fn keycast_text(keycast: &str) -> String {
@@ -1403,10 +1430,10 @@ fn is_wide(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_frame, build_frame_with_selection, build_picker_frame, fit_line_cells,
-        fit_status_line, measure_cells, plain_style, Cell, CellContent, CellFrame, CursorPosition,
-        Frame, ModelineStyle, Renderer, ScreenLineKind, StatusKind, TerminalSize,
-        COMMAND_LINE_HINT, THEME,
+        build_frame, build_frame_with_selection, build_picker_frame, fill_row, fit_line_cells,
+        fit_status_line, has_context_dependent_width, measure_cells, plain_style, push_cells,
+        CellFrame, CursorPosition, Frame, ModelineStyle, Renderer, ScreenLineKind, StatusKind,
+        TerminalSize, COMMAND_LINE_HINT, THEME,
     };
     use crate::{
         buffer::Buffer,
@@ -1871,6 +1898,25 @@ mod tests {
     }
 
     #[test]
+    fn paint_keeps_full_redraw_for_context_dependent_widths() {
+        let renderer = Renderer::new();
+        let size = TerminalSize { cols: 10, rows: 1 };
+        let mut output = Vec::new();
+
+        renderer
+            .paint(&mut output, painted_text_frame("👨‍💻A", size))
+            .unwrap();
+        output.clear();
+        renderer
+            .paint(&mut output, painted_text_frame("👨‍💻B", size))
+            .unwrap();
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(output.contains("\x1b[2J"));
+        assert!(output.contains("👨‍💻B"));
+    }
+
+    #[test]
     fn cursor_movement_does_not_rewrite_unchanged_buffer_text() {
         let buffer = buffer_with_text("notes.txt", "alpha\n");
         let renderer = Renderer::new();
@@ -2011,16 +2057,14 @@ mod tests {
 
     fn painted_text_frame(text: &str, size: TerminalSize) -> CellFrame {
         let style = plain_style(THEME.editor_fg);
+        let mut cells = Vec::new();
+        push_cells(&mut cells, text, style, size.cols as usize);
+        fill_row(&mut cells, 0, size.cols as usize, style);
         CellFrame {
             size,
-            cells: text
-                .chars()
-                .map(|ch| Cell {
-                    content: CellContent::Text(ch),
-                    style,
-                })
-                .collect(),
+            cells,
             cursor: CursorPosition { col: 0, row: 0 },
+            requires_full_redraw: has_context_dependent_width(text),
         }
     }
 
