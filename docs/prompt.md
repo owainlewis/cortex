@@ -39,17 +39,68 @@ Project status rules:
 - Leave the issue in `In Progress` while planning, coding, fixing, running local checks, preparing the PR, or actively addressing review feedback and failed checks.
 - Move the issue to `Reviewing` after its pull request opens and while it awaits review, required checks, a decision, or merge.
 - If review feedback or failed checks require active changes, move the issue back to `In Progress`, then return it to `Reviewing` after pushing the fixes.
-- Move the issue to `Done` only after the PR has been merged into `main`, acceptance criteria are verified, and the issue is closed.
+- Move the issue to `Done` only after any required pull request or direct commit has landed on `main`, pre-finalization acceptance criteria are verified, and the issue is closed.
+- Archive the Project item immediately after it reaches `Done`.
+- A completed issue must remain in issue and Project archive history, not in the active Project table.
 - If an issue becomes blocked, leave it in `In Progress` and add a GitHub issue comment explaining the blocker, unless the work never actually started.
 - If the work never actually started, leave the item in `Todo`.
 - If an open PR is blocked on review, checks, a decision, or merge, leave the item in `Reviewing`.
 - In the final report for each issue, include the final project status.
 
 Project status update mechanics:
-- Use `gh project item-list 13 --owner owainlewis --format json` to find the item ID for the issue.
-- Use `gh project field-list 13 --owner owainlewis --format json` to find the `Status` field ID and option IDs.
+- Use `gh project view 13 --owner owainlewis --format json --jq '.id'` to find the Project node ID.
+- Use `gh project item-list 13 --owner owainlewis --limit 1000 --format json --jq '.items[] | select(.content.type == "Issue" and .content.repository == "owainlewis/cortex" and .content.number == <issue-number>) | .id'` to find the exact item ID for the issue.
+- Use `gh project field-list 13 --owner owainlewis --limit 100 --format json --jq '.fields[] | select(.name == "Status")'` to find the `Status` field ID and option IDs.
+- Confirm each Project, item, and field lookup returns exactly one result before changing state.
 - Use `gh project item-edit --project-id <project-id> --id <item-id> --field-id <status-field-id> --single-select-option-id <option-id>` to update the status.
 - Do not guess IDs if the command output is available.
+
+Completion and archival mechanics:
+- Use this finalization path for every successful completion, including a merged pull request, a direct commit, and a documentation-only or governance closure.
+- Verify the completed result on `main` against every acceptance criterion that does not depend on issue closure or Project archival.
+- Post an issue comment with the pull request or commit link when applicable, checks run, concrete acceptance evidence, and any finalization checks that must follow closure.
+- Ensure the issue is closed.
+- If a linked pull request already closed the issue, do not reopen it.
+- If the issue is still open, close it only after posting the evidence comment.
+- Find the current Project item, `Status` field, and `Done` option IDs from the commands above.
+- Move the item to `Done` if it is not already there, without changing its other fields.
+- Archive that exact item with `gh project item-archive 13 --owner owainlewis --id <item-id>`.
+- Do not delete the item, reopen the issue, or change labels, milestones, or unrelated Project fields.
+- Query Project items with `archivedStates: [ARCHIVED]` and confirm the exact item is still closed, has status `Done`, and has `isArchived: true`.
+- Compare all paginated repository open issue URLs with all paginated active Project issue URLs in both directions:
+
+```sh
+diff -u \
+  <(gh api graphql --paginate -f query='
+    query($endCursor: String) {
+      repository(owner: "owainlewis", name: "cortex") {
+        issues(first: 100, after: $endCursor, states: OPEN) {
+          nodes { url }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }' --jq '.data.repository.issues.nodes[].url' | sort) \
+  <(gh api graphql --paginate -f query='
+    query($endCursor: String) {
+      user(login: "owainlewis") {
+        projectV2(number: 13) {
+          items(
+            first: 100
+            after: $endCursor
+            archivedStates: [NOT_ARCHIVED]
+          ) {
+            nodes { content { ... on Issue { url } } }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    }' --jq '.data.user.projectV2.items.nodes[].content.url // empty' | sort)
+```
+
+- A successful comparison has no diff and equal counts.
+- If the sets differ, report the URLs in each difference and stop before starting another issue.
+- Never archive an open or future issue to force equality.
+- Post the archived-state and equality results on the closed issue or in the coordinator’s final report.
 
 Workflow for each issue:
 
@@ -128,7 +179,7 @@ Workflow for each issue:
 - Before merging, ensure tests pass locally and GitHub checks are passing if checks exist.
 - If review feedback or checks require fixes, move the project item to `In Progress`, make and verify the changes, then return it to `Reviewing` after pushing.
 - Use squash merge unless the repo already indicates a different preference.
-- After the PR is merged and the issue is closed with its acceptance criteria verified, move the project item to `Done`.
+- After the PR is merged, run the complete finalization path under Completion and archival mechanics.
 - After merge, update local main before starting the next issue.
 
 Execution order:
