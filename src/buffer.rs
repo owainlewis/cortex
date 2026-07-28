@@ -1,6 +1,10 @@
 use crate::text;
 use ropey::{Rope, RopeSlice};
+#[cfg(test)]
+use std::cell::Cell;
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     ffi::{CString, OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, BufWriter, Seek, Write},
@@ -16,6 +20,8 @@ use std::{
 
 const TEMP_FILE_CREATE_ATTEMPTS: usize = 128;
 const FILE_READ_ATTEMPTS: usize = 3;
+const MAX_CACHED_LINE_COLUMNS: usize = 256;
+const MAX_COLUMN_CHECKPOINTS_PER_LINE: usize = 4_096;
 static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
 type Acl = *mut libc::c_void;
@@ -44,6 +50,58 @@ pub struct Buffer {
     revision: u64,
     undo_stack: Vec<Edit>,
     redo_stack: Vec<Edit>,
+    line_column_cache: RefCell<LineColumnCache>,
+    #[cfg(test)]
+    line_column_graphemes_visited: Cell<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineWindow {
+    pub text: String,
+    pub start_char: usize,
+    pub start_byte: usize,
+    pub start_column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineColumnAnchor {
+    char_index: usize,
+    column: usize,
+    requested_column: usize,
+}
+
+#[derive(Debug)]
+struct LineColumnAnchors {
+    checkpoints: Vec<LineColumnAnchor>,
+    recent_column: LineColumnAnchor,
+    recent_char: LineColumnAnchor,
+}
+
+impl Default for LineColumnAnchors {
+    fn default() -> Self {
+        let start = LineColumnAnchor {
+            char_index: 0,
+            column: 0,
+            requested_column: 0,
+        };
+        Self {
+            checkpoints: vec![start],
+            recent_column: start,
+            recent_char: start,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RecentAnchor {
+    Column,
+    Char,
+}
+
+#[derive(Debug, Default)]
+struct LineColumnCache {
+    revision: u64,
+    lines: HashMap<usize, LineColumnAnchors>,
 }
 
 #[derive(Debug)]
@@ -132,6 +190,9 @@ impl Buffer {
             revision: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            line_column_cache: RefCell::new(LineColumnCache::default()),
+            #[cfg(test)]
+            line_column_graphemes_visited: Cell::new(0),
         })
     }
 
@@ -201,11 +262,30 @@ impl Buffer {
         line.slice(..content_len.min(max_chars)).to_string()
     }
 
-    pub fn line_prefix_for_width(&self, line_idx: usize, width: usize) -> String {
+    pub fn line_window(
+        &self,
+        line_idx: usize,
+        requested_column: usize,
+        width: usize,
+    ) -> LineWindow {
         let line_idx = self.clamp_line_idx(line_idx);
         let line = self.text.line(line_idx);
         let content = line.slice(..line_content_len_chars(line));
-        text::rope_prefix_for_width(content, width)
+        let (local_start, start_column) =
+            self.line_column_at_or_after(line_idx, content, requested_column);
+        let left_padding = start_column.saturating_sub(requested_column);
+        let text = text::rope_prefix_for_width(
+            content.slice(local_start..),
+            width.saturating_sub(left_padding),
+            start_column,
+        );
+
+        LineWindow {
+            text,
+            start_char: self.line_start_char(line_idx) + local_start,
+            start_byte: content.char_to_byte(local_start),
+            start_column,
+        }
     }
 
     pub fn grapheme_boundary_at_or_before(&self, char_idx: usize) -> usize {
@@ -232,7 +312,9 @@ impl Buffer {
         let char_idx = self.grapheme_boundary_at_or_before(char_idx);
         let line_idx = self.line_for_char(char_idx);
         let line_start = self.line_start_char(line_idx);
-        text::measure_rope_width(self.text.slice(line_start..char_idx), usize::MAX)
+        let line = self.text.line(line_idx);
+        let content = line.slice(..line_content_len_chars(line));
+        self.line_column_for_char(line_idx, content, char_idx - line_start)
     }
 
     pub fn char_at_display_column(&self, line_idx: usize, column: usize) -> usize {
@@ -240,6 +322,191 @@ impl Buffer {
         let line = self.text.line(self.clamp_line_idx(line_idx));
         let content = line.slice(..line_content_len_chars(line));
         line_start + text::rope_char_index_at_column(content, column)
+    }
+
+    pub fn char_at_or_after_display_column(
+        &self,
+        line_idx: usize,
+        column: usize,
+    ) -> (usize, usize) {
+        let line_idx = self.clamp_line_idx(line_idx);
+        let line_start = self.line_start_char(line_idx);
+        let line = self.text.line(line_idx);
+        let content = line.slice(..line_content_len_chars(line));
+        let (local_char, actual_column) = self.line_column_at_or_after(line_idx, content, column);
+        (line_start + local_char, actual_column)
+    }
+
+    fn line_column_at_or_after(
+        &self,
+        line_idx: usize,
+        content: RopeSlice<'_>,
+        target_column: usize,
+    ) -> (usize, usize) {
+        let start = {
+            let mut cache = self.line_column_cache.borrow_mut();
+            if cache.revision != self.revision {
+                cache.revision = self.revision;
+                cache.lines.clear();
+            }
+            if !cache.lines.contains_key(&line_idx) && cache.lines.len() >= MAX_CACHED_LINE_COLUMNS
+            {
+                if let Some(stale_line) = cache.lines.keys().next().copied() {
+                    cache.lines.remove(&stale_line);
+                }
+            }
+            let anchors = cache.lines.entry(line_idx).or_default();
+            if target_column >= anchors.recent_column.requested_column
+                && target_column <= anchors.recent_column.column
+            {
+                anchors.recent_column
+            } else {
+                let checkpoint_idx = anchors
+                    .checkpoints
+                    .partition_point(|anchor| anchor.column <= target_column)
+                    .saturating_sub(1);
+                let checkpoint = anchors.checkpoints[checkpoint_idx];
+                if anchors.recent_column.column <= target_column
+                    && anchors.recent_column.column > checkpoint.column
+                {
+                    anchors.recent_column
+                } else {
+                    checkpoint
+                }
+            }
+        };
+
+        let (relative_char, column, checkpoints, _visited) = text::rope_column_at_or_after_from(
+            content.slice(start.char_index..),
+            target_column,
+            start.column,
+        );
+        #[cfg(test)]
+        self.line_column_graphemes_visited.set(
+            self.line_column_graphemes_visited
+                .get()
+                .saturating_add(_visited),
+        );
+
+        let anchor = LineColumnAnchor {
+            char_index: start.char_index + relative_char,
+            column,
+            requested_column: target_column,
+        };
+        self.cache_line_column_result(line_idx, start, checkpoints, anchor, RecentAnchor::Column);
+
+        (anchor.char_index, anchor.column)
+    }
+
+    fn line_column_for_char(
+        &self,
+        line_idx: usize,
+        content: RopeSlice<'_>,
+        target_char: usize,
+    ) -> usize {
+        let start = {
+            let mut cache = self.line_column_cache.borrow_mut();
+            if cache.revision != self.revision {
+                cache.revision = self.revision;
+                cache.lines.clear();
+            }
+            if !cache.lines.contains_key(&line_idx) && cache.lines.len() >= MAX_CACHED_LINE_COLUMNS
+            {
+                if let Some(stale_line) = cache.lines.keys().next().copied() {
+                    cache.lines.remove(&stale_line);
+                }
+            }
+            let anchors = cache.lines.entry(line_idx).or_default();
+            if anchors.recent_char.char_index == target_char {
+                anchors.recent_char
+            } else {
+                let checkpoint_idx = anchors
+                    .checkpoints
+                    .partition_point(|anchor| anchor.char_index <= target_char)
+                    .saturating_sub(1);
+                let checkpoint = anchors.checkpoints[checkpoint_idx];
+                if anchors.recent_char.char_index <= target_char
+                    && anchors.recent_char.char_index > checkpoint.char_index
+                {
+                    anchors.recent_char
+                } else {
+                    checkpoint
+                }
+            }
+        };
+
+        let (column, checkpoints, _visited) = text::rope_column_for_char_from(
+            content.slice(start.char_index..),
+            target_char.saturating_sub(start.char_index),
+            start.column,
+        );
+        #[cfg(test)]
+        self.line_column_graphemes_visited.set(
+            self.line_column_graphemes_visited
+                .get()
+                .saturating_add(_visited),
+        );
+        let anchor = LineColumnAnchor {
+            char_index: target_char,
+            column,
+            requested_column: column,
+        };
+        self.cache_line_column_result(line_idx, start, checkpoints, anchor, RecentAnchor::Char);
+        column
+    }
+
+    fn cache_line_column_result(
+        &self,
+        line_idx: usize,
+        start: LineColumnAnchor,
+        checkpoints: Vec<(usize, usize)>,
+        anchor: LineColumnAnchor,
+        recent_anchor: RecentAnchor,
+    ) {
+        let mut cache = self.line_column_cache.borrow_mut();
+        let anchors = cache.lines.entry(line_idx).or_default();
+        anchors
+            .checkpoints
+            .extend(
+                checkpoints
+                    .into_iter()
+                    .map(|(char_index, column)| LineColumnAnchor {
+                        char_index: start.char_index + char_index,
+                        column,
+                        requested_column: column,
+                    }),
+            );
+        anchors
+            .checkpoints
+            .sort_unstable_by_key(|anchor| anchor.column);
+        anchors.checkpoints.dedup();
+        if anchors.checkpoints.len() > MAX_COLUMN_CHECKPOINTS_PER_LINE {
+            let stride = anchors
+                .checkpoints
+                .len()
+                .div_ceil(MAX_COLUMN_CHECKPOINTS_PER_LINE);
+            let last = anchors.checkpoints.last().copied();
+            anchors.checkpoints = anchors
+                .checkpoints
+                .iter()
+                .copied()
+                .step_by(stride)
+                .collect();
+            if let Some(last) =
+                last.filter(|last| anchors.checkpoints.last().is_none_or(|item| *item != *last))
+            {
+                anchors.checkpoints.push(last);
+            }
+        }
+        match recent_anchor {
+            RecentAnchor::Column => anchors.recent_column = anchor,
+            RecentAnchor::Char => anchors.recent_char = anchor,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_line_column_graphemes_visited(&self) -> usize {
+        self.line_column_graphemes_visited.replace(0)
     }
 
     pub fn line_changed(&self, line_idx: usize) -> bool {
@@ -479,6 +746,12 @@ impl Clone for Buffer {
             revision: self.revision,
             undo_stack: self.undo_stack.clone(),
             redo_stack: self.redo_stack.clone(),
+            line_column_cache: RefCell::new(LineColumnCache {
+                revision: self.revision,
+                lines: HashMap::new(),
+            }),
+            #[cfg(test)]
+            line_column_graphemes_visited: Cell::new(0),
         }
     }
 }
@@ -2547,6 +2820,53 @@ mod tests {
         assert_eq!(buffer.text_range(1..4), "λcd");
         assert_eq!(buffer.text_range(4..99), "e");
         assert_eq!(buffer.text_range(4..2), "");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn line_window_skips_a_tab_that_crosses_the_left_edge() {
+        let dir = test_dir("line-window-tab");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "\t界xyz").unwrap();
+        let buffer = Buffer::open(&path).unwrap();
+
+        let window = buffer.line_window(0, 2, 5);
+        buffer.take_line_column_graphemes_visited();
+        let repeated = buffer.line_window(0, 2, 5);
+        let repeated_walk = buffer.take_line_column_graphemes_visited();
+
+        assert_eq!(window.text, "界x");
+        assert_eq!(repeated.text, "界x");
+        assert_eq!(window.start_char, 1);
+        assert_eq!(window.start_byte, 1);
+        assert_eq!(window.start_column, 4);
+        assert_eq!(repeated_walk, 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn line_window_copies_only_the_visible_long_line_suffix() {
+        let dir = test_dir("line-window-bounded");
+        let path = dir.join("notes.txt");
+        fs::write(&path, format!("{}visible-tail", "x".repeat(1_000_000))).unwrap();
+        let buffer = Buffer::open(&path).unwrap();
+
+        let window = buffer.line_window(0, 1_000_000, 7);
+        let initial_walk = buffer.take_line_column_graphemes_visited();
+        let repeated = buffer.line_window(0, 1_000_000, 7);
+        let repeated_walk = buffer.take_line_column_graphemes_visited();
+        let nearby = buffer.line_window(0, 1_000_001, 7);
+        let nearby_walk = buffer.take_line_column_graphemes_visited();
+
+        assert_eq!(window.text, "visible");
+        assert_eq!(repeated.text, "visible");
+        assert_eq!(nearby.text, "isible-");
+        assert_eq!(window.start_char, 1_000_000);
+        assert_eq!(window.start_byte, 1_000_000);
+        assert_eq!(window.start_column, 1_000_000);
+        assert_eq!(initial_walk, 1_000_000);
+        assert_eq!(repeated_walk, 0);
+        assert_eq!(nearby_walk, 1);
         fs::remove_dir_all(dir).unwrap();
     }
 }

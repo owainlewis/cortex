@@ -4,6 +4,7 @@ use crate::buffer::Buffer;
 pub struct View {
     point: usize,
     scroll_line: usize,
+    scroll_column: usize,
     preferred_column: Option<usize>,
 }
 
@@ -18,6 +19,10 @@ impl View {
 
     pub fn scroll_line(&self) -> usize {
         self.scroll_line
+    }
+
+    pub fn scroll_column(&self) -> usize {
+        self.scroll_column
     }
 
     pub fn set_point(&mut self, point: usize, buffer: &Buffer) {
@@ -55,16 +60,31 @@ impl View {
         self.clear_preferred_column();
     }
 
-    pub fn ensure_point_visible(&mut self, buffer: &Buffer, viewport_height: usize) {
-        if viewport_height == 0 {
-            return;
+    pub fn ensure_point_visible(
+        &mut self,
+        buffer: &Buffer,
+        viewport_height: usize,
+        viewport_width: usize,
+    ) {
+        let point_line = buffer.line_for_char(self.point);
+        if viewport_height > 0 {
+            if point_line < self.scroll_line {
+                self.scroll_line = point_line;
+            } else if point_line >= self.scroll_line.saturating_add(viewport_height) {
+                self.scroll_line = point_line + 1 - viewport_height;
+            }
         }
 
-        let point_line = buffer.line_for_char(self.point);
-        if point_line < self.scroll_line {
-            self.scroll_line = point_line;
-        } else if point_line >= self.scroll_line.saturating_add(viewport_height) {
-            self.scroll_line = point_line + 1 - viewport_height;
+        let point_column = buffer.display_column(self.point);
+        if viewport_width == 0 {
+            self.scroll_column = point_column;
+        } else {
+            let requested_column = point_column
+                .saturating_add(1)
+                .saturating_sub(viewport_width);
+            let (_, scroll_column) =
+                buffer.char_at_or_after_display_column(point_line, requested_column);
+            self.scroll_column = scroll_column;
         }
     }
 
@@ -328,13 +348,87 @@ mod tests {
             view.move_forward_char(&buffer);
         }
 
-        view.ensure_point_visible(&buffer, 2);
+        view.ensure_point_visible(&buffer, 2, 80);
         assert_eq!(view.scroll_line(), 1);
 
         view.move_previous_line(&buffer);
         view.move_previous_line(&buffer);
-        view.ensure_point_visible(&buffer, 2);
+        view.ensure_point_visible(&buffer, 2, 80);
         assert_eq!(view.scroll_line(), 0);
+    }
+
+    #[test]
+    fn ensure_point_visible_scrolls_right_and_back_left() {
+        let buffer = buffer_with_text("abcdefghij");
+        let mut view = View::new();
+
+        view.move_to_line_end(&buffer);
+        view.ensure_point_visible(&buffer, 1, 6);
+        assert_eq!(view.scroll_column(), 5);
+
+        view.move_backward_char(&buffer);
+        view.ensure_point_visible(&buffer, 1, 6);
+        assert_eq!(view.scroll_column(), 4);
+
+        view.move_to_line_start(&buffer);
+        view.ensure_point_visible(&buffer, 1, 6);
+        assert_eq!(view.scroll_column(), 0);
+    }
+
+    #[test]
+    fn horizontal_scroll_starts_only_at_complete_graphemes() {
+        let buffer = buffer_with_text("a界bcde");
+        let mut view = View::new();
+
+        view.move_to_line_end(&buffer);
+        view.ensure_point_visible(&buffer, 1, 6);
+
+        assert_eq!(buffer.display_column(view.point()), 7);
+        assert_eq!(view.scroll_column(), 3);
+    }
+
+    #[test]
+    fn standalone_zero_width_cluster_uses_one_scroll_cell() {
+        let buffer = buffer_with_text("\u{301}abcdef");
+        let mut view = View::new();
+
+        view.move_to_line_end(&buffer);
+        view.ensure_point_visible(&buffer, 1, 7);
+
+        assert_eq!(buffer.display_column(view.point()), 7);
+        assert_eq!(view.scroll_column(), 1);
+    }
+
+    #[test]
+    fn vertical_movement_recomputes_horizontal_visibility() {
+        let buffer = buffer_with_text("abcdefghij\nxy\nabcdefghij");
+        let mut view = View::new();
+        for _ in 0..8 {
+            view.move_forward_char(&buffer);
+        }
+        view.ensure_point_visible(&buffer, 3, 6);
+        assert_eq!(view.scroll_column(), 3);
+
+        view.move_next_line(&buffer);
+        view.ensure_point_visible(&buffer, 3, 6);
+        assert_eq!(view.scroll_column(), 0);
+
+        view.move_next_line(&buffer);
+        view.ensure_point_visible(&buffer, 3, 6);
+        assert_eq!(view.scroll_column(), 3);
+    }
+
+    #[test]
+    fn resize_recomputes_horizontal_visibility() {
+        let buffer = buffer_with_text("abcdefghij");
+        let mut view = View::new();
+        view.move_to_line_end(&buffer);
+
+        view.ensure_point_visible(&buffer, 1, 6);
+        assert_eq!(view.scroll_column(), 5);
+
+        view.ensure_point_visible(&buffer, 1, 12);
+        assert_eq!(view.scroll_column(), 0);
     }
 
     fn buffer_with_text(text: &str) -> Buffer {

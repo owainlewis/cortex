@@ -100,7 +100,11 @@ fn large_viewport_rendering() {
     measured("large viewport rendering", || {
         for line in (10_000..200_000).step_by(3_000) {
             view.set_point(fixture.buffer.line_start_char(line), &fixture.buffer);
-            view.ensure_point_visible(&fixture.buffer, renderer.viewport_height(size));
+            view.ensure_point_visible(
+                &fixture.buffer,
+                renderer.viewport_height(size),
+                renderer.viewport_width(&fixture.buffer, size),
+            );
             renderer
                 .render(
                     &mut output,
