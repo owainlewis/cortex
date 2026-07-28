@@ -5,35 +5,57 @@ use std::cell::Cell;
 use std::{
     cell::RefCell,
     collections::HashMap,
-    ffi::{CString, OsStr, OsString},
-    fs::{self, File, OpenOptions},
+    ffi::CString,
+    fs::{self, File, FileTimes, OpenOptions},
     io::{self, BufRead, BufReader, BufWriter, Seek, Write},
     ops::Range,
     os::unix::ffi::OsStrExt,
     os::unix::{
-        fs::{MetadataExt, PermissionsExt},
-        io::AsRawFd,
+        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        io::{AsRawFd, FromRawFd},
     },
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 const TEMP_FILE_CREATE_ATTEMPTS: usize = 128;
+const TEMP_FILE_PREFIX: &str = ".cortex-";
+const TEMP_FILE_EXTENSION: &str = ".tmp";
+const TEMP_SUFFIX_MAX_BYTES: usize = 32;
+const TEMP_FILE_NAME_MAX_BYTES: usize =
+    TEMP_FILE_PREFIX.len() + TEMP_SUFFIX_MAX_BYTES + TEMP_FILE_EXTENSION.len();
 const FILE_READ_ATTEMPTS: usize = 3;
 const MAX_CACHED_LINE_COLUMNS: usize = 256;
 const MAX_COLUMN_CHECKPOINTS_PER_LINE: usize = 4_096;
 static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
 type Acl = *mut libc::c_void;
+type AclFlagSet = *mut libc::c_void;
+type FileSec = *mut libc::c_void;
 
 unsafe extern "C" {
+    fn acl_add_flag_np(flagset: AclFlagSet, flag: libc::c_int) -> libc::c_int;
     fn acl_get_fd_np(fd: libc::c_int, acl_type: libc::c_int) -> Acl;
+    fn acl_get_flagset_np(object: *mut libc::c_void, flagset: *mut AclFlagSet) -> libc::c_int;
+    fn acl_init(count: libc::c_int) -> Acl;
+    fn acl_set_fd_np(fd: libc::c_int, acl: Acl, acl_type: libc::c_int) -> libc::c_int;
     fn acl_size(acl: Acl) -> libc::ssize_t;
     fn acl_copy_ext(buffer: *mut libc::c_void, acl: Acl, size: libc::ssize_t) -> libc::ssize_t;
     fn acl_free(object: *mut libc::c_void) -> libc::c_int;
+    fn filesec_free(filesec: FileSec);
+    fn filesec_init() -> FileSec;
+    fn filesec_set_property(
+        filesec: FileSec,
+        property: libc::c_int,
+        value: *const libc::c_void,
+    ) -> libc::c_int;
+    fn openx_np(path: *const libc::c_char, flags: libc::c_int, filesec: FileSec) -> libc::c_int;
 }
 
 const ACL_TYPE_EXTENDED: libc::c_int = 0x00000100;
+const ACL_FLAG_NO_INHERIT: libc::c_int = 1 << 17;
+const FILESEC_MODE: libc::c_int = 4;
+const FILESEC_ACL: libc::c_int = 5;
 
 #[derive(Debug)]
 pub struct Buffer {
@@ -1298,7 +1320,7 @@ fn write_atomically_with_metadata<S, W, M, Y, B, A, V>(
     suffix: S,
     write: W,
     preserve_metadata: M,
-    sync_file: Y,
+    mut sync_file: Y,
     validate: V,
     before_commit: B,
     after_rename: A,
@@ -1307,14 +1329,22 @@ where
     S: FnMut() -> io::Result<String>,
     W: FnOnce(&mut File) -> io::Result<()>,
     M: FnOnce(&File, &File) -> io::Result<()>,
-    Y: FnOnce(&File) -> io::Result<()>,
+    Y: FnMut(&File) -> io::Result<()>,
     B: FnOnce(&Path),
     A: FnOnce(),
     V: FnOnce() -> io::Result<()>,
 {
+    let new_file_metadata = metadata_source
+        .is_none()
+        .then(|| new_file_metadata_source(path))
+        .transpose()?;
     let (temp_path, mut temp_file) = create_temp_file(path, suffix)?;
     let result = (|| {
+        write(&mut temp_file)?;
+        sync_file(&temp_file)?;
+        validate()?;
         if let Some(source) = metadata_source {
+            let content_modified = temp_file.metadata()?.modified()?;
             preserve_metadata(source, &temp_file).map_err(|error| {
                 io::Error::new(
                     error.kind(),
@@ -1324,14 +1354,19 @@ where
                     ),
                 )
             })?;
-        }
-        write(&mut temp_file)?;
-        if let Some(source) = metadata_source {
             let mode = source.metadata()?.mode();
             temp_file.set_permissions(fs::Permissions::from_mode(mode))?;
+            // COPYFILE_METADATA copies the source timestamps. Keep the
+            // modification time produced by writing the new contents.
+            temp_file.set_times(FileTimes::new().set_modified(content_modified))?;
+            sync_file(&temp_file)?;
+        } else if let Some((source, mode)) = new_file_metadata.as_ref() {
+            let content_modified = temp_file.metadata()?.modified()?;
+            copy_extended_acl(source, &temp_file)?;
+            temp_file.set_permissions(fs::Permissions::from_mode(*mode))?;
+            temp_file.set_times(FileTimes::new().set_modified(content_modified))?;
+            sync_file(&temp_file)?;
         }
-        sync_file(&temp_file)?;
-        validate()?;
         before_commit(&temp_path);
         let saved_stamp = commit_temp_file(
             &temp_path,
@@ -1903,17 +1938,45 @@ fn remove_created_temp(path: &Path, file: &File) {
     }
 }
 
-fn create_temp_file<S>(path: &Path, mut suffix: S) -> io::Result<(PathBuf, File)>
+fn create_temp_file<S>(path: &Path, suffix: S) -> io::Result<(PathBuf, File)>
 where
     S: FnMut() -> io::Result<String>,
 {
-    for _ in 0..TEMP_FILE_CREATE_ATTEMPTS {
-        let temp_path = temp_path_for(path, &suffix()?);
-        match OpenOptions::new()
+    create_temp_file_with(path, suffix, create_private_file)
+}
+
+fn create_temp_file_with_mode<S>(path: &Path, suffix: S, mode: u32) -> io::Result<(PathBuf, File)>
+where
+    S: FnMut() -> io::Result<String>,
+{
+    create_temp_file_with(path, suffix, |temp_path| {
+        OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&temp_path)
-        {
+            .mode(mode)
+            .open(temp_path)
+    })
+}
+
+fn create_temp_file_with<S, C>(
+    path: &Path,
+    mut suffix: S,
+    mut create: C,
+) -> io::Result<(PathBuf, File)>
+where
+    S: FnMut() -> io::Result<String>,
+    C: FnMut(&Path) -> io::Result<File>,
+{
+    for _ in 0..TEMP_FILE_CREATE_ATTEMPTS {
+        let suffix = suffix()?;
+        if suffix.len() > TEMP_SUFFIX_MAX_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "temporary save suffix exceeds its byte limit",
+            ));
+        }
+        let temp_path = temp_path_for(path, &suffix);
+        match create(&temp_path) {
             Ok(file) => return Ok((temp_path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
@@ -1934,10 +1997,167 @@ fn random_temp_suffix() -> io::Result<String> {
     Ok(format!("{:032x}", u128::from_ne_bytes(bytes)))
 }
 
+fn create_private_file(path: &Path) -> io::Result<File> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "temporary save path contains a NUL byte",
+        )
+    })?;
+    // SAFETY: filesec_init returns an owned security descriptor or null.
+    let filesec = unsafe { filesec_init() };
+    if filesec.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mode: libc::mode_t = 0o600;
+    // SAFETY: filesec is valid and mode remains live for this call.
+    let result =
+        unsafe { filesec_set_property(filesec, FILESEC_MODE, std::ptr::from_ref(&mode).cast()) };
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        // SAFETY: filesec is owned by this function and no longer used.
+        unsafe {
+            filesec_free(filesec);
+        }
+        return Err(io::Error::new(
+            error.kind(),
+            format!("could not set private temporary file mode: {error}"),
+        ));
+    }
+    // SAFETY: zero is a valid entry count for an empty ACL.
+    let empty_acl = unsafe { acl_init(0) };
+    if empty_acl.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: filesec is owned by this function and no longer used.
+        unsafe {
+            filesec_free(filesec);
+        }
+        return Err(error);
+    }
+    let mut flagset = std::ptr::null_mut();
+    // SAFETY: empty_acl is valid and flagset points to writable storage.
+    let flagset_result =
+        unsafe { acl_get_flagset_np(empty_acl.cast(), std::ptr::from_mut(&mut flagset)) };
+    // SAFETY: a successful acl_get_flagset_np call initialized flagset for
+    // empty_acl.
+    let flag_result = if flagset_result == 0 {
+        unsafe { acl_add_flag_np(flagset, ACL_FLAG_NO_INHERIT) }
+    } else {
+        -1
+    };
+    if flag_result != 0 {
+        let error = io::Error::last_os_error();
+        // SAFETY: both objects are owned by this function and no longer used.
+        unsafe {
+            acl_free(empty_acl);
+            filesec_free(filesec);
+        }
+        return Err(error);
+    }
+    // Supplying an explicit empty ACL makes openx_np suppress inherited ACLs
+    // as part of the same kernel creation operation.
+    // SAFETY: filesec and empty_acl are valid for this call.
+    let result = unsafe {
+        filesec_set_property(filesec, FILESEC_ACL, std::ptr::from_ref(&empty_acl).cast())
+    };
+    // SAFETY: filesec_set_property copied the ACL and empty_acl is no longer
+    // used.
+    unsafe {
+        acl_free(empty_acl);
+    }
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        // SAFETY: filesec is owned by this function and no longer used.
+        unsafe {
+            filesec_free(filesec);
+        }
+        return Err(io::Error::new(
+            error.kind(),
+            format!("could not suppress inherited temporary file ACL: {error}"),
+        ));
+    }
+
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC;
+    // SAFETY: path is NUL-terminated, filesec is valid, and flags request a
+    // new regular file.
+    let fd = unsafe { openx_np(path.as_ptr(), flags, filesec) };
+    let error = io::Error::last_os_error();
+    // SAFETY: filesec is owned by this function and no longer used.
+    unsafe {
+        filesec_free(filesec);
+    }
+    if fd >= 0 {
+        // SAFETY: openx_np returned a new owned descriptor.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    } else {
+        Err(io::Error::new(
+            error.kind(),
+            format!("could not atomically create private temporary file: {error}"),
+        ))
+    }
+}
+
+fn copy_extended_acl(source: &File, destination: &File) -> io::Result<()> {
+    // SAFETY: source remains open and ACL_TYPE_EXTENDED is valid on macOS.
+    let acl = unsafe { acl_get_fd_np(source.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let error = io::Error::last_os_error();
+        return match error.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::Unsupported => Ok(()),
+            _ => Err(error),
+        };
+    }
+    // SAFETY: destination remains open, acl is valid, and ACL_TYPE_EXTENDED is
+    // valid on macOS.
+    let result = unsafe { acl_set_fd_np(destination.as_raw_fd(), acl, ACL_TYPE_EXTENDED) };
+    let error = io::Error::last_os_error();
+    // SAFETY: acl is owned by this function and no longer used.
+    unsafe {
+        acl_free(acl);
+    }
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+fn new_file_metadata_source(path: &Path) -> io::Result<(File, u32)> {
+    // Let the kernel apply the current process umask to an empty probe without
+    // changing the process-global umask and capture any inherited ACL. The
+    // probe never receives buffer data, and its name is removed before the
+    // private save inode is created.
+    let (probe_path, probe) = create_temp_file_with_mode(path, random_temp_suffix, 0o666)?;
+    let mode = match probe.metadata() {
+        Ok(metadata) => metadata.mode() & 0o777,
+        Err(error) => {
+            remove_created_temp(&probe_path, &probe);
+            return Err(error);
+        }
+    };
+    match same_file(&probe_path, &probe) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(io::Error::other(
+                "temporary new-file metadata probe changed before cleanup",
+            ));
+        }
+        Err(error) => {
+            remove_created_temp(&probe_path, &probe);
+            return Err(error);
+        }
+    }
+    if let Err(error) = fs::remove_file(&probe_path) {
+        remove_created_temp(&probe_path, &probe);
+        return Err(error);
+    }
+    Ok((probe, mode))
+}
+
 fn temp_path_for(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = OsString::from(".");
-    name.push(path.file_name().unwrap_or_else(|| OsStr::new("cortex")));
-    name.push(format!(".cortex-{suffix}.tmp"));
+    let name = format!("{TEMP_FILE_PREFIX}{suffix}{TEMP_FILE_EXTENSION}");
+    debug_assert!(name.len() <= TEMP_FILE_NAME_MAX_BYTES);
 
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
@@ -1965,12 +2185,18 @@ mod tests {
     use super::{
         disk_stamp, structural_line_break_count, temp_path_for, write_atomically_with,
         write_atomically_with_metadata, Buffer, BufferChange, ChangedLines,
+        TEMP_FILE_NAME_MAX_BYTES,
     };
     use std::{
+        cell::RefCell,
+        ffi::OsString,
         fs::{self, FileTimes},
         io,
         io::Write,
-        os::unix::fs::{symlink, MetadataExt, PermissionsExt},
+        os::unix::{
+            ffi::{OsStrExt, OsStringExt},
+            fs::{symlink, MetadataExt, PermissionsExt},
+        },
         path::PathBuf,
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
@@ -2829,6 +3055,100 @@ mod tests {
     }
 
     #[test]
+    fn temporary_inode_stays_private_until_metadata_is_applied_before_commit() {
+        let dir = test_dir("save-private-temp");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "before").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+        command(&["chmod", "+a", "everyone allow write"], &path);
+        let source = fs::File::open(&path).unwrap();
+        let expected = disk_stamp(&path).unwrap();
+        let stages = RefCell::new(Vec::new());
+
+        write_atomically_with_metadata(
+            &path,
+            Some(&source),
+            Some(expected),
+            None,
+            || Ok("private-temp".to_string()),
+            |file| {
+                stages.borrow_mut().push(temp_access(file));
+                file.write_all(b"saved")
+            },
+            super::copy_metadata,
+            |file| {
+                stages.borrow_mut().push(temp_access(file));
+                file.sync_all()
+            },
+            || Ok(()),
+            |temp_path| {
+                let file = fs::File::open(temp_path).unwrap();
+                stages.borrow_mut().push(temp_access(&file));
+            },
+            || {},
+        )
+        .unwrap();
+
+        let stages = stages.into_inner();
+        assert_eq!(stages.len(), 4);
+        assert_eq!(stages[0].0 & 0o077, 0);
+        assert!(!stages[0].1);
+        assert_eq!(stages[1].0 & 0o077, 0);
+        assert!(!stages[1].1);
+        assert_eq!(stages[2], (0o666, true));
+        assert_eq!(stages[3], (0o666, true));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "saved");
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_handles_target_basenames_at_name_max() {
+        let dir = test_dir("save-name-max");
+        let path = dir.join("n".repeat(255));
+        fs::write(&path, "before").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(buffer.len_chars(), " after");
+        buffer.save().unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "before after");
+        assert_no_cortex_temp_files(&dir);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_handles_long_multibyte_target_basenames() {
+        let dir = test_dir("save-multibyte-name");
+        let path = dir.join("界".repeat(80));
+        fs::write(&path, "before").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(buffer.len_chars(), " after");
+        buffer.save().unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "before after");
+        assert_no_cortex_temp_files(&dir);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn temporary_names_do_not_copy_multibyte_or_non_utf8_target_bytes() {
+        let multibyte = PathBuf::from("界".repeat(80));
+        let non_utf8 = PathBuf::from(OsString::from_vec(vec![0xff; 255]));
+
+        for target in [&multibyte, &non_utf8] {
+            let temp_path = temp_path_for(target, "0123456789abcdef0123456789abcdef");
+            let name = temp_path.file_name().unwrap();
+
+            assert_eq!(name.as_bytes().len(), TEMP_FILE_NAME_MAX_BYTES);
+            assert_eq!(
+                name.as_bytes(),
+                b".cortex-0123456789abcdef0123456789abcdef.tmp"
+            );
+        }
+    }
+
+    #[test]
     fn save_through_a_symlink_updates_its_target_and_keeps_the_link() {
         let dir = test_dir("save-symlink");
         let target = dir.join("target.txt");
@@ -3171,17 +3491,105 @@ mod tests {
     }
 
     #[test]
+    fn metadata_sync_failure_preserves_the_target_and_cleans_up() {
+        let dir = test_dir("save-metadata-sync-failure");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+        let source = fs::File::open(&path).unwrap();
+        let expected = disk_stamp(&path).unwrap();
+        let mut syncs = 0;
+
+        let error = write_atomically_with_metadata(
+            &path,
+            Some(&source),
+            Some(expected),
+            None,
+            || Ok("metadata-sync-failure".to_string()),
+            |file| file.write_all(b"saved"),
+            super::copy_metadata,
+            |_| {
+                syncs += 1;
+                if syncs == 1 {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("injected metadata sync failure"))
+                }
+            },
+            || Ok(()),
+            |_| {},
+            || {},
+        )
+        .unwrap_err();
+
+        assert_eq!(syncs, 2);
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        assert_no_cortex_temp_files(&dir);
+        remove_dir(dir);
+    }
+
+    #[test]
     fn save_creates_the_target_file_when_the_parent_directory_exists() {
         let dir = test_dir("save-creates-file");
         let path = dir.join("created.txt");
+        let reference = dir.join("reference.txt");
+        fs::write(&reference, "").unwrap();
+        let expected_mode = fs::metadata(&reference).unwrap().mode() & 0o777;
         let mut buffer = Buffer::open(&path).unwrap();
 
         buffer.insert(0, "created");
         buffer.save().unwrap();
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "created");
-        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o111, 0);
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, expected_mode);
         assert!(!buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn new_save_strips_inherited_acl_until_final_metadata_is_applied() {
+        let dir = test_dir("save-inherited-acl");
+        command(&["chmod", "+a", "everyone allow write,file_inherit"], &dir);
+        let path = dir.join("created.txt");
+        let reference = dir.join("reference.txt");
+        fs::write(&reference, "").unwrap();
+        let expected_mode = fs::metadata(&reference).unwrap().mode() & 0o777;
+        let expected_acl = acl_entries(&reference);
+        assert!(!expected_acl.is_empty());
+        let stages = RefCell::new(Vec::new());
+
+        write_atomically_with_metadata(
+            &path,
+            None,
+            None,
+            None,
+            || Ok("inherited-acl".to_string()),
+            |file| {
+                stages.borrow_mut().push(temp_access(file));
+                file.write_all(b"saved")
+            },
+            super::copy_metadata,
+            |file| {
+                stages.borrow_mut().push(temp_access(file));
+                file.sync_all()
+            },
+            || Ok(()),
+            |temp_path| {
+                let file = fs::File::open(temp_path).unwrap();
+                stages.borrow_mut().push(temp_access(&file));
+            },
+            || {},
+        )
+        .unwrap();
+
+        let stages = stages.into_inner();
+        assert_eq!(stages.len(), 4);
+        assert_eq!(stages[0], (0o600, false));
+        assert_eq!(stages[1], (0o600, false));
+        assert_eq!(stages[2], (expected_mode, true));
+        assert_eq!(stages[3], (expected_mode, true));
+        assert_eq!(acl_entries(&path), expected_acl);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "saved");
         remove_dir(dir);
     }
 
@@ -3327,7 +3735,7 @@ mod tests {
     #[test]
     fn temporary_name_collisions_are_retried_safely() {
         let dir = test_dir("save-temp-collision");
-        let path = dir.join("notes.txt");
+        let path = dir.join("n".repeat(255));
         fs::write(&path, "original").unwrap();
         let occupied = temp_path_for(&path, "occupied");
         fs::write(&occupied, "occupied").unwrap();
@@ -3357,6 +3765,31 @@ mod tests {
         assert_eq!(attempts, 2);
         assert_eq!(fs::read_to_string(&path).unwrap(), "saved");
         assert_eq!(fs::read_to_string(&occupied).unwrap(), "occupied");
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn temporary_suffixes_over_the_byte_limit_are_rejected() {
+        let dir = test_dir("save-temp-suffix-limit");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+
+        let error = write_atomically_with(
+            &path,
+            None,
+            Some(disk_stamp(&path).unwrap()),
+            None,
+            || Ok("x".repeat(33)),
+            |file| file.write_all(b"saved"),
+            || Ok(()),
+            |_| {},
+            || {},
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        assert_no_cortex_temp_files(&dir);
         remove_dir(dir);
     }
 
@@ -3439,6 +3872,13 @@ mod tests {
             .filter(|line| line.trim_start().starts_with("0:"))
             .map(str::to_string)
             .collect()
+    }
+
+    fn temp_access(file: &fs::File) -> (u32, bool) {
+        (
+            file.metadata().unwrap().mode() & 0o777,
+            !super::acl_bytes(file).unwrap().is_empty(),
+        )
     }
 
     fn assert_no_cortex_temp_files(dir: &std::path::Path) {
