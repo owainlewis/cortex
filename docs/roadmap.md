@@ -225,7 +225,7 @@ Tracking issues:
 - [open] [#68 Add the repository labels required by STANDARDS.md](https://github.com/owainlewis/cortex/issues/68)
 - [open] [#69 Gate tagged releases on formatting, clippy, tests, and build](https://github.com/owainlewis/cortex/issues/69)
 - [open] [#70 Pin GitHub Actions and add release provenance](https://github.com/owainlewis/cortex/issues/70)
-- [open] [#71 Standardize merge strategy and clean stale branches](https://github.com/owainlewis/cortex/issues/71)
+- [closed] [#71 Standardize merge strategy and clean stale branches](https://github.com/owainlewis/cortex/issues/71)
 - [closed] [#72 Add contributing, security, and issue-reporting guidance](https://github.com/owainlewis/cortex/issues/72)
 - [open] [#73 Make the macOS arm64 build target deterministic](https://github.com/owainlewis/cortex/issues/73)
 

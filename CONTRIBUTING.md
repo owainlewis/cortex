@@ -69,5 +69,7 @@ Confirm the terminal is restored and the shell remains usable after Cortex exits
 - Explain the change, test evidence, and any remaining risk.
 - Update tests and documentation in the same pull request when behavior changes.
 - Keep unrelated cleanup out of the diff.
+- Pull requests are squash merged.
+- GitHub automatically deletes merged head branches hosted in this repository.
 
 Pull requests must pass the required `Rust checks` workflow before merge.
