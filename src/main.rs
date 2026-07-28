@@ -6,6 +6,8 @@ mod editor;
 pub mod highlighter;
 mod input;
 mod keymap;
+#[cfg(test)]
+mod performance;
 mod picker;
 pub mod renderer;
 mod terminal;
