@@ -1,10 +1,14 @@
 use ropey::{Rope, RopeSlice};
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::{CString, OsStr, OsString},
     fs::{self, File, OpenOptions},
-    io::{self, BufReader, BufWriter, Write},
+    io::{self, BufReader, BufWriter, Read, Seek, Write},
     ops::Range,
-    os::unix::fs::MetadataExt,
+    os::unix::ffi::OsStrExt,
+    os::unix::{
+        fs::{MetadataExt, PermissionsExt},
+        io::AsRawFd,
+    },
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -13,6 +17,17 @@ const TEMP_FILE_CREATE_ATTEMPTS: usize = 128;
 const FILE_READ_ATTEMPTS: usize = 3;
 static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
+type Acl = *mut libc::c_void;
+
+unsafe extern "C" {
+    fn acl_get_fd_np(fd: libc::c_int, acl_type: libc::c_int) -> Acl;
+    fn acl_size(acl: Acl) -> libc::ssize_t;
+    fn acl_copy_ext(buffer: *mut libc::c_void, acl: Acl, size: libc::ssize_t) -> libc::ssize_t;
+    fn acl_free(object: *mut libc::c_void) -> libc::c_int;
+}
+
+const ACL_TYPE_EXTENDED: libc::c_int = 0x00000100;
+
 #[derive(Debug)]
 pub struct Buffer {
     id: u64,
@@ -20,6 +35,7 @@ pub struct Buffer {
     path: PathBuf,
     dirty: bool,
     disk_baseline: DiskStamp,
+    save_location: SaveLocation,
     disk_changed: bool,
     clean_text: String,
     revision: u64,
@@ -48,6 +64,41 @@ enum DiskStamp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum SaveLocation {
+    Missing { target: PathBuf },
+    Regular { target: PathBuf },
+    Symlink { target: PathBuf },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SemanticMetadata {
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    flags: u32,
+    acl: Vec<u8>,
+    xattrs: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PathIdentity {
+    device: u64,
+    inode: u64,
+}
+
+struct CommitContext<'a> {
+    buffer_path: &'a Path,
+    expected_location: &'a SaveLocation,
+    source: Option<SourceBaseline<'a>>,
+}
+
+struct SourceBaseline<'a> {
+    file: &'a File,
+    metadata: SemanticMetadata,
+    text: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Edit {
     start: usize,
     deleted: String,
@@ -59,7 +110,7 @@ struct Edit {
 impl Buffer {
     pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
-        let (text, disk_baseline) = load_file(&path, true)?;
+        let (text, disk_baseline, save_location) = load_file(&path, true)?;
         let clean_text = text.to_string();
 
         Ok(Self {
@@ -68,6 +119,7 @@ impl Buffer {
             path,
             dirty: false,
             disk_baseline,
+            save_location,
             disk_changed: false,
             clean_text,
             revision: 0,
@@ -93,8 +145,8 @@ impl Buffer {
     }
 
     pub fn refresh_disk_changed(&mut self) {
-        self.disk_changed = disk_stamp(&self.path)
-            .map(|stamp| stamp != self.disk_baseline)
+        self.disk_changed = current_disk_state(&self.path)
+            .map(|(location, stamp)| location != self.save_location || stamp != self.disk_baseline)
             .unwrap_or(true);
     }
 
@@ -242,8 +294,34 @@ impl Buffer {
     }
 
     pub fn save(&mut self) -> io::Result<()> {
+        self.save_with_hooks(|_| {}, || {})
+    }
+
+    #[cfg(test)]
+    fn save_with<F>(&mut self, before_commit: F) -> io::Result<()>
+    where
+        F: FnOnce(&Path),
+    {
+        self.save_with_hooks(before_commit, || {})
+    }
+
+    fn save_with_hooks<F, G>(&mut self, before_commit: F, after_rename: G) -> io::Result<()>
+    where
+        F: FnOnce(&Path),
+        G: FnOnce(),
+    {
         ensure_parent_directory_exists(&self.path)?;
-        self.disk_baseline = write_atomically(&self.path, &self.text)?;
+        let (disk_baseline, save_location) = write_atomically(
+            &self.path,
+            &self.save_location,
+            self.disk_baseline,
+            &self.text,
+            &self.clean_text,
+            before_commit,
+            after_rename,
+        )?;
+        self.disk_baseline = disk_baseline;
+        self.save_location = save_location;
         self.disk_changed = false;
         self.clean_text = self.text.to_string();
         self.dirty = false;
@@ -255,11 +333,13 @@ impl Buffer {
             return Err(ReloadError::Dirty);
         }
 
-        let (text, disk_baseline) = load_file(&self.path, false).map_err(ReloadError::Io)?;
+        let (text, disk_baseline, save_location) =
+            load_file(&self.path, false).map_err(ReloadError::Io)?;
         self.clean_text = text.to_string();
         self.text = text;
         self.revision = self.revision.wrapping_add(1);
         self.disk_baseline = disk_baseline;
+        self.save_location = save_location;
         self.disk_changed = false;
         self.undo_stack.clear();
         self.redo_stack.clear();
@@ -325,6 +405,7 @@ impl Clone for Buffer {
             path: self.path.clone(),
             dirty: self.dirty,
             disk_baseline: self.disk_baseline,
+            save_location: self.save_location.clone(),
             disk_changed: self.disk_changed,
             clean_text: self.clean_text.clone(),
             revision: self.revision,
@@ -334,22 +415,24 @@ impl Clone for Buffer {
     }
 }
 
-fn load_file(path: &Path, allow_missing: bool) -> io::Result<(Rope, DiskStamp)> {
+fn load_file(path: &Path, allow_missing: bool) -> io::Result<(Rope, DiskStamp, SaveLocation)> {
     for _ in 0..FILE_READ_ATTEMPTS {
-        let file = match File::open(path) {
-            Ok(file) => file,
-            Err(error) if allow_missing && error.kind() == io::ErrorKind::NotFound => {
-                return Ok((Rope::new(), DiskStamp::Missing));
+        let save_location = resolve_save_location(path)?;
+        let target = save_location.target();
+        let file = match &save_location {
+            SaveLocation::Missing { .. } if allow_missing => {
+                return Ok((Rope::new(), DiskStamp::Missing, save_location));
             }
-            Err(error) => return Err(error),
+            SaveLocation::Missing { .. } => return Err(file_missing_error(path)),
+            SaveLocation::Regular { .. } | SaveLocation::Symlink { .. } => File::open(target)?,
         };
         let before = stamp_for_metadata(&file.metadata()?);
         let text = Rope::from_reader(BufReader::new(&file))?;
         let after = stamp_for_metadata(&file.metadata()?);
-        let current = disk_stamp(path)?;
+        let current = current_disk_state(path)?;
 
-        if before == after && after == current {
-            return Ok((text, current));
+        if before == after && current == (save_location.clone(), after) {
+            return Ok((text, after, save_location));
         }
     }
 
@@ -357,6 +440,92 @@ fn load_file(path: &Path, allow_missing: bool) -> io::Result<(Rope, DiskStamp)> 
         io::ErrorKind::WouldBlock,
         "file changed while it was being read",
     ))
+}
+
+impl SaveLocation {
+    fn target(&self) -> &Path {
+        match self {
+            Self::Missing { target } | Self::Regular { target } | Self::Symlink { target } => {
+                target
+            }
+        }
+    }
+}
+
+fn current_disk_state(path: &Path) -> io::Result<(SaveLocation, DiskStamp)> {
+    let location = resolve_save_location(path)?;
+    let stamp = match &location {
+        SaveLocation::Missing { .. } => DiskStamp::Missing,
+        SaveLocation::Regular { target } | SaveLocation::Symlink { target } => disk_stamp(target)?,
+    };
+    Ok((location, stamp))
+}
+
+fn resolve_save_location(path: &Path) -> io::Result<SaveLocation> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let target = fs::canonicalize(path).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("could not resolve symlink {}: {error}", path.display()),
+                )
+            })?;
+            ensure_regular_file(&target)?;
+            Ok(SaveLocation::Symlink { target })
+        }
+        Ok(metadata) if metadata.is_file() => Ok(SaveLocation::Regular {
+            target: fs::canonicalize(path)?,
+        }),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("save target is not a regular file: {}", path.display()),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(SaveLocation::Missing {
+            target: missing_target(path)?,
+        }),
+        Err(error) => Err(error),
+    }
+}
+
+fn ensure_regular_file(path: &Path) -> io::Result<()> {
+    if fs::metadata(path)?.is_file() {
+        return Ok(());
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("save target is not a regular file: {}", path.display()),
+    ))
+}
+
+fn missing_target(path: &Path) -> io::Result<PathBuf> {
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("save target has no file name: {}", path.display()),
+        )
+    })?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+
+    match parent {
+        Some(parent) => match fs::canonicalize(parent) {
+            Ok(parent) => Ok(parent.join(file_name)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Ok(std::env::current_dir()?.join(path))
+            }
+            Err(error) => Err(error),
+        },
+        None => Ok(std::env::current_dir()?.join(file_name)),
+    }
+}
+
+fn file_missing_error(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("file does not exist: {}", path.display()),
+    )
 }
 
 fn disk_stamp(path: &Path) -> io::Result<DiskStamp> {
@@ -410,36 +579,707 @@ fn find_byte_from(text: &str, query: &str, start_byte: usize) -> Option<usize> {
         .map(|offset| start_byte + offset)
 }
 
-/// Writes `text` to `path` without ever truncating the existing file in place.
+/// Writes `text` without ever truncating the existing file in place.
 ///
 /// The contents are written to a temporary sibling file, flushed and fsynced,
-/// then atomically renamed over the target. If any step fails the original file
-/// is left untouched and the temporary file is removed.
-fn write_atomically(path: &Path, text: &Rope) -> io::Result<DiskStamp> {
-    write_atomically_with(path, random_temp_suffix, |file| {
-        let mut writer = BufWriter::new(file);
-        text.write_to(&mut writer)?;
-        writer.flush()?;
-        writer.get_ref().sync_all()
-    })
+/// existing metadata is copied when present, and the temporary file is
+/// atomically renamed over the stable target. If any step before rename fails,
+/// the original file is left untouched and the temporary file is removed.
+fn write_atomically<F, G>(
+    path: &Path,
+    expected_location: &SaveLocation,
+    expected_stamp: DiskStamp,
+    text: &Rope,
+    baseline_text: &str,
+    before_commit: F,
+    after_rename: G,
+) -> io::Result<(DiskStamp, SaveLocation)>
+where
+    F: FnOnce(&Path),
+    G: FnOnce(),
+{
+    let source = validate_save_target(path, expected_location, expected_stamp)?;
+    let source_baseline = source
+        .as_ref()
+        .map(|file| {
+            Ok::<SourceBaseline<'_>, io::Error>(SourceBaseline {
+                file,
+                metadata: semantic_metadata(file)?,
+                text: baseline_text,
+            })
+        })
+        .transpose()?;
+    let commit_context = CommitContext {
+        buffer_path: path,
+        expected_location,
+        source: source_baseline,
+    };
+    let expected_target = match expected_stamp {
+        DiskStamp::Missing => None,
+        stamp @ DiskStamp::Present { .. } => Some(stamp),
+    };
+    let saved_stamp = write_atomically_with(
+        expected_location.target(),
+        source.as_ref(),
+        expected_target,
+        Some(&commit_context),
+        random_temp_suffix,
+        |file| {
+            let mut writer = BufWriter::new(file);
+            text.write_to(&mut writer)?;
+            writer.flush()
+        },
+        || {
+            if let Some(source) = &source {
+                if stamp_for_metadata(&source.metadata()?) != expected_stamp {
+                    return Err(disk_changed_error(path));
+                }
+            }
+            validate_save_target(path, expected_location, expected_stamp).map(|_| ())
+        },
+        before_commit,
+        after_rename,
+    )?;
+    let saved_location = match expected_location {
+        SaveLocation::Missing { target } => SaveLocation::Regular {
+            target: target.clone(),
+        },
+        SaveLocation::Regular { .. } | SaveLocation::Symlink { .. } => expected_location.clone(),
+    };
+
+    Ok((saved_stamp, saved_location))
 }
 
-fn write_atomically_with<S, W>(path: &Path, suffix: S, write: W) -> io::Result<DiskStamp>
+#[allow(clippy::too_many_arguments)]
+fn write_atomically_with<S, W, B, A, V>(
+    path: &Path,
+    metadata_source: Option<&File>,
+    expected_target: Option<DiskStamp>,
+    commit_context: Option<&CommitContext<'_>>,
+    suffix: S,
+    write: W,
+    validate: V,
+    before_commit: B,
+    after_rename: A,
+) -> io::Result<DiskStamp>
 where
     S: FnMut() -> io::Result<String>,
     W: FnOnce(&mut File) -> io::Result<()>,
+    B: FnOnce(&Path),
+    A: FnOnce(),
+    V: FnOnce() -> io::Result<()>,
+{
+    write_atomically_with_metadata(
+        path,
+        metadata_source,
+        expected_target,
+        commit_context,
+        suffix,
+        write,
+        copy_metadata,
+        File::sync_all,
+        validate,
+        before_commit,
+        after_rename,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_atomically_with_metadata<S, W, M, Y, B, A, V>(
+    path: &Path,
+    metadata_source: Option<&File>,
+    expected_target: Option<DiskStamp>,
+    commit_context: Option<&CommitContext<'_>>,
+    suffix: S,
+    write: W,
+    preserve_metadata: M,
+    sync_file: Y,
+    validate: V,
+    before_commit: B,
+    after_rename: A,
+) -> io::Result<DiskStamp>
+where
+    S: FnMut() -> io::Result<String>,
+    W: FnOnce(&mut File) -> io::Result<()>,
+    M: FnOnce(&File, &File) -> io::Result<()>,
+    Y: FnOnce(&File) -> io::Result<()>,
+    B: FnOnce(&Path),
+    A: FnOnce(),
+    V: FnOnce() -> io::Result<()>,
 {
     let (temp_path, mut temp_file) = create_temp_file(path, suffix)?;
-    let result = write(&mut temp_file).and_then(|()| {
-        fs::rename(&temp_path, path)?;
-        Ok(stamp_for_metadata(&temp_file.metadata()?))
-    });
+    let result = (|| {
+        if let Some(source) = metadata_source {
+            preserve_metadata(source, &temp_file).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "could not preserve metadata for {}: {error}",
+                        path.display()
+                    ),
+                )
+            })?;
+        }
+        write(&mut temp_file)?;
+        if let Some(source) = metadata_source {
+            let mode = source.metadata()?.mode();
+            temp_file.set_permissions(fs::Permissions::from_mode(mode))?;
+        }
+        sync_file(&temp_file)?;
+        validate()?;
+        before_commit(&temp_path);
+        let saved_stamp = commit_temp_file(
+            &temp_path,
+            path,
+            &temp_file,
+            expected_target,
+            commit_context,
+            after_rename,
+        )?;
+        Ok(saved_stamp)
+    })();
 
     if result.is_err() {
-        let _ = fs::remove_file(&temp_path);
+        remove_created_temp(&temp_path, &temp_file);
     }
 
     result
+}
+
+fn validate_save_target(
+    path: &Path,
+    expected_location: &SaveLocation,
+    expected_stamp: DiskStamp,
+) -> io::Result<Option<File>> {
+    let (location, stamp) = current_disk_state(path)?;
+    if &location != expected_location || stamp != expected_stamp {
+        return Err(disk_changed_error(path));
+    }
+
+    match location {
+        SaveLocation::Missing { .. } => Ok(None),
+        SaveLocation::Regular { target } | SaveLocation::Symlink { target } => {
+            let file = File::open(target)?;
+            if stamp_for_metadata(&file.metadata()?) != expected_stamp {
+                return Err(disk_changed_error(path));
+            }
+            Ok(Some(file))
+        }
+    }
+}
+
+fn disk_changed_error(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!(
+            "file changed on disk since it was opened: {}",
+            path.display()
+        ),
+    )
+}
+
+fn copy_metadata(source: &File, destination: &File) -> io::Result<()> {
+    // SAFETY: both descriptors remain open for the duration of the call, the
+    // state pointer is allowed to be null, and COPYFILE_METADATA copies no data.
+    let result = unsafe {
+        libc::fcopyfile(
+            source.as_raw_fd(),
+            destination.as_raw_fd(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_METADATA,
+        )
+    };
+
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn semantic_metadata(file: &File) -> io::Result<SemanticMetadata> {
+    let metadata = file.metadata()?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: stat points to writable storage and file remains open.
+    if unsafe { libc::fstat(file.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fstat initialized stat after returning success.
+    let stat = unsafe { stat.assume_init() };
+
+    Ok(SemanticMetadata {
+        mode: metadata.mode(),
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+        flags: stat.st_flags,
+        acl: acl_bytes(file)?,
+        xattrs: extended_attributes(file)?,
+    })
+}
+
+fn acl_bytes(file: &File) -> io::Result<Vec<u8>> {
+    // SAFETY: file remains open and ACL_TYPE_EXTENDED is valid on macOS.
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let error = io::Error::last_os_error();
+        return match error.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::Unsupported => Ok(Vec::new()),
+            _ => Err(error),
+        };
+    }
+
+    // SAFETY: acl is a valid object returned by acl_get_fd_np.
+    let size = unsafe { acl_size(acl) };
+    if size < 0 {
+        let error = io::Error::last_os_error();
+        // SAFETY: acl is owned by this function.
+        unsafe {
+            acl_free(acl);
+        }
+        return Err(error);
+    }
+
+    let mut bytes = vec![0_u8; size as usize];
+    // SAFETY: bytes has size bytes of writable storage and acl is valid.
+    let copied = unsafe { acl_copy_ext(bytes.as_mut_ptr().cast(), acl, size) };
+    // SAFETY: acl is owned by this function and no longer used.
+    unsafe {
+        acl_free(acl);
+    }
+    if copied < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    bytes.truncate(copied as usize);
+    Ok(bytes)
+}
+
+fn extended_attributes(file: &File) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    for _ in 0..FILE_READ_ATTEMPTS {
+        // SAFETY: a null buffer with zero size requests the required length.
+        let size = unsafe { libc::flistxattr(file.as_raw_fd(), std::ptr::null_mut(), 0, 0) };
+        if size < 0 {
+            let error = io::Error::last_os_error();
+            return if error.kind() == io::ErrorKind::Unsupported {
+                Ok(Vec::new())
+            } else {
+                Err(error)
+            };
+        }
+
+        let mut names = vec![0_u8; size as usize];
+        // SAFETY: names provides size writable bytes.
+        let read = unsafe {
+            libc::flistxattr(file.as_raw_fd(), names.as_mut_ptr().cast(), names.len(), 0)
+        };
+        if read < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ERANGE) {
+                continue;
+            }
+            return Err(error);
+        }
+        names.truncate(read as usize);
+
+        let mut attributes = Vec::new();
+        for name in names
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+        {
+            attributes.push((name.to_vec(), extended_attribute(file, name)?));
+        }
+        attributes.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        return Ok(attributes);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "extended attributes changed while saving",
+    ))
+}
+
+fn extended_attribute(file: &File, name: &[u8]) -> io::Result<Vec<u8>> {
+    let name = CString::new(name).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "extended attribute name contains a null byte",
+        )
+    })?;
+
+    for _ in 0..FILE_READ_ATTEMPTS {
+        // SAFETY: a null buffer with zero size requests the required length.
+        let size = unsafe {
+            libc::fgetxattr(
+                file.as_raw_fd(),
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+            )
+        };
+        if size < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut value = vec![0_u8; size as usize];
+        // SAFETY: value provides size writable bytes and name is a valid C string.
+        let read = unsafe {
+            libc::fgetxattr(
+                file.as_raw_fd(),
+                name.as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+                0,
+                0,
+            )
+        };
+        if read < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ERANGE) {
+                continue;
+            }
+            return Err(error);
+        }
+        value.truncate(read as usize);
+        return Ok(value);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "extended attribute changed while saving",
+    ))
+}
+
+fn file_text_matches(file: &File, expected: &str) -> io::Result<bool> {
+    let mut file = file.try_clone()?;
+    file.rewind()?;
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)?;
+    Ok(contents == expected.as_bytes())
+}
+
+fn commit_temp_file<A>(
+    temp_path: &Path,
+    target_path: &Path,
+    temp_file: &File,
+    expected_target: Option<DiskStamp>,
+    context: Option<&CommitContext<'_>>,
+    after_rename: A,
+) -> io::Result<DiskStamp>
+where
+    A: FnOnce(),
+{
+    let mut after_rename = Some(after_rename);
+    let Some(expected_target) = expected_target else {
+        rename_with_flags(temp_path, target_path, libc::RENAME_EXCL)?;
+        let saved_stamp = stamp_for_metadata(&temp_file.metadata()?);
+        let committed_identity = path_identity(target_path)?;
+        after_rename.take().unwrap()();
+        if let Err(error) = verify_committed_save(target_path, temp_file, context, false) {
+            return rollback_exclusive_rename(temp_path, target_path, committed_identity, error)
+                .and(Ok(saved_stamp));
+        }
+        return Ok(saved_stamp);
+    };
+
+    rename_with_flags(temp_path, target_path, libc::RENAME_SWAP)?;
+    let saved_stamp = stamp_for_metadata(&temp_file.metadata()?);
+    let committed_identity = path_identity(target_path)?;
+    let displaced_identity = path_identity(temp_path)?;
+    after_rename.take().unwrap()();
+    let replaced_stamp = regular_file_stamp(temp_path);
+
+    if !matches!(
+        replaced_stamp,
+        Ok(stamp) if same_file_version_after_rename(stamp, expected_target)
+    ) {
+        return rollback_swap(
+            temp_path,
+            target_path,
+            committed_identity,
+            displaced_identity,
+            disk_changed_error(target_path),
+        )
+        .and(Ok(saved_stamp));
+    }
+
+    if let Err(error) = verify_committed_save(target_path, temp_file, context, true) {
+        return rollback_swap(
+            temp_path,
+            target_path,
+            committed_identity,
+            displaced_identity,
+            error,
+        )
+        .and(Ok(saved_stamp));
+    }
+
+    if !matches!(
+        path_identity(target_path),
+        Ok(identity) if identity == committed_identity
+    ) || !matches!(
+        path_identity(temp_path),
+        Ok(identity) if identity == displaced_identity
+    ) {
+        return Err(recovery_path_error(
+            "original target changed before cleanup",
+            temp_path,
+        ));
+    }
+    if let Err(error) = fs::remove_file(temp_path) {
+        return rollback_swap(
+            temp_path,
+            target_path,
+            committed_identity,
+            displaced_identity,
+            error,
+        )
+        .and(Ok(saved_stamp));
+    }
+
+    Ok(saved_stamp)
+}
+
+fn verify_committed_save(
+    target_path: &Path,
+    temp_file: &File,
+    context: Option<&CommitContext<'_>>,
+    replaced_existing: bool,
+) -> io::Result<()> {
+    if !same_file(target_path, temp_file)? {
+        return Err(io::Error::other(
+            "temporary save file changed before it could be committed",
+        ));
+    }
+
+    let Some(context) = context else {
+        return Ok(());
+    };
+
+    validate_committed_location(context.buffer_path, context.expected_location)?;
+    if let Some(source) = &context.source {
+        if !replaced_existing
+            || semantic_metadata(source.file)? != source.metadata
+            || !file_text_matches(source.file, source.text)?
+        {
+            return Err(disk_changed_error(context.buffer_path));
+        }
+    }
+    Ok(())
+}
+
+fn validate_committed_location(path: &Path, expected: &SaveLocation) -> io::Result<()> {
+    let committed = resolve_save_location(path)?;
+    let matches = match (expected, committed) {
+        (
+            SaveLocation::Missing {
+                target: expected_target,
+            },
+            SaveLocation::Regular {
+                target: committed_target,
+            },
+        )
+        | (
+            SaveLocation::Regular {
+                target: expected_target,
+            },
+            SaveLocation::Regular {
+                target: committed_target,
+            },
+        )
+        | (
+            SaveLocation::Symlink {
+                target: expected_target,
+            },
+            SaveLocation::Symlink {
+                target: committed_target,
+            },
+        ) => expected_target == &committed_target,
+        _ => false,
+    };
+
+    if matches {
+        Ok(())
+    } else {
+        Err(disk_changed_error(path))
+    }
+}
+
+fn same_file(path: &Path, file: &File) -> io::Result<bool> {
+    let path_metadata = fs::symlink_metadata(path)?;
+    let file_metadata = file.metadata()?;
+    Ok(path_metadata.dev() == file_metadata.dev() && path_metadata.ino() == file_metadata.ino())
+}
+
+fn rollback_exclusive_rename(
+    temp_path: &Path,
+    target_path: &Path,
+    committed_identity: PathIdentity,
+    cause: io::Error,
+) -> io::Result<()> {
+    if !matches!(
+        path_identity(target_path),
+        Ok(identity) if identity == committed_identity
+    ) {
+        return Err(io::Error::new(
+            cause.kind(),
+            format!("{cause}; save target changed again, so no rollback was attempted"),
+        ));
+    }
+
+    match rename_with_flags(target_path, temp_path, libc::RENAME_EXCL) {
+        Ok(()) => Err(cause),
+        Err(rollback_error) => Err(io::Error::new(
+            rollback_error.kind(),
+            format!(
+                "{cause}; could not remove the unverified save target: {rollback_error}; inspect {}",
+                target_path.display()
+            ),
+        )),
+    }
+}
+
+fn same_file_version_after_rename(actual: DiskStamp, expected: DiskStamp) -> bool {
+    match (actual, expected) {
+        (
+            DiskStamp::Present {
+                device: actual_device,
+                inode: actual_inode,
+                len: actual_len,
+                modified_seconds: actual_modified_seconds,
+                modified_nanoseconds: actual_modified_nanoseconds,
+                ..
+            },
+            DiskStamp::Present {
+                device: expected_device,
+                inode: expected_inode,
+                len: expected_len,
+                modified_seconds: expected_modified_seconds,
+                modified_nanoseconds: expected_modified_nanoseconds,
+                ..
+            },
+        ) => {
+            actual_device == expected_device
+                && actual_inode == expected_inode
+                && actual_len == expected_len
+                && actual_modified_seconds == expected_modified_seconds
+                && actual_modified_nanoseconds == expected_modified_nanoseconds
+        }
+        _ => false,
+    }
+}
+
+fn regular_file_stamp(path: &Path) -> io::Result<DiskStamp> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("save target is not a regular file: {}", path.display()),
+        ));
+    }
+    Ok(stamp_for_metadata(&metadata))
+}
+
+fn path_identity(path: &Path) -> io::Result<PathIdentity> {
+    let metadata = fs::symlink_metadata(path)?;
+    Ok(PathIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+fn rollback_swap(
+    temp_path: &Path,
+    target_path: &Path,
+    committed_identity: PathIdentity,
+    displaced_identity: PathIdentity,
+    cause: io::Error,
+) -> io::Result<()> {
+    if !matches!(
+        path_identity(target_path),
+        Ok(identity) if identity == committed_identity
+    ) || !matches!(
+        path_identity(temp_path),
+        Ok(identity) if identity == displaced_identity
+    ) {
+        return Err(recovery_path_error(
+            &format!("{cause}; save paths changed again, so no rollback was attempted"),
+            temp_path,
+        ));
+    }
+
+    match rename_with_flags(temp_path, target_path, libc::RENAME_SWAP) {
+        Ok(()) => Err(cause),
+        Err(rollback_error) => Err(io::Error::new(
+            rollback_error.kind(),
+            format!(
+                "{cause}; could not restore the original target: {rollback_error}; recover it from {}",
+                temp_path.display()
+            ),
+        )),
+    }
+}
+
+fn recovery_path_error(message: &str, recovery_path: &Path) -> io::Error {
+    io::Error::other(format!(
+        "{message}; recover the original target from {}",
+        recovery_path.display()
+    ))
+}
+
+fn rename_with_flags(from: &Path, to: &Path, flags: libc::c_uint) -> io::Result<()> {
+    let from = CString::new(from.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "save path contains an interior null byte",
+        )
+    })?;
+    let to = CString::new(to.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "save path contains an interior null byte",
+        )
+    })?;
+
+    // SAFETY: both paths are valid C strings and AT_FDCWD resolves the absolute
+    // stable target paths selected when the buffer was opened.
+    let result = unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            flags,
+        )
+    };
+
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn remove_created_temp(path: &Path, file: &File) {
+    let Ok(open_metadata) = file.metadata() else {
+        return;
+    };
+    let Ok(path_metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+
+    if open_metadata.dev() == path_metadata.dev()
+        && open_metadata.ino() == path_metadata.ino()
+        && fs::remove_file(path).is_err()
+    {
+        // Metadata copying may have made Cortex's own temporary inode
+        // immutable. Clear file flags only after proving the pathname still
+        // names that open inode, then retry cleanup.
+        // SAFETY: file remains open and fchflags only affects that descriptor.
+        unsafe {
+            libc::fchflags(file.as_raw_fd(), 0);
+        }
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn create_temp_file<S>(path: &Path, mut suffix: S) -> io::Result<(PathBuf, File)>
@@ -501,13 +1341,16 @@ fn ensure_parent_directory_exists(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{disk_stamp, temp_path_for, write_atomically_with, Buffer};
+    use super::{
+        disk_stamp, temp_path_for, write_atomically_with, write_atomically_with_metadata, Buffer,
+    };
     use std::{
         fs::{self, FileTimes},
         io,
         io::Write,
-        os::unix::fs::symlink,
+        os::unix::fs::{symlink, MetadataExt, PermissionsExt},
         path::PathBuf,
+        process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -625,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn save_refreshes_the_disk_baseline_and_clears_the_indicator() {
+    fn save_refuses_to_overwrite_an_external_change() {
         let dir = test_dir("save-disk-baseline");
         let path = dir.join("notes.txt");
         fs::write(&path, "before").unwrap();
@@ -635,12 +1478,13 @@ mod tests {
         assert!(buffer.disk_changed());
 
         buffer.insert(0, "local ");
-        buffer.save().unwrap();
-        buffer.refresh_disk_changed();
+        let error = buffer.save().unwrap_err();
 
-        assert_eq!(fs::read_to_string(&path).unwrap(), "local before");
-        assert!(!buffer.is_dirty());
-        assert!(!buffer.disk_changed());
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(error.to_string().contains("file changed on disk"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "external change");
+        assert!(buffer.is_dirty());
+        assert!(buffer.disk_changed());
         remove_dir(dir);
     }
 
@@ -868,6 +1712,402 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "before\nafter");
         assert!(!buffer.is_dirty());
+        buffer.refresh_disk_changed();
+        assert!(!buffer.disk_changed());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_preserves_existing_mode_and_ownership() {
+        let dir = test_dir("save-mode-ownership");
+        let path = dir.join("script.sh");
+        fs::write(&path, "#!/bin/sh\necho before\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o6751)).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(UNIX_EPOCH))
+            .unwrap();
+        let before = fs::metadata(&path).unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(buffer.len_chars(), "echo after\n");
+        buffer.save().unwrap();
+
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(after.mode() & 0o7777, before.mode() & 0o7777);
+        assert_eq!(after.uid(), before.uid());
+        assert_eq!(after.gid(), before.gid());
+        assert_ne!(after.modified().unwrap(), UNIX_EPOCH);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "#!/bin/sh\necho before\necho after\n"
+        );
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_preserves_extended_attributes_and_acls() {
+        let dir = test_dir("save-macos-metadata");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "before").unwrap();
+        command(&["xattr", "-w", "com.cortex.save-test", "preserved"], &path);
+        command(&["chmod", "+a", "everyone allow read"], &path);
+        let acl_before = acl_entries(&path);
+        assert!(!acl_before.is_empty());
+        let mut buffer = Buffer::open(&path).unwrap();
+
+        buffer.insert(buffer.len_chars(), " after");
+        buffer.save().unwrap();
+
+        assert_eq!(
+            command_output(&["xattr", "-p", "com.cortex.save-test"], &path),
+            "preserved"
+        );
+        assert_eq!(acl_entries(&path), acl_before);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_through_a_symlink_updates_its_target_and_keeps_the_link() {
+        let dir = test_dir("save-symlink");
+        let target = dir.join("target.txt");
+        let link = dir.join("link.txt");
+        fs::write(&target, "before").unwrap();
+        symlink("target.txt", &link).unwrap();
+        let mut buffer = Buffer::open(&link).unwrap();
+
+        buffer.insert(buffer.len_chars(), " after");
+        buffer.save().unwrap();
+
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_link(&link).unwrap(), PathBuf::from("target.txt"));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "before after");
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_refuses_a_retargeted_symlink() {
+        let dir = test_dir("save-retargeted-symlink");
+        let original = dir.join("original.txt");
+        let redirected = dir.join("redirected.txt");
+        let link = dir.join("link.txt");
+        fs::write(&original, "original").unwrap();
+        fs::write(&redirected, "redirected").unwrap();
+        symlink("original.txt", &link).unwrap();
+        let mut buffer = Buffer::open(&link).unwrap();
+        buffer.insert(buffer.len_chars(), " local");
+        fs::remove_file(&link).unwrap();
+        symlink("redirected.txt", &link).unwrap();
+
+        let error = buffer.save().unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(fs::read_to_string(&original).unwrap(), "original");
+        assert_eq!(fs::read_to_string(&redirected).unwrap(), "redirected");
+        assert!(buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn opening_a_broken_symlink_fails_clearly() {
+        let dir = test_dir("open-broken-symlink");
+        let link = dir.join("link.txt");
+        symlink("missing.txt", &link).unwrap();
+
+        let error = Buffer::open(&link).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("could not resolve symlink"));
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_race_preserves_an_external_replacement_and_cleans_up() {
+        let dir = test_dir("save-race");
+        let path = dir.join("notes.txt");
+        let replacement = dir.join("replacement.txt");
+        fs::write(&path, "original").unwrap();
+        fs::write(&replacement, "external replacement").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(buffer.len_chars(), " local");
+
+        let error = buffer
+            .save_with(|_| fs::rename(&replacement, &path).unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "external replacement");
+        assert!(buffer.is_dirty());
+        assert_no_cortex_temp_files(&dir);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_race_preserves_same_length_external_content_with_restored_mtime() {
+        let dir = test_dir("save-content-race");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(buffer.len_chars(), " local");
+
+        let error = buffer
+            .save_with(|_| {
+                fs::write(&path, "changed!").unwrap();
+                fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_times(FileTimes::new().set_modified(modified))
+                    .unwrap();
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "changed!");
+        assert!(buffer.is_dirty());
+        assert_no_cortex_temp_files(&dir);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_race_preserves_external_metadata_changes() {
+        let dir = test_dir("save-metadata-race");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(buffer.len_chars(), " local");
+
+        let error = buffer
+            .save_with(|_| {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+                command(&["xattr", "-w", "com.cortex.race-test", "external"], &path);
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o640);
+        assert_eq!(
+            command_output(&["xattr", "-p", "com.cortex.race-test"], &path),
+            "external"
+        );
+        assert!(buffer.is_dirty());
+        assert_no_cortex_temp_files(&dir);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_race_preserves_a_final_symlink_retarget() {
+        let dir = test_dir("save-final-symlink-race");
+        let original = dir.join("original.txt");
+        let redirected = dir.join("redirected.txt");
+        let link = dir.join("link.txt");
+        fs::write(&original, "original").unwrap();
+        fs::write(&redirected, "redirected").unwrap();
+        symlink("original.txt", &link).unwrap();
+        let mut buffer = Buffer::open(&link).unwrap();
+        buffer.insert(buffer.len_chars(), " local");
+
+        let error = buffer
+            .save_with(|_| {
+                fs::remove_file(&link).unwrap();
+                symlink("redirected.txt", &link).unwrap();
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(fs::read_to_string(&original).unwrap(), "original");
+        assert_eq!(fs::read_to_string(&redirected).unwrap(), "redirected");
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            PathBuf::from("redirected.txt")
+        );
+        assert!(buffer.is_dirty());
+        assert_no_cortex_temp_files(&dir);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn save_never_commits_a_replaced_temporary_path() {
+        let dir = test_dir("save-temp-path-race");
+        let path = dir.join("notes.txt");
+        let moved_temp = dir.join("moved-cortex-temp");
+        fs::write(&path, "original").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(buffer.len_chars(), " local");
+        let mut foreign_temp = None;
+
+        let error = buffer
+            .save_with(|temp_path| {
+                fs::rename(temp_path, &moved_temp).unwrap();
+                fs::write(temp_path, "foreign").unwrap();
+                foreign_temp = Some(temp_path.to_path_buf());
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("temporary save file changed"));
+        let foreign_temp = foreign_temp.unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(fs::read_to_string(&foreign_temp).unwrap(), "foreign");
+        assert_eq!(fs::read_to_string(&moved_temp).unwrap(), "original local");
+        assert!(buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn existing_save_does_not_rollback_over_a_post_rename_replacement() {
+        let dir = test_dir("existing-post-rename-race");
+        let path = dir.join("notes.txt");
+        let replacement = dir.join("replacement.txt");
+        fs::write(&path, "original").unwrap();
+        fs::write(&replacement, "external").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(buffer.len_chars(), " local");
+        let temp_path = std::cell::RefCell::new(None);
+
+        let error = buffer
+            .save_with_hooks(
+                |path| *temp_path.borrow_mut() = Some(path.to_path_buf()),
+                || fs::rename(&replacement, &path).unwrap(),
+            )
+            .unwrap_err();
+
+        let recovery = temp_path.into_inner().unwrap();
+        assert!(error.to_string().contains("no rollback was attempted"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "external");
+        assert_eq!(fs::read_to_string(&recovery).unwrap(), "original");
+        assert!(buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn new_save_does_not_rollback_over_a_post_rename_replacement() {
+        let dir = test_dir("new-post-rename-race");
+        let path = dir.join("notes.txt");
+        let replacement = dir.join("replacement.txt");
+        fs::write(&replacement, "external").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(0, "local");
+
+        let error = buffer
+            .save_with_hooks(|_| {}, || fs::rename(&replacement, &path).unwrap())
+            .unwrap_err();
+
+        assert!(error.to_string().contains("no rollback was attempted"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "external");
+        assert!(buffer.is_dirty());
+        assert_no_cortex_temp_files(&dir);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn post_commit_in_place_edit_is_reported_as_a_later_disk_change() {
+        let dir = test_dir("post-commit-in-place-edit");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(buffer.len_chars(), " local");
+
+        buffer
+            .save_with_hooks(|_| {}, || fs::write(&path, "external").unwrap())
+            .unwrap();
+        buffer.refresh_disk_changed();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "external");
+        assert!(!buffer.is_dirty());
+        assert!(buffer.disk_changed());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn new_file_commit_race_preserves_the_external_file_and_cleans_up() {
+        let dir = test_dir("new-file-save-race");
+        let path = dir.join("notes.txt");
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert(0, "local");
+
+        let error = buffer
+            .save_with(|_| fs::write(&path, "external").unwrap())
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "external");
+        assert!(buffer.is_dirty());
+        assert_no_cortex_temp_files(&dir);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn metadata_failure_preserves_the_target_and_cleans_up() {
+        let dir = test_dir("save-metadata-failure");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+        let source = fs::File::open(&path).unwrap();
+        let expected = disk_stamp(&path).unwrap();
+
+        let error = write_atomically_with_metadata(
+            &path,
+            Some(&source),
+            Some(expected),
+            None,
+            || Ok("metadata-failure".to_string()),
+            |file| file.write_all(b"saved"),
+            |_, _| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected metadata failure",
+                ))
+            },
+            fs::File::sync_all,
+            || Ok(()),
+            |_| {},
+            || {},
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("could not preserve metadata"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        assert_no_cortex_temp_files(&dir);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn sync_failure_preserves_the_target_and_cleans_up() {
+        let dir = test_dir("save-sync-failure");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "original").unwrap();
+        let source = fs::File::open(&path).unwrap();
+        let expected = disk_stamp(&path).unwrap();
+
+        let error = write_atomically_with_metadata(
+            &path,
+            Some(&source),
+            Some(expected),
+            None,
+            || Ok("sync-failure".to_string()),
+            |file| file.write_all(b"saved"),
+            super::copy_metadata,
+            |_| Err(io::Error::other("injected sync failure")),
+            || Ok(()),
+            |_| {},
+            || {},
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        assert_no_cortex_temp_files(&dir);
         remove_dir(dir);
     }
 
@@ -881,6 +2121,7 @@ mod tests {
         buffer.save().unwrap();
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "created");
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o111, 0);
         assert!(!buffer.is_dirty());
         remove_dir(dir);
     }
@@ -947,8 +2188,14 @@ mod tests {
 
         write_atomically_with(
             &path,
+            None,
+            Some(disk_stamp(&path).unwrap()),
+            None,
             || Ok(suffixes.next().unwrap().to_string()),
             |file| file.write_all(b"saved"),
+            || Ok(()),
+            |_| {},
+            || {},
         )
         .unwrap();
 
@@ -966,8 +2213,14 @@ mod tests {
 
         let saved_stamp = write_atomically_with(
             &path,
+            None,
+            Some(disk_stamp(&path).unwrap()),
+            None,
             || Ok("saved".to_string()),
             |file| file.write_all(b"saved"),
+            || Ok(()),
+            |_| {},
+            || {},
         )
         .unwrap();
 
@@ -991,8 +2244,14 @@ mod tests {
 
         write_atomically_with(
             &path,
+            None,
+            Some(disk_stamp(&path).unwrap()),
+            None,
             || Ok(suffixes.next().unwrap().to_string()),
             |file| file.write_all(b"saved"),
+            || Ok(()),
+            |_| {},
+            || {},
         )
         .unwrap();
 
@@ -1017,6 +2276,9 @@ mod tests {
 
         write_atomically_with(
             &path,
+            None,
+            Some(disk_stamp(&path).unwrap()),
+            None,
             || {
                 attempts += 1;
                 Ok(if attempts == 1 {
@@ -1027,6 +2289,9 @@ mod tests {
                 .to_string())
             },
             |file| file.write_all(b"saved"),
+            || Ok(()),
+            |_| {},
+            || {},
         )
         .unwrap();
 
@@ -1048,11 +2313,17 @@ mod tests {
 
         let result = write_atomically_with(
             &path,
+            None,
+            Some(disk_stamp(&path).unwrap()),
+            None,
             || Ok(suffixes.next().unwrap().to_string()),
             |file| {
                 file.write_all(b"partial")?;
                 Err(io::Error::other("injected write failure"))
             },
+            || Ok(()),
+            |_| {},
+            || {},
         );
 
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Other);
@@ -1070,22 +2341,53 @@ mod tests {
         let mut buffer = Buffer::open(&path).unwrap();
         buffer.insert(0, "x");
 
-        // Replace the target with a directory so the final rename fails after the
-        // temporary file has already been written and synced.
-        fs::remove_file(&path).unwrap();
-        fs::create_dir(&path).unwrap();
-
-        let result = buffer.save();
+        let result = buffer.save_with(|_| {
+            // Change the target after validation, writing, metadata preservation,
+            // and sync so the atomic commit must detect and roll back the race.
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+        });
 
         assert!(result.is_err());
         assert!(buffer.is_dirty());
         assert!(path.is_dir());
-        let leftover_temp = fs::read_dir(&dir)
+        assert_no_cortex_temp_files(&dir);
+        remove_dir(dir);
+    }
+
+    fn command(args: &[&str], path: &std::path::Path) {
+        let status = Command::new(args[0])
+            .args(&args[1..])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{} failed", args[0]);
+    }
+
+    fn command_output(args: &[&str], path: &std::path::Path) -> String {
+        let output = Command::new(args[0])
+            .args(&args[1..])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{} failed", args[0]);
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn acl_entries(path: &std::path::Path) -> Vec<String> {
+        command_output(&["ls", "-lde"], path)
+            .lines()
+            .filter(|line| line.trim_start().starts_with("0:"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn assert_no_cortex_temp_files(dir: &std::path::Path) {
+        let leftover_temp = fs::read_dir(dir)
             .unwrap()
             .filter_map(Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().contains(".cortex-"));
         assert!(!leftover_temp, "temporary save file should be cleaned up");
-        remove_dir(dir);
     }
 
     fn test_dir(name: &str) -> PathBuf {
