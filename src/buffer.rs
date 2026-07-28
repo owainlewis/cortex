@@ -48,6 +48,7 @@ pub struct Buffer {
     clean_history_state: u64,
     next_history_state: u64,
     revision: u64,
+    last_change: Option<BufferChange>,
     undo_stack: Vec<Edit>,
     redo_stack: Vec<Edit>,
     line_column_cache: RefCell<LineColumnCache>,
@@ -102,6 +103,13 @@ enum RecentAnchor {
 struct LineColumnCache {
     revision: u64,
     lines: HashMap<usize, LineColumnAnchors>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BufferChange {
+    pub previous_revision: u64,
+    pub revision: u64,
+    pub start_line: usize,
 }
 
 #[derive(Debug)]
@@ -188,6 +196,7 @@ impl Buffer {
             clean_history_state: 0,
             next_history_state: 1,
             revision: 0,
+            last_change: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             line_column_cache: RefCell::new(LineColumnCache::default()),
@@ -230,6 +239,10 @@ impl Buffer {
         self.revision
     }
 
+    pub(crate) fn last_change(&self) -> Option<BufferChange> {
+        self.last_change
+    }
+
     pub fn line_for_char(&self, char_idx: usize) -> usize {
         let len_chars = self.len_chars();
 
@@ -260,6 +273,11 @@ impl Buffer {
         let line = self.text.line(line_idx);
         let content_len = line_content_len_chars(line);
         line.slice(..content_len.min(max_chars)).to_string()
+    }
+
+    pub(crate) fn line_len_chars(&self, line_idx: usize) -> usize {
+        let line_idx = self.clamp_line_idx(line_idx);
+        line_content_len_chars(self.text.line(line_idx))
     }
 
     pub fn line_window(
@@ -659,6 +677,7 @@ impl Buffer {
         self.clean_history_state = 0;
         self.next_history_state = 1;
         self.revision = self.revision.wrapping_add(1);
+        self.last_change = None;
         self.disk_baseline = disk_baseline;
         self.save_location = save_location;
         self.disk_changed = false;
@@ -711,6 +730,8 @@ impl Buffer {
     }
 
     fn apply_change(&mut self, start: usize, remove_len: usize, inserted: &str) {
+        let previous_revision = self.revision;
+        let start_line = self.line_for_char(start);
         if remove_len > 0 {
             self.text.remove(start..start + remove_len);
         }
@@ -718,6 +739,11 @@ impl Buffer {
             self.text.insert(start, inserted);
         }
         self.revision = self.revision.wrapping_add(1);
+        self.last_change = Some(BufferChange {
+            previous_revision,
+            revision: self.revision,
+            start_line,
+        });
     }
 
     fn allocate_history_state(&mut self) -> u64 {
@@ -744,6 +770,7 @@ impl Clone for Buffer {
             clean_history_state: self.clean_history_state,
             next_history_state: self.next_history_state,
             revision: self.revision,
+            last_change: self.last_change,
             undo_stack: self.undo_stack.clone(),
             redo_stack: self.redo_stack.clone(),
             line_column_cache: RefCell::new(LineColumnCache {
@@ -1696,6 +1723,7 @@ fn ensure_parent_directory_exists(path: &Path) -> io::Result<()> {
 mod tests {
     use super::{
         disk_stamp, temp_path_for, write_atomically_with, write_atomically_with_metadata, Buffer,
+        BufferChange,
     };
     use std::{
         fs::{self, FileTimes},
@@ -1800,8 +1828,30 @@ mod tests {
         assert!(!buffer.is_dirty());
         assert!(!buffer.disk_changed());
         assert_eq!(buffer.revision(), revision.wrapping_add(1));
+        assert_eq!(buffer.last_change(), None);
         assert_eq!(buffer.undo(), None);
         assert_eq!(buffer.redo(), None);
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn edit_records_the_changed_line_and_consecutive_revisions() {
+        let dir = test_dir("last-change");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        let previous_revision = buffer.revision();
+
+        buffer.insert(buffer.line_start_char(1), "edited ");
+
+        assert_eq!(
+            buffer.last_change(),
+            Some(BufferChange {
+                previous_revision,
+                revision: buffer.revision(),
+                start_line: 1,
+            })
+        );
         remove_dir(dir);
     }
 

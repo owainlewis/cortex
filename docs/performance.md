@@ -12,7 +12,7 @@ The checks generate their own temporary large files and cover:
 
 - repeated insertion and deletion near the end of a large rope-backed buffer
 - repeated viewport rendering deep inside a large file
-- visible-line syntax highlighting near the end of large Rust and Markdown files
+- initial and post-edit visible-line syntax highlighting near the end of large Rust and Markdown files
 - repeated search for a match near the end of a large buffer
 
 Each check asserts deterministic correctness or a structural output bound.

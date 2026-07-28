@@ -1,5 +1,9 @@
 use crate::buffer::Buffer;
-use std::{collections::HashMap, ops::Range, path::Path};
+use std::{
+    collections::{HashMap, VecDeque},
+    ops::Range,
+    path::Path,
+};
 use tree_sitter_highlight::{
     HighlightConfiguration, HighlightEvent, Highlighter as TreeSitterHighlighter,
 };
@@ -54,6 +58,9 @@ const RUBY_EXTENSIONS: &[&str] = &["rb", "rake", "gemspec"];
 const OCAML_EXTENSIONS: &[&str] = &["ml"];
 const OCAML_INTERFACE_EXTENSIONS: &[&str] = &["mli"];
 const HIGHLIGHT_READ_AHEAD_LINES: usize = 256;
+const HIGHLIGHT_WINDOW_LINES: usize = 256;
+const CONTEXT_CHECKPOINT_LINES: usize = 256;
+const MAX_RECENT_CHECKPOINTS: usize = 8;
 const MAX_HIGHLIGHT_LINE_CHARS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +110,8 @@ pub struct SyntaxHighlighter {
     document_parse_count: usize,
     #[cfg(test)]
     last_request_bytes: usize,
+    #[cfg(test)]
+    last_scanned_lines: usize,
 }
 
 struct LanguageDefinition {
@@ -112,8 +121,516 @@ struct LanguageDefinition {
 
 struct HighlightedDocument {
     revision: u64,
-    covered_lines: usize,
+    cache: HighlightCache,
+}
+
+enum HighlightCache {
+    Prefix {
+        covered_lines: usize,
+        lines: Vec<Vec<HighlightSpan>>,
+    },
+    Windowed(WindowedHighlightCache),
+}
+
+struct WindowedHighlightCache {
+    language: CheckpointLanguage,
+    checkpoints: VecDeque<ContextCheckpoint>,
+    window: Option<HighlightWindow>,
+}
+
+#[derive(Clone)]
+struct ContextCheckpoint {
+    line: usize,
+    context: SyntaxContext,
+}
+
+struct HighlightWindow {
+    line_range: Range<usize>,
     lines: Vec<Vec<HighlightSpan>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointLanguage {
+    Rust,
+    Markdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SyntaxContext {
+    Rust(RustContext),
+    Markdown(MarkdownContext),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RustContext {
+    Code,
+    BlockComment(usize),
+    String,
+    RawString(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MarkdownContext {
+    Normal,
+    Fence {
+        marker: u8,
+        marker_len: usize,
+        info: String,
+        rust: Option<RustContext>,
+    },
+}
+
+impl HighlightedDocument {
+    fn new(path: &Path, revision: u64) -> Self {
+        let cache = checkpoint_language_for_path(path).map_or_else(
+            || HighlightCache::Prefix {
+                covered_lines: 0,
+                lines: Vec::new(),
+            },
+            |language| HighlightCache::Windowed(WindowedHighlightCache::new(language)),
+        );
+
+        Self { revision, cache }
+    }
+
+    fn prepare_revision(&mut self, buffer: &Buffer) {
+        if self.revision == buffer.revision() {
+            return;
+        }
+
+        match &mut self.cache {
+            HighlightCache::Prefix {
+                covered_lines,
+                lines,
+            } => {
+                *covered_lines = 0;
+                lines.clear();
+            }
+            HighlightCache::Windowed(cache) => {
+                if let Some(change) = buffer.last_change().filter(|change| {
+                    change.previous_revision == self.revision
+                        && change.revision == buffer.revision()
+                }) {
+                    cache.invalidate_from(change.start_line);
+                } else {
+                    cache.reset();
+                }
+            }
+        }
+        self.revision = buffer.revision();
+    }
+}
+
+impl WindowedHighlightCache {
+    fn new(language: CheckpointLanguage) -> Self {
+        let mut checkpoints = VecDeque::new();
+        checkpoints.push_back(ContextCheckpoint {
+            line: 0,
+            context: language.initial_context(),
+        });
+
+        Self {
+            language,
+            checkpoints,
+            window: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.checkpoints.clear();
+        self.checkpoints.push_back(ContextCheckpoint {
+            line: 0,
+            context: self.language.initial_context(),
+        });
+        self.window = None;
+    }
+
+    fn invalidate_from(&mut self, start_line: usize) {
+        self.checkpoints
+            .retain(|checkpoint| checkpoint.line <= start_line);
+        if self.checkpoints.is_empty() {
+            self.checkpoints.push_back(ContextCheckpoint {
+                line: 0,
+                context: self.language.initial_context(),
+            });
+        }
+        if self
+            .window
+            .as_ref()
+            .is_some_and(|window| window.line_range.end > start_line)
+        {
+            self.window = None;
+        }
+    }
+
+    fn context_at_line(&mut self, buffer: &Buffer, target_line: usize) -> (SyntaxContext, usize) {
+        let target_line = target_line.min(buffer.len_lines());
+        let checkpoint = self
+            .checkpoints
+            .iter()
+            .rev()
+            .find(|checkpoint| checkpoint.line <= target_line)
+            .cloned()
+            .unwrap_or_else(|| ContextCheckpoint {
+                line: 0,
+                context: self.language.initial_context(),
+            });
+        let mut context = checkpoint.context;
+        let mut scanned_lines = 0;
+
+        for line_idx in checkpoint.line..target_line {
+            let line = buffer.line_prefix_text(line_idx, MAX_HIGHLIGHT_LINE_CHARS);
+            let truncated = buffer.line_len_chars(line_idx) > MAX_HIGHLIGHT_LINE_CHARS;
+            context.advance_line(&line, truncated);
+            scanned_lines += 1;
+
+            let next_line = line_idx + 1;
+            if next_line % CONTEXT_CHECKPOINT_LINES == 0 {
+                self.push_checkpoint(next_line, context.clone());
+            }
+        }
+
+        (context, scanned_lines)
+    }
+
+    fn push_checkpoint(&mut self, line: usize, context: SyntaxContext) {
+        if self
+            .checkpoints
+            .back()
+            .is_some_and(|checkpoint| checkpoint.line == line)
+        {
+            return;
+        }
+
+        self.checkpoints.retain(|checkpoint| checkpoint.line < line);
+        self.checkpoints
+            .push_back(ContextCheckpoint { line, context });
+        while self.checkpoints.len() > MAX_RECENT_CHECKPOINTS + 1 {
+            self.checkpoints.remove(1);
+        }
+    }
+}
+
+impl CheckpointLanguage {
+    fn initial_context(self) -> SyntaxContext {
+        match self {
+            Self::Rust => SyntaxContext::Rust(RustContext::Code),
+            Self::Markdown => SyntaxContext::Markdown(MarkdownContext::Normal),
+        }
+    }
+}
+
+impl SyntaxContext {
+    fn advance_line(&mut self, line: &str, truncated: bool) {
+        *self = match self {
+            Self::Rust(context) => Self::Rust(if truncated {
+                RustContext::Code
+            } else {
+                scan_rust_line(*context, line)
+            }),
+            Self::Markdown(context) => Self::Markdown(if truncated {
+                MarkdownContext::Normal
+            } else {
+                scan_markdown_line(context.clone(), line)
+            }),
+        };
+    }
+
+    fn wrapper(&self) -> Option<(String, String)> {
+        match self {
+            Self::Rust(context) => rust_wrapper(*context),
+            Self::Markdown(MarkdownContext::Normal) => None,
+            Self::Markdown(MarkdownContext::Fence {
+                marker,
+                marker_len,
+                info,
+                rust,
+            }) => {
+                let mut seed = String::from_utf8(vec![*marker; *marker_len])
+                    .expect("Markdown fence marker should be ASCII");
+                if !info.is_empty() {
+                    seed.push(' ');
+                    seed.push_str(info);
+                }
+                let rust_wrapper = rust.and_then(rust_wrapper);
+                if let Some((rust_seed, _)) = &rust_wrapper {
+                    seed.push('\n');
+                    seed.push_str(rust_seed);
+                }
+                let mut suffix = String::new();
+                if let Some((_, rust_suffix)) = rust_wrapper {
+                    suffix.push_str(&rust_suffix);
+                    suffix.push('\n');
+                }
+                suffix.push_str(
+                    &String::from_utf8(vec![*marker; *marker_len])
+                        .expect("Markdown fence marker should be ASCII"),
+                );
+                Some((seed, suffix))
+            }
+        }
+    }
+}
+
+fn checkpoint_language_for_path(path: &Path) -> Option<CheckpointLanguage> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "rs" => Some(CheckpointLanguage::Rust),
+        "md" | "markdown" => Some(CheckpointLanguage::Markdown),
+        _ => None,
+    }
+}
+
+fn range_contains(outer: &Range<usize>, inner: &Range<usize>) -> bool {
+    outer.start <= inner.start && outer.end >= inner.end
+}
+
+fn text_line_range(buffer: &Buffer, line_range: Range<usize>) -> (String, Vec<usize>) {
+    let start = line_range.start.min(buffer.len_lines());
+    let end = line_range.end.min(buffer.len_lines());
+    let mut source = String::new();
+    let mut context_barriers = Vec::new();
+
+    for (offset, line_idx) in (start..end).enumerate() {
+        if offset > 0 {
+            source.push('\n');
+        }
+        source.push_str(&buffer.line_prefix_text(line_idx, MAX_HIGHLIGHT_LINE_CHARS));
+        if buffer.line_len_chars(line_idx) > MAX_HIGHLIGHT_LINE_CHARS {
+            context_barriers.push(offset + 1);
+        }
+    }
+
+    (source, context_barriers)
+}
+
+fn seeded_source(
+    context: SyntaxContext,
+    source: String,
+    context_barriers: Vec<usize>,
+) -> (String, Vec<usize>, usize) {
+    let Some((seed, suffix)) = context.wrapper() else {
+        return (source, context_barriers, 0);
+    };
+    let seed_lines = document_lines(&seed).len();
+    let mut seeded = seed;
+    seeded.push('\n');
+    seeded.push_str(&source);
+    seeded.push('\n');
+    seeded.push_str(&suffix);
+    let context_barriers = context_barriers
+        .into_iter()
+        .map(|barrier| barrier + seed_lines)
+        .collect();
+    (seeded, context_barriers, seed_lines)
+}
+
+fn rust_wrapper(context: RustContext) -> Option<(String, String)> {
+    match context {
+        RustContext::Code => None,
+        RustContext::BlockComment(depth) => Some(("/* ".repeat(depth), " */".repeat(depth))),
+        RustContext::String => Some(("let cortex_seed = \"".to_string(), "\";".to_string())),
+        RustContext::RawString(hashes) => Some((
+            format!("let cortex_seed = r{}\"", "#".repeat(hashes)),
+            format!("\"{};", "#".repeat(hashes)),
+        )),
+    }
+}
+
+fn scan_rust_line(mut context: RustContext, line: &str) -> RustContext {
+    let bytes = line.as_bytes();
+    let mut idx = 0;
+
+    while idx < bytes.len() {
+        match context {
+            RustContext::Code => {
+                if bytes[idx..].starts_with(b"//") {
+                    break;
+                }
+                if bytes[idx..].starts_with(b"/*") {
+                    context = RustContext::BlockComment(1);
+                    idx += 2;
+                    continue;
+                }
+                if let Some((end, hashes)) = raw_string_opener(bytes, idx) {
+                    context = RustContext::RawString(hashes);
+                    idx = end;
+                    continue;
+                }
+                if let Some(end) = char_literal_end(line, idx) {
+                    idx = end;
+                    continue;
+                }
+                if bytes[idx] == b'"' {
+                    context = RustContext::String;
+                }
+                idx += 1;
+            }
+            RustContext::BlockComment(depth) => {
+                if bytes[idx..].starts_with(b"/*") {
+                    context = RustContext::BlockComment(depth + 1);
+                    idx += 2;
+                } else if bytes[idx..].starts_with(b"*/") {
+                    context = if depth == 1 {
+                        RustContext::Code
+                    } else {
+                        RustContext::BlockComment(depth - 1)
+                    };
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            RustContext::String => {
+                if bytes[idx] == b'\\' {
+                    idx = (idx + 2).min(bytes.len());
+                } else {
+                    if bytes[idx] == b'"' {
+                        context = RustContext::Code;
+                    }
+                    idx += 1;
+                }
+            }
+            RustContext::RawString(hashes) => {
+                if raw_string_closes(bytes, idx, hashes) {
+                    context = RustContext::Code;
+                    idx += hashes + 1;
+                } else {
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    context
+}
+
+fn char_literal_end(line: &str, start: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    if bytes.get(start) != Some(&b'\'') {
+        return None;
+    }
+
+    let mut idx = start + 1;
+    if bytes.get(idx) == Some(&b'\\') {
+        idx += 1;
+        match bytes.get(idx)? {
+            b'x' => idx += 3,
+            b'u' if bytes.get(idx + 1) == Some(&b'{') => {
+                idx = bytes[idx + 2..].iter().position(|byte| *byte == b'}')? + idx + 3;
+            }
+            _ => idx += 1,
+        }
+    } else {
+        let character = line.get(idx..)?.chars().next()?;
+        if matches!(character, '\'' | '\n' | '\r') {
+            return None;
+        }
+        idx += character.len_utf8();
+    }
+
+    (bytes.get(idx) == Some(&b'\'')).then_some(idx + 1)
+}
+
+fn raw_string_opener(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    if start > 0 && matches!(bytes[start - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') {
+        return None;
+    }
+    let mut idx = start;
+    if matches!(bytes.get(idx), Some(b'b' | b'c')) {
+        idx += 1;
+    }
+    if bytes.get(idx) != Some(&b'r') {
+        return None;
+    }
+    idx += 1;
+    let hashes_start = idx;
+    while bytes.get(idx) == Some(&b'#') {
+        idx += 1;
+    }
+    (bytes.get(idx) == Some(&b'"')).then_some((idx + 1, idx - hashes_start))
+}
+
+fn raw_string_closes(bytes: &[u8], start: usize, hashes: usize) -> bool {
+    bytes.get(start) == Some(&b'"')
+        && bytes
+            .get(start + 1..start + 1 + hashes)
+            .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+}
+
+fn scan_markdown_line(context: MarkdownContext, line: &str) -> MarkdownContext {
+    match context {
+        MarkdownContext::Normal => markdown_fence(line).map_or(MarkdownContext::Normal, |fence| {
+            let rust = markdown_fence_is_rust(&fence.2).then_some(RustContext::Code);
+            MarkdownContext::Fence {
+                marker: fence.0,
+                marker_len: fence.1,
+                info: fence.2,
+                rust,
+            }
+        }),
+        MarkdownContext::Fence {
+            marker,
+            marker_len,
+            info,
+            mut rust,
+        } => {
+            if markdown_fence_closes(line, marker, marker_len) {
+                MarkdownContext::Normal
+            } else {
+                if let Some(context) = &mut rust {
+                    *context = scan_rust_line(*context, line);
+                }
+                MarkdownContext::Fence {
+                    marker,
+                    marker_len,
+                    info,
+                    rust,
+                }
+            }
+        }
+    }
+}
+
+fn markdown_fence(line: &str) -> Option<(u8, usize, String)> {
+    let trimmed = line.trim_start_matches(' ');
+    if line.len().saturating_sub(trimmed.len()) > 3 {
+        return None;
+    }
+    let marker = *trimmed.as_bytes().first()?;
+    if !matches!(marker, b'`' | b'~') {
+        return None;
+    }
+    let marker_len = trimmed
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == marker)
+        .count();
+    if marker_len < 3 {
+        return None;
+    }
+    let info = trimmed[marker_len..].trim().to_string();
+    Some((marker, marker_len, info))
+}
+
+fn markdown_fence_closes(line: &str, marker: u8, marker_len: usize) -> bool {
+    let trimmed = line.trim_start_matches(' ');
+    if line.len().saturating_sub(trimmed.len()) > 3 {
+        return false;
+    }
+    let closing_len = trimmed
+        .as_bytes()
+        .iter()
+        .take_while(|byte| **byte == marker)
+        .count();
+    closing_len >= marker_len && trimmed[closing_len..].trim().is_empty()
+}
+
+fn markdown_fence_is_rust(info: &str) -> bool {
+    matches!(
+        info.split_whitespace().next().unwrap_or_default(),
+        "rust" | "rs"
+    )
 }
 
 impl SyntaxHighlighter {
@@ -144,6 +661,8 @@ impl SyntaxHighlighter {
             document_parse_count: 0,
             #[cfg(test)]
             last_request_bytes: 0,
+            #[cfg(test)]
+            last_scanned_lines: 0,
         }
     }
 
@@ -152,44 +671,110 @@ impl SyntaxHighlighter {
         buffer: &Buffer,
         line_range: Range<usize>,
     ) -> Vec<Vec<HighlightSpan>> {
+        #[cfg(test)]
+        {
+            self.last_request_bytes = 0;
+            self.last_scanned_lines = 0;
+        }
+
         let visible_start = line_range.start.min(buffer.len_lines());
         let visible_end = line_range.end.min(buffer.len_lines());
+        let requested_range = visible_start..visible_end;
         if self.language_idx_for_path(buffer.path()).is_none() {
             return vec![Vec::new(); visible_end.saturating_sub(visible_start)];
         }
 
         let buffer_id = buffer.id();
         let revision = buffer.revision();
-        let needs_refresh = self.documents.get(&buffer_id).is_none_or(|document| {
-            document.revision != revision || document.covered_lines < visible_end
-        });
+        let mut document = self
+            .documents
+            .remove(&buffer_id)
+            .unwrap_or_else(|| HighlightedDocument::new(buffer.path(), revision));
+        document.prepare_revision(buffer);
 
-        if needs_refresh {
-            let covered_lines = visible_end
-                .saturating_add(HIGHLIGHT_READ_AHEAD_LINES)
-                .min(buffer.len_lines());
-            let (source, context_barriers) =
-                buffer.text_prefix_lines(covered_lines, MAX_HIGHLIGHT_LINE_CHARS);
-            #[cfg(test)]
-            {
-                self.last_request_bytes = source.len();
+        let highlighted = match &mut document.cache {
+            HighlightCache::Prefix {
+                covered_lines,
+                lines,
+            } => {
+                if *covered_lines < visible_end {
+                    *covered_lines = visible_end
+                        .saturating_add(HIGHLIGHT_READ_AHEAD_LINES)
+                        .min(buffer.len_lines());
+                    let (source, context_barriers) =
+                        buffer.text_prefix_lines(*covered_lines, MAX_HIGHLIGHT_LINE_CHARS);
+                    #[cfg(test)]
+                    {
+                        self.last_request_bytes = source.len();
+                    }
+                    *lines =
+                        self.highlight_document_segments(buffer.path(), &source, &context_barriers);
+                }
+
+                lines[requested_range.start.min(lines.len())..requested_range.end.min(lines.len())]
+                    .to_vec()
             }
-            let highlighted_lines =
-                self.highlight_document_segments(buffer.path(), &source, &context_barriers);
-            self.documents.insert(
-                buffer_id,
-                HighlightedDocument {
-                    revision,
-                    covered_lines,
-                    lines: highlighted_lines,
-                },
-            );
-        }
+            HighlightCache::Windowed(cache) => {
+                if cache
+                    .window
+                    .as_ref()
+                    .is_none_or(|window| !range_contains(&window.line_range, &requested_range))
+                {
+                    let window_start =
+                        (visible_start / HIGHLIGHT_WINDOW_LINES) * HIGHLIGHT_WINDOW_LINES;
+                    let covered_end = visible_end
+                        .saturating_add(HIGHLIGHT_READ_AHEAD_LINES)
+                        .max(
+                            window_start
+                                .saturating_add(HIGHLIGHT_WINDOW_LINES)
+                                .saturating_add(HIGHLIGHT_READ_AHEAD_LINES),
+                        )
+                        .min(buffer.len_lines());
+                    let (context, _scanned_lines) = cache.context_at_line(buffer, window_start);
+                    #[cfg(test)]
+                    {
+                        self.last_scanned_lines += _scanned_lines;
+                    }
+                    let (source, context_barriers) =
+                        text_line_range(buffer, window_start..covered_end);
+                    let (source, context_barriers, seed_lines) =
+                        seeded_source(context, source, context_barriers);
+                    #[cfg(test)]
+                    {
+                        self.last_request_bytes = source.len();
+                    }
+                    let mut lines =
+                        self.highlight_document_segments(buffer.path(), &source, &context_barriers);
+                    if seed_lines > 0 {
+                        lines.drain(..seed_lines.min(lines.len()));
+                    }
+                    lines.truncate(covered_end.saturating_sub(window_start));
+                    let (_, _scanned_lines) = cache.context_at_line(buffer, covered_end);
+                    #[cfg(test)]
+                    {
+                        self.last_scanned_lines += _scanned_lines;
+                    }
+                    cache.window = Some(HighlightWindow {
+                        line_range: window_start..window_start.saturating_add(lines.len()),
+                        lines,
+                    });
+                }
 
-        let document = &self.documents[&buffer_id];
-        document.lines
-            [line_range.start.min(document.lines.len())..line_range.end.min(document.lines.len())]
-            .to_vec()
+                let window = cache.window.as_ref().expect("highlight window missing");
+                let start = requested_range
+                    .start
+                    .saturating_sub(window.line_range.start)
+                    .min(window.lines.len());
+                let end = requested_range
+                    .end
+                    .saturating_sub(window.line_range.start)
+                    .min(window.lines.len());
+                window.lines[start..end].to_vec()
+            }
+        };
+
+        self.documents.insert(buffer_id, document);
+        highlighted
     }
 
     fn highlight_document_segments(
@@ -883,6 +1468,211 @@ mod tests {
     }
 
     #[test]
+    fn deep_rust_comment_edit_keeps_context_and_bounds_refresh_work() {
+        let mut lines = (0..20_000)
+            .map(|idx| format!("comment line {idx}"))
+            .collect::<Vec<_>>();
+        lines[100] = "/* comment opener".to_string();
+        let (mut buffer, dir) = buffer_with_text("deep.rs", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+        let viewport = 19_000..19_020;
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::Comment)));
+
+        buffer.insert(buffer.line_start_char(19_010), "inserted line\n");
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport);
+
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::Comment)));
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn deep_rust_raw_string_edit_keeps_context_and_bounds_refresh_work() {
+        let mut lines = (0..20_000)
+            .map(|idx| format!("raw string line {idx}"))
+            .collect::<Vec<_>>();
+        lines[100] = "let text = r###\"raw opener".to_string();
+        lines[19_900] = "\"###;".to_string();
+        let (mut buffer, dir) = buffer_with_text("deep.rs", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+        let viewport = 19_000..19_020;
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::String)));
+
+        buffer.insert(buffer.line_start_char(19_010), "edited ");
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport);
+
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::String)));
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn deep_rust_multiline_string_edit_keeps_context_and_bounds_refresh_work() {
+        let mut lines = (0..20_000)
+            .map(|idx| format!("string line {idx}"))
+            .collect::<Vec<_>>();
+        lines[100] = "let text = \"string opener".to_string();
+        lines[19_900] = "\";".to_string();
+        let (mut buffer, dir) = buffer_with_text("deep.rs", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+        let viewport = 19_000..19_020;
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::String)));
+
+        buffer.insert(buffer.line_start_char(19_010), "edited ");
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport);
+
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::String)));
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn deep_rust_character_literals_do_not_corrupt_checkpoint_context() {
+        let mut lines = (0..20_000)
+            .map(|idx| format!("let item_{idx} = {idx};"))
+            .collect::<Vec<_>>();
+        lines[100] = "let quote = '\"';".to_string();
+        lines[101] = "let escaped_quote = '\\'';".to_string();
+        lines[102] = "let byte_quote = b'\"';".to_string();
+        lines[103] = "let lifetime: &'static str = \"valid\";".to_string();
+        let (mut buffer, dir) = buffer_with_text("deep.rs", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 19_000..19_020);
+
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::Keyword)));
+        buffer.insert(buffer.line_end_char(19_010), " // edited");
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 19_000..19_020);
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::Keyword)));
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn deep_markdown_fence_edit_keeps_injected_rust_and_bounds_refresh_work() {
+        let mut lines = (0..20_000)
+            .map(|idx| format!("fn item_{idx}() {{}}"))
+            .collect::<Vec<_>>();
+        lines[100] = "```rust".to_string();
+        lines[19_900] = "```".to_string();
+        let (mut buffer, dir) = buffer_with_text("deep.md", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+        let viewport = 19_000..19_020;
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport.clone());
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::Keyword)));
+
+        buffer.insert(buffer.line_end_char(19_010), " // edited");
+        let highlighted = highlighter.highlight_visible_lines(&buffer, viewport);
+
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::Keyword)));
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn deep_markdown_rust_character_literals_do_not_corrupt_injected_context() {
+        let mut lines = (0..20_000)
+            .map(|idx| format!("let item_{idx} = {idx};"))
+            .collect::<Vec<_>>();
+        lines[100] = "```rust".to_string();
+        lines[101] = "let quote = '\"';".to_string();
+        lines[102] = "let escaped_quote = '\\'';".to_string();
+        lines[103] = "let byte_quote = b'\"';".to_string();
+        lines[19_900] = "```".to_string();
+        let (mut buffer, dir) = buffer_with_text("deep.md", &lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 19_000..19_020);
+
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::Keyword)));
+        buffer.insert(buffer.line_end_char(19_010), " // edited");
+        let highlighted = highlighter.highlight_visible_lines(&buffer, 19_000..19_020);
+        assert!(highlighted
+            .iter()
+            .all(|line| line_has_kind(line, HighlightKind::Keyword)));
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn seeded_rust_and_markdown_context_can_close_inside_the_window() {
+        let mut rust_lines = vec!["comment".to_string(); 20_000];
+        rust_lines[100] = "/* opener".to_string();
+        rust_lines[19_005] = "*/".to_string();
+        rust_lines[19_006] = "let visible = 42;".to_string();
+        let (rust_buffer, rust_dir) = buffer_with_text("close.rs", &rust_lines.join("\n"));
+        let mut markdown_lines = vec!["fn item() {}".to_string(); 20_000];
+        markdown_lines[100] = "```rust".to_string();
+        markdown_lines[19_005] = "```".to_string();
+        markdown_lines[19_006] = "# Visible heading".to_string();
+        let (markdown_buffer, markdown_dir) =
+            buffer_with_text("close.md", &markdown_lines.join("\n"));
+        let mut highlighter = SyntaxHighlighter::new();
+
+        let rust = highlighter.highlight_visible_lines(&rust_buffer, 19_000..19_010);
+        let markdown = highlighter.highlight_visible_lines(&markdown_buffer, 19_000..19_010);
+
+        assert!(line_has_kind(&rust[0], HighlightKind::Comment));
+        assert!(line_has_kind(&rust[6], HighlightKind::Keyword));
+        assert!(line_has_kind(&markdown[0], HighlightKind::Keyword));
+        assert!(line_has_kind(&markdown[6], HighlightKind::MarkupHeading));
+        remove_dir(rust_dir);
+        remove_dir(markdown_dir);
+    }
+
+    #[test]
+    fn scrolling_deeper_uses_recent_context_checkpoints() {
+        let text = (0..20_000)
+            .map(|idx| format!("fn item_{idx}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (buffer, dir) = buffer_with_text("scroll.rs", &text);
+        let mut highlighter = SyntaxHighlighter::new();
+
+        highlighter.highlight_visible_lines(&buffer, 10_000..10_020);
+        let parse_count = highlighter.document_parse_count;
+        highlighter.highlight_visible_lines(&buffer, 10_010..10_030);
+        assert_eq!(highlighter.document_parse_count, parse_count);
+        assert_eq!(highlighter.last_scanned_lines, 0);
+        assert_eq!(highlighter.last_request_bytes, 0);
+
+        highlighter.highlight_visible_lines(&buffer, 10_500..10_520);
+
+        assert_eq!(highlighter.document_parse_count, parse_count + 1);
+        assert_deep_refresh_is_bounded(&highlighter, buffer.id());
+        remove_dir(dir);
+    }
+
+    #[test]
     fn scrolling_reuses_cached_document_highlights() {
         let (buffer, dir) = buffer_with_text("cached.rs", "fn main() {\n    let answer = 42;\n}\n");
         let mut highlighter = SyntaxHighlighter::new();
@@ -940,20 +1730,20 @@ mod tests {
         let mut highlighter = SyntaxHighlighter::new();
 
         highlighter.highlight_visible_lines(&buffer, 0..20);
-        let document = &highlighter.documents[&buffer.id()];
+        let window = highlight_window(&highlighter, buffer.id());
         assert_eq!(
-            document.covered_lines,
-            20 + super::HIGHLIGHT_READ_AHEAD_LINES
+            window.line_range,
+            0..super::HIGHLIGHT_WINDOW_LINES + super::HIGHLIGHT_READ_AHEAD_LINES
         );
-        assert!(document.lines.len() <= document.covered_lines + 1);
+        assert_eq!(window.lines.len(), window.line_range.end);
 
         buffer.insert(0, "// edit\n");
         highlighter.highlight_visible_lines(&buffer, 0..20);
 
         assert_eq!(highlighter.document_parse_count, 2);
         assert_eq!(
-            highlighter.documents[&buffer.id()].covered_lines,
-            20 + super::HIGHLIGHT_READ_AHEAD_LINES
+            highlight_window(&highlighter, buffer.id()).line_range,
+            0..super::HIGHLIGHT_WINDOW_LINES + super::HIGHLIGHT_READ_AHEAD_LINES
         );
         remove_dir(dir);
     }
@@ -1043,6 +1833,31 @@ mod tests {
 
     fn line_has_kind(spans: &[super::HighlightSpan], kind: HighlightKind) -> bool {
         spans.iter().any(|span| span.kind == kind)
+    }
+
+    fn highlight_window(
+        highlighter: &SyntaxHighlighter,
+        buffer_id: u64,
+    ) -> &super::HighlightWindow {
+        let document = &highlighter.documents[&buffer_id];
+        let super::HighlightCache::Windowed(cache) = &document.cache else {
+            panic!("expected a windowed highlight cache");
+        };
+        cache.window.as_ref().expect("expected a highlight window")
+    }
+
+    fn assert_deep_refresh_is_bounded(highlighter: &SyntaxHighlighter, buffer_id: u64) {
+        let document = &highlighter.documents[&buffer_id];
+        let super::HighlightCache::Windowed(cache) = &document.cache else {
+            panic!("expected a windowed highlight cache");
+        };
+        let window = cache.window.as_ref().expect("expected a highlight window");
+        let max_window_lines = super::HIGHLIGHT_WINDOW_LINES + super::HIGHLIGHT_READ_AHEAD_LINES;
+
+        assert!(highlighter.last_scanned_lines <= max_window_lines);
+        assert!(highlighter.last_request_bytes <= max_window_lines * 128);
+        assert!(window.lines.len() <= max_window_lines);
+        assert!(cache.checkpoints.len() <= super::MAX_RECENT_CHECKPOINTS + 1);
     }
 
     fn buffer_with_text(file_name: &str, text: &str) -> (Buffer, PathBuf) {
