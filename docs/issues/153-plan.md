@@ -15,7 +15,7 @@ The bug reproduces with both Crossterm 0.27 and 0.29, so reverting the dependenc
 
 1. Arm one terminal disconnect guard at the start of `TerminalSession::enter`, before raw mode and alternate-screen setup.
 2. Monitor terminal stdin for `POLLHUP`, `POLLERR`, and `POLLNVAL` without requesting or consuming input events.
-3. Leave the guard inactive when stdin is redirected because Crossterm may open `/dev/tty`, macOS `poll` rejects that descriptor, and no other standard descriptor is guaranteed to refer to the same terminal.
+3. Leave the guard inactive when stdin is redirected or explicitly opened from `/dev/tty` because macOS `poll` rejects that descriptor and no other standard descriptor is guaranteed to refer to the same terminal.
 4. Never use redirected stdout for the hard-exit path.
 5. Exit immediately when the PTY controller is gone because Crossterm may have trapped the main thread and the destroyed PTY can no longer receive cleanup output.
 6. Keep the guard owned by `TerminalSession` so every terminal path is covered and connected cleanup remains paired with the monitor.
@@ -30,6 +30,7 @@ The bug reproduces with both Crossterm 0.27 and 0.29, so reverting the dependenc
 - SIGTERM and SIGHUP still unwind through terminal cleanup.
 - Editor and picker key input and resize events still use the existing main-thread Crossterm loop.
 - Redirected stdin does not make the disconnect guard bypass connected-terminal cleanup.
+- Explicit `/dev/tty` stdin does not make the disconnect guard bypass connected-terminal cleanup.
 - Closing redirected stdout does not make the disconnect guard bypass cleanup for terminal stdin.
 - Normal quit restores the terminal and leaves the shell usable.
 - Renderer failures still restore connected terminal state.

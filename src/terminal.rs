@@ -3,6 +3,7 @@ use crossterm::{
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{
+    ffi::CStr,
     io::{self, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -146,11 +147,26 @@ impl Drop for TerminalDisconnectGuard {
 }
 
 fn terminal_stdin_descriptor() -> Option<libc::c_int> {
-    disconnect_descriptor(unsafe { libc::isatty(libc::STDIN_FILENO) == 1 })
+    let stdin_is_terminal = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
+    if !stdin_is_terminal {
+        return None;
+    }
+
+    let stdin_is_dev_tty = stdin_terminal_name()?.as_slice() == b"/dev/tty";
+    disconnect_descriptor(true, stdin_is_dev_tty)
 }
 
-fn disconnect_descriptor(stdin_is_terminal: bool) -> Option<libc::c_int> {
-    stdin_is_terminal.then_some(libc::STDIN_FILENO)
+fn stdin_terminal_name() -> Option<Vec<u8>> {
+    let mut path = [0 as libc::c_char; libc::PATH_MAX as usize];
+    if unsafe { libc::ttyname_r(libc::STDIN_FILENO, path.as_mut_ptr(), path.len()) } != 0 {
+        return None;
+    }
+
+    Some(unsafe { CStr::from_ptr(path.as_ptr()) }.to_bytes().to_vec())
+}
+
+fn disconnect_descriptor(stdin_is_terminal: bool, stdin_is_dev_tty: bool) -> Option<libc::c_int> {
+    (stdin_is_terminal && !stdin_is_dev_tty).then_some(libc::STDIN_FILENO)
 }
 
 fn monitor_disconnect(terminal_descriptor: libc::c_int, stop: Arc<AtomicBool>) {
@@ -187,14 +203,19 @@ mod tests {
     #[test]
     fn disconnect_monitor_requires_terminal_stdin() {
         assert_eq!(
-            disconnect_descriptor(true),
+            disconnect_descriptor(true, false),
             Some(libc::STDIN_FILENO),
-            "terminal stdin is safe to monitor"
+            "a direct terminal stdin is safe to monitor"
         );
         assert_eq!(
-            disconnect_descriptor(false),
+            disconnect_descriptor(false, false),
             None,
             "redirected stdin must not fall back to another descriptor"
+        );
+        assert_eq!(
+            disconnect_descriptor(true, true),
+            None,
+            "/dev/tty stdin must not use macOS poll"
         );
     }
 

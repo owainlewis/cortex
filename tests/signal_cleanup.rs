@@ -88,6 +88,30 @@ fn redirected_stdin_error_still_restores_the_terminal() {
 }
 
 #[test]
+fn dev_tty_stdin_error_still_restores_the_terminal() {
+    let fixture = Fixture::new("dev-tty-stdin");
+    let path = fixture.path().join("file.txt");
+    fs::write(&path, "before\n").expect("write /dev/tty stdin fixture");
+
+    let mut session = PtySession::spawn_with_dev_tty_stdin(&path);
+    session.wait_for_output(ALT_SCREEN_ENTER);
+    session.wait_for_output(CURSOR_HIDE);
+    let status = session.wait_for_exit();
+    assert!(
+        !status.success(),
+        "Crossterm's /dev/tty input error must fail"
+    );
+    session.assert_raw_mode_restored();
+    assert_contains(&session.output, ALT_SCREEN_LEAVE, "alternate screen leave");
+    assert_contains(&session.output, CURSOR_SHOW, "cursor show");
+    assert_contains(
+        &session.output,
+        b"Failed to initialize input reader",
+        "/dev/tty input error",
+    );
+}
+
+#[test]
 fn closed_redirected_stdout_does_not_bypass_terminal_cleanup() {
     let fixture = Fixture::new("redirected-stdout");
     let path = fixture.path().join("file.txt");
@@ -282,19 +306,23 @@ struct PtySession {
 
 impl PtySession {
     fn spawn(path: &Path) -> Self {
-        Self::spawn_with_options(path, 80, 24, false, false)
+        Self::spawn_with_options(path, 80, 24, false, false, false)
     }
 
     fn spawn_with_size(path: &Path, cols: u16, rows: u16) -> Self {
-        Self::spawn_with_options(path, cols, rows, false, false)
+        Self::spawn_with_options(path, cols, rows, false, false, false)
     }
 
     fn spawn_with_redirected_stdin(path: &Path) -> Self {
-        Self::spawn_with_options(path, 80, 24, true, false)
+        Self::spawn_with_options(path, 80, 24, true, false, false)
+    }
+
+    fn spawn_with_dev_tty_stdin(path: &Path) -> Self {
+        Self::spawn_with_options(path, 80, 24, true, false, true)
     }
 
     fn spawn_with_redirected_stdout(path: &Path) -> Self {
-        Self::spawn_with_options(path, 80, 24, false, true)
+        Self::spawn_with_options(path, 80, 24, false, true, false)
     }
 
     fn spawn_with_options(
@@ -303,6 +331,7 @@ impl PtySession {
         rows: u16,
         redirect_stdin: bool,
         redirect_stdout: bool,
+        open_dev_tty_stdin: bool,
     ) -> Self {
         // openpty cannot create the controller with FD_CLOEXEC atomically.
         // Serialize PTY creation through child spawn so a parallel child
@@ -336,12 +365,24 @@ impl PtySession {
 
         if redirect_stdin {
             unsafe {
-                command.pre_exec(|| {
+                command.pre_exec(move || {
                     if libc::setsid() == -1 {
                         return Err(io::Error::last_os_error());
                     }
                     if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCSCTTY.into(), 0) == -1 {
                         return Err(io::Error::last_os_error());
+                    }
+                    if open_dev_tty_stdin {
+                        let dev_tty = libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR);
+                        if dev_tty == -1 {
+                            return Err(io::Error::last_os_error());
+                        }
+                        if libc::dup2(dev_tty, libc::STDIN_FILENO) == -1 {
+                            let error = io::Error::last_os_error();
+                            libc::close(dev_tty);
+                            return Err(error);
+                        }
+                        libc::close(dev_tty);
                     }
                     Ok(())
                 });
