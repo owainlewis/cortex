@@ -2,7 +2,22 @@ use crossterm::{
     cursor, execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+};
+
+const DISCONNECT_EVENTS: libc::c_short = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+const DISCONNECT_CHECK_MILLIS: libc::c_int = 50;
+
+pub struct TerminalDisconnectGuard {
+    stop: Arc<AtomicBool>,
+    monitor: Option<thread::JoinHandle<()>>,
+}
 
 pub struct TerminalSession<W: Write> {
     writer: W,
@@ -99,6 +114,53 @@ impl<W: Write> TerminalSession<W> {
 impl<W: Write> Drop for TerminalSession<W> {
     fn drop(&mut self) {
         self.cleanup();
+    }
+}
+
+impl TerminalDisconnectGuard {
+    pub fn start() -> io::Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let monitor_stop = Arc::clone(&stop);
+        let monitor = thread::Builder::new()
+            .name("cortex-terminal-disconnect".to_string())
+            .spawn(move || monitor_disconnect(monitor_stop))?;
+
+        Ok(Self {
+            stop,
+            monitor: Some(monitor),
+        })
+    }
+}
+
+impl Drop for TerminalDisconnectGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(monitor) = self.monitor.take() {
+            let _ = monitor.join();
+        }
+    }
+}
+
+fn monitor_disconnect(stop: Arc<AtomicBool>) {
+    let mut descriptor = libc::pollfd {
+        // Crossterm may open /dev/tty when stdin is redirected, but macOS
+        // poll reports POLLNVAL for that opened descriptor. Cortex renders to
+        // the inherited terminal on stdout, which observes the same hangup.
+        fd: libc::STDOUT_FILENO,
+        events: 0,
+        revents: 0,
+    };
+
+    while !stop.load(Ordering::Acquire) {
+        let result = unsafe { libc::poll(&mut descriptor, 1, DISCONNECT_CHECK_MILLIS) };
+        if result == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if result == -1 || result > 0 && descriptor.revents & DISCONNECT_EVENTS != 0 {
+            // The PTY controller is gone, so no terminal remains to restore.
+            // Exit directly because Crossterm may have trapped the main thread.
+            unsafe { libc::_exit(1) };
+        }
     }
 }
 

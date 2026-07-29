@@ -3,9 +3,13 @@ use std::{
     io::{self, Read, Write},
     mem::MaybeUninit,
     os::fd::{AsRawFd, FromRawFd, RawFd},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -17,7 +21,52 @@ const CURSOR_SHOW: &[u8] = b"\x1b[?25h";
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const WAIT_INTERVAL: Duration = Duration::from_millis(10);
 const QUIET_INTERVAL: Duration = Duration::from_millis(50);
+const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+static PTY_SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn editor_exits_when_pty_controller_disconnects() {
+    let fixture = Fixture::new("controller-disconnect");
+    let path = fixture.path().join("file.txt");
+    fs::write(&path, "before\n").expect("write disconnect fixture");
+
+    let mut session = PtySession::spawn(&path);
+    session.wait_for_output(ALT_SCREEN_ENTER);
+    session.wait_for_output(CURSOR_HIDE);
+    session.wait_for_quiet();
+    session.disconnect_controller();
+
+    let status = session.wait_for_exit_with_timeout(DISCONNECT_TIMEOUT);
+    assert!(
+        !status.success(),
+        "terminal disconnect must produce a non-zero exit"
+    );
+}
+
+#[test]
+fn redirected_stdin_error_still_restores_the_terminal() {
+    let fixture = Fixture::new("redirected-stdin");
+    let path = fixture.path().join("file.txt");
+    fs::write(&path, "before\n").expect("write redirected stdin fixture");
+
+    let mut session = PtySession::spawn_with_redirected_stdin(&path);
+    session.wait_for_output(ALT_SCREEN_ENTER);
+    session.wait_for_output(CURSOR_HIDE);
+    let status = session.wait_for_exit();
+    assert!(
+        !status.success(),
+        "Crossterm's redirected-input error must fail"
+    );
+    session.assert_raw_mode_restored();
+    assert_contains(&session.output, ALT_SCREEN_LEAVE, "alternate screen leave");
+    assert_contains(&session.output, CURSOR_SHOW, "cursor show");
+    assert_contains(
+        &session.output,
+        b"Failed to initialize input reader",
+        "redirected input error",
+    );
+}
 
 #[test]
 fn editor_restores_terminal_after_termination_signals() {
@@ -32,7 +81,10 @@ fn editor_restores_terminal_after_termination_signals() {
         session.wait_for_quiet();
 
         let output_len = session.output.len();
-        session.master.write_all(b"x").expect("send editor input");
+        session
+            .master_mut()
+            .write_all(b"x")
+            .expect("send editor input");
         session.wait_for_output_growth(output_len);
 
         session.send_signal(signal);
@@ -86,22 +138,31 @@ fn nested_picker_restores_terminal_after_mixed_termination_signals() {
         session.wait_for_quiet();
 
         let output_len = session.output.len();
-        session.master.write_all(b"x").expect("send editor input");
+        session
+            .master_mut()
+            .write_all(b"x")
+            .expect("send editor input");
         session.wait_for_output_growth(output_len);
         let output_len = session.output.len();
-        session.master.write_all(&[0x18]).expect("start key chord");
+        session
+            .master_mut()
+            .write_all(&[0x18])
+            .expect("start key chord");
         session.wait_for_output_growth(output_len);
         session
-            .master
+            .master_mut()
             .write_all(&[0x06])
             .expect("open find-file prompt");
         session.wait_for_output(b"Find file:");
         session.wait_for_quiet();
         session
-            .master
+            .master_mut()
             .write_all(fixture.path().as_os_str().as_encoded_bytes())
             .expect("enter picker directory");
-        session.master.write_all(b"\r").expect("submit picker path");
+        session
+            .master_mut()
+            .write_all(b"\r")
+            .expect("submit picker path");
         session.wait_for_output(b"nested-entry.txt");
         session.wait_for_quiet();
 
@@ -164,37 +225,78 @@ fn assert_oversized_render_restores_terminal(mut session: PtySession, surface: &
 
 struct PtySession {
     child: Child,
-    master: File,
+    master: Option<File>,
     original_termios: libc::termios,
     output: Vec<u8>,
 }
 
 impl PtySession {
     fn spawn(path: &Path) -> Self {
-        Self::spawn_with_size(path, 80, 24)
+        Self::spawn_with_options(path, 80, 24, false)
     }
 
     fn spawn_with_size(path: &Path, cols: u16, rows: u16) -> Self {
+        Self::spawn_with_options(path, cols, rows, false)
+    }
+
+    fn spawn_with_redirected_stdin(path: &Path) -> Self {
+        Self::spawn_with_options(path, 80, 24, true)
+    }
+
+    fn spawn_with_options(path: &Path, cols: u16, rows: u16, redirect_stdin: bool) -> Self {
+        // openpty cannot create the controller with FD_CLOEXEC atomically.
+        // Serialize PTY creation through child spawn so a parallel child
+        // cannot inherit another test's controller during that short window.
+        let _spawn_lock = PTY_SPAWN_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (master, slave, original_termios) =
             open_pty(cols, rows).expect("open PTY with requested size");
-        let stdin = slave.try_clone().expect("clone PTY slave for stdin");
+        set_close_on_exec(master.as_raw_fd()).expect("keep PTY master out of Cortex child");
+        let stdin = if redirect_stdin {
+            Stdio::null()
+        } else {
+            Stdio::from(slave.try_clone().expect("clone PTY slave for stdin"))
+        };
         let stdout = slave.try_clone().expect("clone PTY slave for stdout");
         let mut command = Command::new(env!("CARGO_BIN_EXE_cortex"));
         command
             .arg(path)
-            .stdin(Stdio::from(stdin))
+            .stdin(stdin)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(slave));
+
+        if redirect_stdin {
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCSCTTY.into(), 0) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
 
         let child = command.spawn().expect("spawn Cortex in PTY");
         set_nonblocking(master.as_raw_fd()).expect("make PTY master nonblocking");
 
         Self {
             child,
-            master,
+            master: Some(master),
             original_termios,
             output: Vec::new(),
         }
+    }
+
+    fn master_mut(&mut self) -> &mut File {
+        self.master.as_mut().expect("PTY controller is connected")
+    }
+
+    fn disconnect_controller(&mut self) {
+        self.master.take();
     }
 
     fn wait_for_output(&mut self, needle: &[u8]) {
@@ -232,7 +334,11 @@ impl PtySession {
     }
 
     fn wait_for_exit(&mut self) -> ExitStatus {
-        let deadline = Instant::now() + WAIT_TIMEOUT;
+        self.wait_for_exit_with_timeout(WAIT_TIMEOUT)
+    }
+
+    fn wait_for_exit_with_timeout(&mut self, timeout: Duration) -> ExitStatus {
+        let deadline = Instant::now() + timeout;
         loop {
             self.read_available();
             if let Some(status) = self.child.try_wait().expect("poll Cortex process") {
@@ -241,14 +347,20 @@ impl PtySession {
             }
             assert!(
                 Instant::now() < deadline,
-                "Cortex did not exit after signal"
+                "Cortex did not exit within {timeout:?}"
             );
             thread::sleep(WAIT_INTERVAL);
         }
     }
 
     fn assert_raw_mode_restored(&self) {
-        let restored = read_termios(self.master.as_raw_fd()).expect("read restored PTY state");
+        let restored = read_termios(
+            self.master
+                .as_ref()
+                .expect("PTY controller is connected")
+                .as_raw_fd(),
+        )
+        .expect("read restored PTY state");
         assert_raw_termios_eq(&self.original_termios, &restored);
     }
 
@@ -273,9 +385,12 @@ impl PtySession {
     }
 
     fn read_available(&mut self) {
+        let Some(master) = self.master.as_mut() else {
+            return;
+        };
         let mut buffer = [0_u8; 8192];
         loop {
-            match self.master.read(&mut buffer) {
+            match master.read(&mut buffer) {
                 Ok(0) => return,
                 Ok(read) => self.output.extend_from_slice(&buffer[..read]),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
@@ -333,6 +448,14 @@ fn read_termios(fd: RawFd) -> io::Result<libc::termios> {
 fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn set_close_on_exec(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } == -1 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
