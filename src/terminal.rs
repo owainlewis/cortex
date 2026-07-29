@@ -10,10 +10,19 @@ use std::{
         Arc,
     },
     thread,
+    time::Duration,
 };
 
 const DISCONNECT_EVENTS: libc::c_short = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
 const DISCONNECT_CHECK_MILLIS: libc::c_int = 50;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MonitorAction {
+    Continue,
+    Retry,
+    Stop,
+    Disconnect,
+}
 
 struct TerminalDisconnectGuard {
     stop: Arc<AtomicBool>,
@@ -181,15 +190,37 @@ fn monitor_disconnect(terminal_descriptor: libc::c_int, stop: Arc<AtomicBool>) {
 
     while !stop.load(Ordering::Acquire) {
         let result = unsafe { libc::poll(&mut descriptor, 1, DISCONNECT_CHECK_MILLIS) };
-        if result == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            continue;
-        }
-        if result == -1 || result > 0 && descriptor.revents & DISCONNECT_EVENTS != 0 {
-            // The PTY controller is gone, so no terminal remains to restore.
-            // Exit directly because Crossterm may have trapped the main thread.
-            unsafe { libc::_exit(1) };
+        let error_kind = (result == -1).then(|| io::Error::last_os_error().kind());
+        match monitor_action(result, descriptor.revents, error_kind) {
+            MonitorAction::Continue => {}
+            MonitorAction::Retry => {
+                thread::sleep(Duration::from_millis(DISCONNECT_CHECK_MILLIS as u64));
+            }
+            MonitorAction::Stop => return,
+            MonitorAction::Disconnect => {
+                // The PTY controller is gone, so no terminal remains to restore.
+                // Exit directly because Crossterm may have trapped the main thread.
+                unsafe { libc::_exit(1) };
+            }
         }
     }
+}
+
+fn monitor_action(
+    result: libc::c_int,
+    events: libc::c_short,
+    error_kind: Option<io::ErrorKind>,
+) -> MonitorAction {
+    if result == -1 {
+        return match error_kind {
+            Some(io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) => MonitorAction::Retry,
+            _ => MonitorAction::Stop,
+        };
+    }
+    if result > 0 && events & DISCONNECT_EVENTS != 0 {
+        return MonitorAction::Disconnect;
+    }
+    MonitorAction::Continue
 }
 
 fn setup_error(context: &str, error: io::Error) -> io::Error {
@@ -198,7 +229,7 @@ fn setup_error(context: &str, error: io::Error) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{disconnect_descriptor, CleanupStep, TerminalState};
+    use super::{disconnect_descriptor, monitor_action, CleanupStep, MonitorAction, TerminalState};
 
     #[test]
     fn disconnect_monitor_requires_terminal_stdin() {
@@ -217,6 +248,27 @@ mod tests {
             None,
             "/dev/tty stdin must not use macOS poll"
         );
+    }
+
+    #[test]
+    fn disconnect_monitor_only_exits_for_explicit_disconnect_events() {
+        assert_eq!(
+            monitor_action(1, libc::POLLHUP, None),
+            MonitorAction::Disconnect
+        );
+        assert_eq!(
+            monitor_action(-1, 0, Some(std::io::ErrorKind::Interrupted)),
+            MonitorAction::Retry
+        );
+        assert_eq!(
+            monitor_action(-1, 0, Some(std::io::ErrorKind::WouldBlock)),
+            MonitorAction::Retry
+        );
+        assert_eq!(
+            monitor_action(-1, 0, Some(std::io::ErrorKind::Other)),
+            MonitorAction::Stop
+        );
+        assert_eq!(monitor_action(0, 0, None), MonitorAction::Continue);
     }
 
     #[test]

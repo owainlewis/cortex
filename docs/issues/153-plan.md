@@ -17,11 +17,12 @@ The bug reproduces with both Crossterm 0.27 and 0.29, so reverting the dependenc
 2. Monitor terminal stdin for `POLLHUP`, `POLLERR`, and `POLLNVAL` without requesting or consuming input events.
 3. Leave the guard inactive when stdin is redirected or explicitly opened from `/dev/tty` because macOS `poll` rejects that descriptor and no other standard descriptor is guaranteed to refer to the same terminal.
 4. Never use redirected stdout for the hard-exit path.
-5. Exit immediately when the PTY controller is gone because Crossterm may have trapped the main thread and the destroyed PTY can no longer receive cleanup output.
-6. Keep the guard owned by `TerminalSession` so every terminal path is covered and connected cleanup remains paired with the monitor.
-7. Add synchronized PTY regressions for startup disconnect, active-session disconnect, and closed redirected stdout.
-8. Keep the existing signal, resize, input, dirty-buffer, renderer-error, and connected terminal cleanup behavior unchanged.
-9. Serialize the test-only `openpty` to child-spawn window so parallel tests cannot inherit a controller before `FD_CLOEXEC` is set.
+5. Exit immediately only for explicit disconnect events because Crossterm may have trapped the main thread and the destroyed PTY can no longer receive cleanup output.
+6. Retry interrupted or temporarily unavailable polls after a bounded delay and disable the monitor after other system errors.
+7. Keep the guard owned by `TerminalSession` so every terminal path is covered and connected cleanup remains paired with the monitor.
+8. Add synchronized PTY regressions for startup disconnect, active-session disconnect, and closed redirected stdout.
+9. Keep the existing signal, resize, input, dirty-buffer, renderer-error, and connected terminal cleanup behavior unchanged.
+10. Serialize the test-only `openpty` to child-spawn window so parallel tests cannot inherit a controller before `FD_CLOEXEC` is set.
 
 ## Acceptance criteria
 
