@@ -7,7 +7,7 @@ use crate::{
     picker::{DirectoryPicker, DirectoryPickerAction},
     renderer::{Renderer, StatusKind, TerminalSize},
     signals::TerminationSignals,
-    terminal::{TerminalDisconnectGuard, TerminalSession},
+    terminal::TerminalSession,
     text,
     view::View,
 };
@@ -89,14 +89,12 @@ fn run_until_exit(path: &Path, signals: &TerminationSignals) -> io::Result<()> {
 
     let buffer = Buffer::open(path)?;
     let mut terminal = TerminalSession::enter(io::stdout())?;
-    let _disconnect_guard = TerminalDisconnectGuard::start()?;
     run_editor(&mut terminal, buffer, signals)
 }
 
 fn run_directory_path(path: &Path, signals: &TerminationSignals) -> io::Result<()> {
     let picker = DirectoryPicker::read(path)?;
     let mut terminal = TerminalSession::enter(io::stdout())?;
-    let _disconnect_guard = TerminalDisconnectGuard::start()?;
 
     let Some(path) = run_directory_picker(&mut terminal, picker, signals)? else {
         return Ok(());

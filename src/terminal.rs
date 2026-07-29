@@ -14,7 +14,7 @@ use std::{
 const DISCONNECT_EVENTS: libc::c_short = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
 const DISCONNECT_CHECK_MILLIS: libc::c_int = 50;
 
-pub struct TerminalDisconnectGuard {
+struct TerminalDisconnectGuard {
     stop: Arc<AtomicBool>,
     monitor: Option<thread::JoinHandle<()>>,
 }
@@ -22,6 +22,7 @@ pub struct TerminalDisconnectGuard {
 pub struct TerminalSession<W: Write> {
     writer: W,
     state: TerminalState,
+    _disconnect_guard: TerminalDisconnectGuard,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -60,9 +61,11 @@ impl TerminalState {
 
 impl<W: Write> TerminalSession<W> {
     pub fn enter(writer: W) -> io::Result<Self> {
+        let disconnect_guard = TerminalDisconnectGuard::start()?;
         let mut session = Self {
             writer,
             state: TerminalState::default(),
+            _disconnect_guard: disconnect_guard,
         };
 
         terminal::enable_raw_mode().map_err(|error| {
@@ -118,7 +121,7 @@ impl<W: Write> Drop for TerminalSession<W> {
 }
 
 impl TerminalDisconnectGuard {
-    pub fn start() -> io::Result<Self> {
+    fn start() -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let monitor = terminal_stdin_descriptor()
             .map(|descriptor| {

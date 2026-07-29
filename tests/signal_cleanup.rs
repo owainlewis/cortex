@@ -46,6 +46,24 @@ fn editor_exits_when_pty_controller_disconnects() {
 }
 
 #[test]
+fn editor_exits_when_controller_disconnects_during_startup() {
+    let fixture = Fixture::new("startup-controller-disconnect");
+    let path = fixture.path().join("file.txt");
+    fs::write(&path, "before\n").expect("write startup disconnect fixture");
+
+    let mut session = PtySession::spawn(&path);
+    session.disconnect_controller();
+
+    // The child may not have executed yet when the controller closes, so this
+    // checks eventual startup cleanup rather than the active-session deadline.
+    let status = session.wait_for_exit();
+    assert!(
+        !status.success(),
+        "startup terminal disconnect must produce a non-zero exit"
+    );
+}
+
+#[test]
 fn redirected_stdin_error_still_restores_the_terminal() {
     let fixture = Fixture::new("redirected-stdin");
     let path = fixture.path().join("file.txt");
