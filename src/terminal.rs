@@ -120,15 +120,16 @@ impl<W: Write> Drop for TerminalSession<W> {
 impl TerminalDisconnectGuard {
     pub fn start() -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
-        let monitor_stop = Arc::clone(&stop);
-        let monitor = thread::Builder::new()
-            .name("cortex-terminal-disconnect".to_string())
-            .spawn(move || monitor_disconnect(monitor_stop))?;
+        let monitor = terminal_stdin_descriptor()
+            .map(|descriptor| {
+                let monitor_stop = Arc::clone(&stop);
+                thread::Builder::new()
+                    .name("cortex-terminal-disconnect".to_string())
+                    .spawn(move || monitor_disconnect(descriptor, monitor_stop))
+            })
+            .transpose()?;
 
-        Ok(Self {
-            stop,
-            monitor: Some(monitor),
-        })
+        Ok(Self { stop, monitor })
     }
 }
 
@@ -141,12 +142,20 @@ impl Drop for TerminalDisconnectGuard {
     }
 }
 
-fn monitor_disconnect(stop: Arc<AtomicBool>) {
+fn terminal_stdin_descriptor() -> Option<libc::c_int> {
+    disconnect_descriptor(unsafe { libc::isatty(libc::STDIN_FILENO) == 1 })
+}
+
+fn disconnect_descriptor(stdin_is_terminal: bool) -> Option<libc::c_int> {
+    stdin_is_terminal.then_some(libc::STDIN_FILENO)
+}
+
+fn monitor_disconnect(terminal_descriptor: libc::c_int, stop: Arc<AtomicBool>) {
     let mut descriptor = libc::pollfd {
-        // Crossterm may open /dev/tty when stdin is redirected, but macOS
-        // poll reports POLLNVAL for that opened descriptor. Cortex renders to
-        // the inherited terminal on stdout, which observes the same hangup.
-        fd: libc::STDOUT_FILENO,
+        // Terminal stdin is the exact descriptor Crossterm reads. Redirected
+        // stdin may make Crossterm open /dev/tty, but macOS poll rejects that
+        // descriptor and no other standard descriptor is guaranteed to match.
+        fd: terminal_descriptor,
         events: 0,
         revents: 0,
     };
@@ -170,7 +179,21 @@ fn setup_error(context: &str, error: io::Error) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{CleanupStep, TerminalState};
+    use super::{disconnect_descriptor, CleanupStep, TerminalState};
+
+    #[test]
+    fn disconnect_monitor_requires_terminal_stdin() {
+        assert_eq!(
+            disconnect_descriptor(true),
+            Some(libc::STDIN_FILENO),
+            "terminal stdin is safe to monitor"
+        );
+        assert_eq!(
+            disconnect_descriptor(false),
+            None,
+            "redirected stdin must not fall back to another descriptor"
+        );
+    }
 
     #[test]
     fn cleanup_steps_restore_terminal_in_reverse_setup_order() {

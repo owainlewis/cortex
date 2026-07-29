@@ -22,6 +22,7 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const WAIT_INTERVAL: Duration = Duration::from_millis(10);
 const QUIET_INTERVAL: Duration = Duration::from_millis(50);
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+const GUARD_SETTLE_INTERVAL: Duration = Duration::from_millis(150);
 static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 static PTY_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
@@ -66,6 +67,35 @@ fn redirected_stdin_error_still_restores_the_terminal() {
         b"Failed to initialize input reader",
         "redirected input error",
     );
+}
+
+#[test]
+fn closed_redirected_stdout_does_not_bypass_terminal_cleanup() {
+    let fixture = Fixture::new("redirected-stdout");
+    let path = fixture.path().join("file.txt");
+    fs::write(&path, "before\n").expect("write redirected stdout fixture");
+
+    let mut session = PtySession::spawn_with_redirected_stdout(&path);
+    session.wait_for_redirected_output(ALT_SCREEN_ENTER);
+    session.wait_for_redirected_output(CURSOR_HIDE);
+    session.disconnect_redirected_stdout();
+    thread::sleep(GUARD_SETTLE_INTERVAL);
+    assert!(
+        session
+            .child
+            .try_wait()
+            .expect("poll Cortex after redirected stdout closes")
+            .is_none(),
+        "disconnect guard must ignore a closed non-terminal stdout"
+    );
+
+    session
+        .master_mut()
+        .write_all(b"x")
+        .expect("trigger a render after redirected stdout closes");
+    let status = session.wait_for_exit();
+    assert!(!status.success(), "broken redirected stdout must fail");
+    session.assert_raw_mode_restored();
 }
 
 #[test]
@@ -226,24 +256,36 @@ fn assert_oversized_render_restores_terminal(mut session: PtySession, surface: &
 struct PtySession {
     child: Child,
     master: Option<File>,
+    redirected_stdout: Option<File>,
     original_termios: libc::termios,
     output: Vec<u8>,
+    redirected_output: Vec<u8>,
 }
 
 impl PtySession {
     fn spawn(path: &Path) -> Self {
-        Self::spawn_with_options(path, 80, 24, false)
+        Self::spawn_with_options(path, 80, 24, false, false)
     }
 
     fn spawn_with_size(path: &Path, cols: u16, rows: u16) -> Self {
-        Self::spawn_with_options(path, cols, rows, false)
+        Self::spawn_with_options(path, cols, rows, false, false)
     }
 
     fn spawn_with_redirected_stdin(path: &Path) -> Self {
-        Self::spawn_with_options(path, 80, 24, true)
+        Self::spawn_with_options(path, 80, 24, true, false)
     }
 
-    fn spawn_with_options(path: &Path, cols: u16, rows: u16, redirect_stdin: bool) -> Self {
+    fn spawn_with_redirected_stdout(path: &Path) -> Self {
+        Self::spawn_with_options(path, 80, 24, false, true)
+    }
+
+    fn spawn_with_options(
+        path: &Path,
+        cols: u16,
+        rows: u16,
+        redirect_stdin: bool,
+        redirect_stdout: bool,
+    ) -> Self {
         // openpty cannot create the controller with FD_CLOEXEC atomically.
         // Serialize PTY creation through child spawn so a parallel child
         // cannot inherit another test's controller during that short window.
@@ -258,12 +300,20 @@ impl PtySession {
         } else {
             Stdio::from(slave.try_clone().expect("clone PTY slave for stdin"))
         };
-        let stdout = slave.try_clone().expect("clone PTY slave for stdout");
+        let (redirected_stdout, stdout) = if redirect_stdout {
+            let (reader, writer) = open_pipe().expect("open redirected stdout pipe");
+            (Some(reader), Stdio::from(writer))
+        } else {
+            (
+                None,
+                Stdio::from(slave.try_clone().expect("clone PTY slave for stdout")),
+            )
+        };
         let mut command = Command::new(env!("CARGO_BIN_EXE_cortex"));
         command
             .arg(path)
             .stdin(stdin)
-            .stdout(Stdio::from(stdout))
+            .stdout(stdout)
             .stderr(Stdio::from(slave));
 
         if redirect_stdin {
@@ -282,12 +332,17 @@ impl PtySession {
 
         let child = command.spawn().expect("spawn Cortex in PTY");
         set_nonblocking(master.as_raw_fd()).expect("make PTY master nonblocking");
+        if let Some(reader) = &redirected_stdout {
+            set_nonblocking(reader.as_raw_fd()).expect("make redirected stdout nonblocking");
+        }
 
         Self {
             child,
             master: Some(master),
+            redirected_stdout,
             original_termios,
             output: Vec::new(),
+            redirected_output: Vec::new(),
         }
     }
 
@@ -299,6 +354,10 @@ impl PtySession {
         self.master.take();
     }
 
+    fn disconnect_redirected_stdout(&mut self) {
+        self.redirected_stdout.take();
+    }
+
     fn wait_for_output(&mut self, needle: &[u8]) {
         let description = format!("terminal output containing {needle:?}");
         self.wait_until(|session| contains(&session.output, needle), &description);
@@ -308,6 +367,14 @@ impl PtySession {
         self.wait_until(
             |session| session.output.len() > prior_len,
             "editor render after input",
+        );
+    }
+
+    fn wait_for_redirected_output(&mut self, needle: &[u8]) {
+        let description = format!("redirected terminal output containing {needle:?}");
+        self.wait_until(
+            |session| contains(&session.redirected_output, needle),
+            &description,
         );
     }
 
@@ -385,17 +452,23 @@ impl PtySession {
     }
 
     fn read_available(&mut self) {
-        let Some(master) = self.master.as_mut() else {
-            return;
-        };
-        let mut buffer = [0_u8; 8192];
-        loop {
-            match master.read(&mut buffer) {
-                Ok(0) => return,
-                Ok(read) => self.output.extend_from_slice(&buffer[..read]),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
-                Err(error) => panic!("read PTY output: {error}"),
-            }
+        if let Some(master) = self.master.as_mut() {
+            read_available(master, &mut self.output, "PTY output");
+        }
+        if let Some(stdout) = self.redirected_stdout.as_mut() {
+            read_available(stdout, &mut self.redirected_output, "redirected stdout");
+        }
+    }
+}
+
+fn read_available(file: &mut File, output: &mut Vec<u8>, source: &str) {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(read) => output.extend_from_slice(&buffer[..read]),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
+            Err(error) => panic!("read {source}: {error}"),
         }
     }
 }
@@ -435,6 +508,19 @@ fn open_pty(cols: u16, rows: u16) -> io::Result<(File, File, libc::termios)> {
     let master = unsafe { File::from_raw_fd(master_fd) };
     let slave = unsafe { File::from_raw_fd(slave_fd) };
     Ok((master, slave, original_termios))
+}
+
+fn open_pipe() -> io::Result<(File, File)> {
+    let mut descriptors = [-1; 2];
+    if unsafe { libc::pipe(descriptors.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let reader = unsafe { File::from_raw_fd(descriptors[0]) };
+    let writer = unsafe { File::from_raw_fd(descriptors[1]) };
+    set_close_on_exec(reader.as_raw_fd())?;
+    set_close_on_exec(writer.as_raw_fd())?;
+    Ok((reader, writer))
 }
 
 fn read_termios(fd: RawFd) -> io::Result<libc::termios> {
