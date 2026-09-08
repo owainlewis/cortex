@@ -4,7 +4,7 @@ use ropey::{Rope, RopeSlice};
 use std::cell::Cell;
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ffi::CString,
     fs::{self, File, FileTimes, OpenOptions},
     io::{self, BufRead, BufReader, BufWriter, Seek, Write},
@@ -16,6 +16,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 
 const TEMP_FILE_CREATE_ATTEMPTS: usize = 128;
@@ -25,6 +26,8 @@ const TEMP_SUFFIX_MAX_BYTES: usize = 32;
 const TEMP_FILE_NAME_MAX_BYTES: usize =
     TEMP_FILE_PREFIX.len() + TEMP_SUFFIX_MAX_BYTES + TEMP_FILE_EXTENSION.len();
 const FILE_READ_ATTEMPTS: usize = 3;
+const HISTORY_TEXT_BUDGET: usize = 16 * 1024 * 1024;
+const UNDO_GROUP_PAUSE: Duration = Duration::from_millis(750);
 const MAX_CACHED_LINE_COLUMNS: usize = 256;
 const MAX_COLUMN_CHECKPOINTS_PER_LINE: usize = 4_096;
 static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
@@ -73,8 +76,10 @@ pub struct Buffer {
     changed_lines: ChangedLines,
     revision: u64,
     last_change: Option<BufferChange>,
-    undo_stack: Vec<Edit>,
+    undo_stack: VecDeque<Edit>,
     redo_stack: Vec<Edit>,
+    history_text_bytes: usize,
+    active_undo_group: Option<ActiveUndoGroup>,
     line_column_cache: RefCell<LineColumnCache>,
     #[cfg(test)]
     line_column_graphemes_visited: Cell<usize>,
@@ -195,6 +200,7 @@ struct SourceBaseline<'a> {
 
 #[derive(Debug, Clone)]
 struct Edit {
+    group: u64,
     start: usize,
     deleted: String,
     inserted: String,
@@ -203,6 +209,20 @@ struct Edit {
     state_before: u64,
     state_after: u64,
     line_change: LineChangeTransition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UndoGroupKind {
+    Typing,
+    DeleteBackward,
+    DeleteForward,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveUndoGroup {
+    kind: UndoGroupKind,
+    point_after: usize,
+    last_edit_at: Instant,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -319,8 +339,10 @@ impl Buffer {
             changed_lines: ChangedLines::default(),
             revision: 0,
             last_change: None,
-            undo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
+            history_text_bytes: 0,
+            active_undo_group: None,
             line_column_cache: RefCell::new(LineColumnCache::default()),
             #[cfg(test)]
             line_column_graphemes_visited: Cell::new(0),
@@ -746,6 +768,7 @@ impl Buffer {
     }
 
     pub fn insert(&mut self, char_idx: usize, text: &str) -> usize {
+        self.break_undo_group();
         if text.is_empty() {
             return self.grapheme_boundary_at_or_before(char_idx);
         }
@@ -765,6 +788,7 @@ impl Buffer {
         point_before: usize,
         point_after: usize,
     ) -> usize {
+        self.break_undo_group();
         if char_range.is_empty() {
             return self.grapheme_boundary_at_or_before(point_after);
         }
@@ -772,22 +796,66 @@ impl Buffer {
         self.replace_with_points(char_range, "", point_before, point_after)
     }
 
+    pub(crate) fn break_undo_group(&mut self) {
+        self.active_undo_group = None;
+    }
+
+    pub(crate) fn insert_typed(&mut self, char_idx: usize, ch: char, now: Instant) -> usize {
+        let start = self.grapheme_boundary_at_or_before(char_idx);
+        self.replace_grouped(
+            start..start,
+            &ch.to_string(),
+            start,
+            start + 1,
+            Some((UndoGroupKind::Typing, now)),
+        )
+    }
+
+    pub(crate) fn delete_typed(
+        &mut self,
+        range: Range<usize>,
+        point_before: usize,
+        point_after: usize,
+        kind: UndoGroupKind,
+        now: Instant,
+    ) -> usize {
+        self.replace_grouped(range, "", point_before, point_after, Some((kind, now)))
+    }
+
     pub fn undo(&mut self) -> Option<usize> {
-        let mut edit = self.undo_stack.pop()?;
-        self.apply_inverse_edit_text(&edit);
-        self.update_line_changes(&mut edit, EditDirection::Backward);
-        let point = edit.point_before.min(self.len_chars());
-        self.redo_stack.push(edit);
-        Some(point)
+        self.break_undo_group();
+        let group = self.undo_stack.back()?.group;
+        let mut point = 0;
+        while self
+            .undo_stack
+            .back()
+            .is_some_and(|edit| edit.group == group)
+        {
+            let mut edit = self.undo_stack.pop_back().unwrap();
+            self.apply_inverse_edit_text(&edit);
+            self.update_line_changes(&mut edit, EditDirection::Backward);
+            point = edit.point_before.min(self.len_chars());
+            self.redo_stack.push(edit);
+        }
+        Some(self.grapheme_boundary_at_or_before(point))
     }
 
     pub fn redo(&mut self) -> Option<usize> {
-        let mut edit = self.redo_stack.pop()?;
-        self.apply_edit_text(&edit);
-        self.update_line_changes(&mut edit, EditDirection::Forward);
-        let point = edit.point_after.min(self.len_chars());
-        self.undo_stack.push(edit);
-        Some(point)
+        self.break_undo_group();
+        let group = self.redo_stack.last()?.group;
+        let mut point = 0;
+        while self
+            .redo_stack
+            .last()
+            .is_some_and(|edit| edit.group == group)
+        {
+            let mut edit = self.redo_stack.pop().unwrap();
+            self.apply_edit_text(&edit);
+            self.update_line_changes(&mut edit, EditDirection::Forward);
+            point = edit.point_after.min(self.len_chars());
+            self.undo_stack.push_back(edit);
+        }
+        Some(self.grapheme_boundary_at_or_before(point))
     }
 
     pub fn save(&mut self) -> io::Result<()> {
@@ -807,6 +875,7 @@ impl Buffer {
         F: FnOnce(&Path),
         G: FnOnce(),
     {
+        self.break_undo_group();
         ensure_parent_directory_exists(&self.path)?;
         let (disk_baseline, save_location) = write_atomically(
             &self.path,
@@ -827,6 +896,7 @@ impl Buffer {
     }
 
     pub fn reload(&mut self) -> Result<(), ReloadError> {
+        self.break_undo_group();
         if self.is_dirty() {
             return Err(ReloadError::Dirty);
         }
@@ -846,6 +916,7 @@ impl Buffer {
         self.disk_changed = false;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.history_text_bytes = 0;
         Ok(())
     }
 
@@ -860,9 +931,37 @@ impl Buffer {
         point_before: usize,
         point_after: usize,
     ) -> usize {
+        self.replace_grouped(char_range, inserted, point_before, point_after, None)
+    }
+
+    fn replace_grouped(
+        &mut self,
+        char_range: Range<usize>,
+        inserted: &str,
+        point_before: usize,
+        point_after: usize,
+        grouping: Option<(UndoGroupKind, Instant)>,
+    ) -> usize {
+        let join_previous = grouping.is_some_and(|(kind, now)| {
+            self.active_undo_group.is_some_and(|active| {
+                active.kind == kind
+                    && active.point_after == point_before
+                    && now
+                        .checked_duration_since(active.last_edit_at)
+                        .is_some_and(|pause| pause < UNDO_GROUP_PAUSE)
+            })
+        });
         let deleted = self.text.slice(char_range.clone()).to_string();
         let state_after = self.allocate_history_state();
+        let group = if join_previous {
+            self.undo_stack
+                .back()
+                .map_or(state_after, |edit| edit.group)
+        } else {
+            state_after
+        };
         let mut edit = Edit {
+            group,
             start: char_range.start,
             deleted,
             inserted: inserted.to_string(),
@@ -877,9 +976,38 @@ impl Buffer {
         self.update_line_changes(&mut edit, EditDirection::Forward);
         edit.point_after = self.grapheme_boundary_at_or_after(edit.point_after);
         let point_after = edit.point_after;
-        self.undo_stack.push(edit);
-        self.redo_stack.clear();
+        self.history_text_bytes += edit.deleted.len() + edit.inserted.len();
+        self.undo_stack.push_back(edit);
+        for discarded in self.redo_stack.drain(..) {
+            self.history_text_bytes -= discarded.deleted.len() + discarded.inserted.len();
+        }
+        self.active_undo_group = grouping.map(|(kind, last_edit_at)| ActiveUndoGroup {
+            kind,
+            point_after,
+            last_edit_at,
+        });
+        self.trim_history(HISTORY_TEXT_BUDGET);
         point_after
+    }
+
+    fn trim_history(&mut self, budget: usize) {
+        let Some(newest) = self.undo_stack.back().map(|edit| edit.group) else {
+            return;
+        };
+        while self.history_text_bytes > budget {
+            let oldest = self.undo_stack.front().unwrap().group;
+            if oldest == newest {
+                break;
+            }
+            while self
+                .undo_stack
+                .front()
+                .is_some_and(|edit| edit.group == oldest)
+            {
+                let discarded = self.undo_stack.pop_front().unwrap();
+                self.history_text_bytes -= discarded.deleted.len() + discarded.inserted.len();
+            }
+        }
     }
 
     fn apply_edit_text(&mut self, edit: &Edit) {
@@ -1064,6 +1192,8 @@ impl Clone for Buffer {
             last_change: self.last_change,
             undo_stack: self.undo_stack.clone(),
             redo_stack: self.redo_stack.clone(),
+            history_text_bytes: self.history_text_bytes,
+            active_undo_group: None,
             line_column_cache: RefCell::new(LineColumnCache {
                 revision: self.revision,
                 lines: HashMap::new(),
@@ -2244,6 +2374,208 @@ mod tests {
     ];
 
     #[test]
+    fn typing_groups_have_an_exact_pause_boundary_and_restore_points() {
+        use crate::commands::{dispatch_at, Command};
+        use crate::view::View;
+        use std::time::{Duration, Instant};
+        for (pause, grouped) in [(749, true), (750, false)] {
+            let dir = test_dir("typing-pause");
+            let mut buffer = Buffer::open(dir.join("notes.txt")).unwrap();
+            let mut view = View::new();
+            let now = Instant::now();
+            dispatch_at(Command::Insert('a'), &mut buffer, &mut view, now);
+            dispatch_at(
+                Command::Insert('界'),
+                &mut buffer,
+                &mut view,
+                now + Duration::from_millis(pause),
+            );
+            assert_eq!(buffer.undo(), Some(if grouped { 0 } else { 1 }));
+            assert_eq!(buffer.text(), if grouped { "" } else { "a" });
+            assert_eq!(buffer.redo(), Some(2));
+            assert_eq!(buffer.text(), "a界");
+            remove_dir(dir);
+        }
+    }
+
+    #[test]
+    fn noncontiguous_typing_and_reversed_timestamps_start_new_groups() {
+        use std::time::{Duration, Instant};
+        let dir = test_dir("typing-position");
+        let now = Instant::now();
+        let mut buffer = Buffer::open(dir.join("notes.txt")).unwrap();
+        buffer.insert_typed(0, 'a', now);
+        buffer.insert_typed(0, 'b', now);
+        assert_eq!(buffer.undo(), Some(0));
+        assert_eq!(buffer.text(), "a");
+        buffer.insert_typed(1, 'b', now);
+        buffer.insert_typed(2, 'c', now - Duration::from_millis(1));
+        buffer.undo();
+        assert_eq!(buffer.text(), "ab");
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn grouped_unicode_typing_preserves_clusters_and_saved_line_markers() {
+        use std::time::Instant;
+        let dir = test_dir("typing-unicode");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "\u{301}tail\nother\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        let now = Instant::now();
+        let point = buffer.insert_typed(0, 'e', now);
+        assert_eq!(point, 2);
+        let point = buffer.insert_typed(point, '界', now);
+        assert_eq!(point, 3);
+        assert!(buffer.line_changed(0));
+        assert!(!buffer.line_changed(1));
+        assert_eq!(buffer.undo(), Some(0));
+        assert_eq!(buffer.text(), "\u{301}tail\nother\n");
+        assert!(!buffer.is_dirty());
+        assert!(!buffer.line_changed(0));
+        assert_eq!(buffer.redo(), Some(3));
+        buffer.save().unwrap();
+        assert!(!buffer.is_dirty());
+        buffer.undo();
+        assert!(buffer.is_dirty());
+        assert!(buffer.line_changed(0));
+        assert!(!buffer.line_changed(1));
+        buffer.redo();
+        assert!(!buffer.is_dirty());
+        assert!(!buffer.line_changed(0));
+        buffer.insert_typed(3, 'x', now);
+        buffer.undo();
+        assert_eq!(buffer.text(), "e\u{301}界tail\nother\n");
+        assert!(!buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn grouped_deletion_restores_graphemes_crlf_and_line_markers() {
+        use crate::commands::{dispatch_at, Command};
+        use crate::view::View;
+        use std::time::Instant;
+        for command in [Command::DeleteBackward, Command::DeleteForward] {
+            let dir = test_dir("deletion-groups");
+            let path = dir.join("notes.txt");
+            let original = "e\u{301}\r\n界";
+            fs::write(&path, original).unwrap();
+            let mut buffer = Buffer::open(&path).unwrap();
+            let mut view = View::new();
+            let before = if command == Command::DeleteBackward {
+                buffer.len_chars()
+            } else {
+                0
+            };
+            view.set_point(before, &buffer);
+            let now = Instant::now();
+            for _ in 0..3 {
+                dispatch_at(command, &mut buffer, &mut view, now);
+            }
+            assert_eq!(buffer.text(), "");
+            buffer.save().unwrap();
+            assert_eq!(buffer.undo(), Some(before));
+            assert_eq!(buffer.text(), original);
+            assert!((0..buffer.len_lines()).all(|line| buffer.line_changed(line)));
+            assert_eq!(buffer.redo(), Some(0));
+            assert_eq!(buffer.text(), "");
+            assert!(!buffer.is_dirty());
+            assert!(!buffer.line_changed(0));
+            remove_dir(dir);
+        }
+    }
+
+    #[test]
+    fn changing_delete_direction_and_editing_after_undo_keeps_separate_groups() {
+        use crate::commands::{dispatch_at, Command};
+        use crate::view::View;
+        use std::time::Instant;
+        let dir = test_dir("deletion-direction");
+        let path = dir.join("notes.txt");
+        fs::write(&path, "abcd").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        let mut view = View::new();
+        view.set_point(2, &buffer);
+        let now = Instant::now();
+        dispatch_at(Command::DeleteBackward, &mut buffer, &mut view, now);
+        dispatch_at(Command::DeleteForward, &mut buffer, &mut view, now);
+        assert_eq!(buffer.text(), "ad");
+        assert_eq!(buffer.undo(), Some(1));
+        assert_eq!(buffer.text(), "acd");
+        buffer.insert_typed(1, 'x', now);
+        assert_eq!(buffer.redo(), None);
+        buffer.undo();
+        assert_eq!(buffer.text(), "acd");
+        buffer.undo();
+        assert_eq!(buffer.text(), "abcd");
+        assert!(!buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn history_budget_evicts_whole_groups_and_counts_both_stacks_in_utf8_bytes() {
+        use super::HISTORY_TEXT_BUDGET;
+        use std::time::Instant;
+        assert_eq!(HISTORY_TEXT_BUDGET, 16 * 1024 * 1024);
+        let dir = test_dir("history-budget");
+        let mut buffer = Buffer::open(dir.join("notes.txt")).unwrap();
+        let now = Instant::now();
+        buffer.insert_typed(0, '界', now);
+        buffer.insert_typed(1, 'λ', now);
+        buffer.insert(2, "1234");
+        buffer.insert(6, "56");
+        assert_eq!(buffer.history_text_bytes, 11);
+        buffer.trim_history(8);
+        // The two-edit, five-byte group is evicted together, although removing
+        // only its first edit would also bring the payload under budget.
+        assert_eq!(buffer.history_text_bytes, 6);
+        assert_eq!(buffer.undo_stack.len(), 2);
+        buffer.undo();
+        assert_eq!(buffer.history_text_bytes, 6);
+        buffer.insert(6, "!");
+        assert_eq!(buffer.history_text_bytes, 5);
+        assert_eq!(buffer.redo(), None);
+        buffer.undo();
+        buffer.undo();
+        assert_eq!(buffer.undo(), None);
+        assert_eq!(buffer.text(), "界λ");
+        assert!(buffer.is_dirty());
+        remove_dir(dir);
+    }
+
+    #[test]
+    fn history_eviction_preserves_saved_identity_and_an_oversized_newest_group() {
+        use std::time::Instant;
+        let dir = test_dir("history-baseline-eviction");
+        let mut buffer = Buffer::open(dir.join("notes.txt")).unwrap();
+        let now = Instant::now();
+        buffer.insert_typed(0, 'a', now);
+        buffer.save().unwrap();
+        buffer.insert_typed(1, 'b', now);
+        buffer.insert_typed(2, 'c', now);
+        buffer.trim_history(1);
+        assert_eq!(buffer.history_text_bytes, 2);
+        assert_eq!(buffer.undo(), Some(1));
+        assert_eq!(buffer.text(), "a");
+        assert!(!buffer.is_dirty());
+        assert!(!buffer.line_changed(0));
+        assert_eq!(buffer.undo(), None);
+        buffer.redo();
+        assert!(buffer.is_dirty());
+        buffer.insert(3, "d");
+        buffer.trim_history(1);
+        buffer.undo();
+        assert_eq!(buffer.text(), "abc");
+        assert!(buffer.is_dirty());
+        assert_eq!(buffer.undo(), None);
+        buffer.save().unwrap();
+        buffer.reload().unwrap();
+        assert_eq!(buffer.history_text_bytes, 0);
+        assert_eq!(buffer.redo(), None);
+        remove_dir(dir);
+    }
+
+    #[test]
     fn single_line_indentation_history_retains_only_the_changed_prefix() {
         use crate::{
             commands::{self, Command},
@@ -2263,7 +2595,7 @@ mod tests {
             } else {
                 commands::dispatch(Command::Outdent, &mut buffer, &mut view);
             }
-            let edit = buffer.undo_stack.last().unwrap();
+            let edit = buffer.undo_stack.back().unwrap();
             assert_eq!(edit.deleted, "    ");
             assert!(edit.inserted.is_empty());
             assert_eq!(view.point(), end - 4);
@@ -2271,7 +2603,7 @@ mod tests {
             assert_eq!(view.point(), end);
             assert_eq!(buffer.text(), source);
             commands::indent_region(&mut buffer, &mut view, 0..end, false);
-            let edit = buffer.undo_stack.last().unwrap();
+            let edit = buffer.undo_stack.back().unwrap();
             assert!(edit.deleted.is_empty());
             assert_eq!(edit.inserted, "    ");
         }

@@ -1,5 +1,5 @@
 use crate::{
-    buffer::{Buffer, ReloadError},
+    buffer::{Buffer, ReloadError, UndoGroupKind},
     view::View,
 };
 
@@ -44,11 +44,37 @@ pub struct CommandOutcome {
     pub status_message: Option<String>,
 }
 
+impl Command {
+    pub(crate) fn continues_undo_group(self) -> bool {
+        match self {
+            Self::Insert(ch) => !ch.is_control() && !matches!(ch, '\u{2028}' | '\u{2029}'),
+            Self::DeleteBackward | Self::DeleteForward => true,
+            _ => false,
+        }
+    }
+}
+
 pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> CommandOutcome {
+    dispatch_at(command, buffer, view, std::time::Instant::now())
+}
+
+pub(crate) fn dispatch_at(
+    command: Command,
+    buffer: &mut Buffer,
+    view: &mut View,
+    now: std::time::Instant,
+) -> CommandOutcome {
+    if !command.continues_undo_group() {
+        buffer.break_undo_group();
+    }
     match command {
         Command::Insert(ch) => {
             let point = view.point();
-            let point_after = buffer.insert(point, &ch.to_string());
+            let point_after = if command.continues_undo_group() {
+                buffer.insert_typed(point, ch, now)
+            } else {
+                buffer.insert(point, &ch.to_string())
+            };
             view.set_point(point_after, buffer);
             CommandOutcome::default()
         }
@@ -77,7 +103,13 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
             let point = view.point();
             if point > 0 {
                 let start = buffer.previous_grapheme_boundary(point);
-                let point_after = buffer.delete_with_points(start..point, point, start);
+                let point_after = buffer.delete_typed(
+                    start..point,
+                    point,
+                    start,
+                    UndoGroupKind::DeleteBackward,
+                    now,
+                );
                 view.set_point(point_after, buffer);
             }
             CommandOutcome::default()
@@ -86,7 +118,13 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
             let point = view.point();
             if point < buffer.len_chars() {
                 let end = buffer.next_grapheme_boundary(point);
-                let point_after = buffer.delete_with_points(point..end, point, point);
+                let point_after = buffer.delete_typed(
+                    point..end,
+                    point,
+                    point,
+                    UndoGroupKind::DeleteForward,
+                    now,
+                );
                 view.set_point(point_after, buffer);
             }
             CommandOutcome::default()
@@ -286,6 +324,39 @@ mod tests {
     };
 
     static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn movement_and_deliberate_edits_end_typing_groups() {
+        use super::dispatch_at;
+        let now = std::time::Instant::now();
+        for boundary in [
+            Command::MoveToLineEnd,
+            Command::MoveNextLine,
+            Command::InsertNewline,
+            Command::Insert('\u{2028}'),
+            Command::Indent,
+            Command::Outdent,
+        ] {
+            let mut buffer = buffer_with_text("group-boundary.txt", "");
+            let mut view = View::new();
+            for ch in "ab".chars() {
+                dispatch_at(Command::Insert(ch), &mut buffer, &mut view, now);
+            }
+            dispatch_at(boundary, &mut buffer, &mut view, now);
+            let after_boundary = buffer.text();
+            for ch in "cd".chars() {
+                dispatch_at(Command::Insert(ch), &mut buffer, &mut view, now);
+            }
+            dispatch_at(Command::Undo, &mut buffer, &mut view, now);
+            assert_eq!(buffer.text(), after_boundary, "{boundary:?}");
+            if after_boundary != "ab" {
+                dispatch_at(Command::Undo, &mut buffer, &mut view, now);
+                assert_eq!(buffer.text(), "ab", "{boundary:?}");
+            }
+            dispatch_at(Command::Undo, &mut buffer, &mut view, now);
+            assert_eq!(buffer.text(), "", "{boundary:?}");
+        }
+    }
 
     #[test]
     fn printable_and_newline_commands_insert_at_point() {

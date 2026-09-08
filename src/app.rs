@@ -372,10 +372,12 @@ impl AppState {
         match keymap.resolve(key) {
             KeymapResult::Command(command) => self.execute_command(command, "", buffer, view),
             KeymapResult::PendingPrefix => {
+                buffer.break_undo_group();
                 self.set_status("C-x", StatusKind::Prefix);
                 AppAction::Continue
             }
             KeymapResult::Unbound => {
+                buffer.break_undo_group();
                 self.clear_status();
                 AppAction::Continue
             }
@@ -389,6 +391,7 @@ impl AppState {
         buffer: &mut Buffer,
         view: &mut View,
     ) {
+        buffer.break_undo_group();
         *keymap = Keymap::new();
         self.keycast = Some("Paste".to_string());
         if text.is_empty() {
@@ -588,6 +591,9 @@ impl AppState {
         view: &mut View,
     ) -> AppAction {
         use commands::Command;
+        if !command.continues_undo_group() {
+            buffer.break_undo_group();
+        }
         match command {
             Command::OpenCommandLine => self.start_command_line(),
             Command::Indent | Command::Outdent => {
@@ -886,6 +892,7 @@ mod tests {
     use super::{
         apply_app_action, AppAction, AppControl, AppState, DIRTY_QUIT_PROMPT, DISK_CHECK_INTERVAL,
     };
+    use crate::commands;
     use crate::{
         buffer::Buffer, editor::Editor, input::Key, keymap::Keymap, renderer::StatusKind,
         view::View,
@@ -911,6 +918,62 @@ mod tests {
         assert_ne!(app.status_kind, Some(StatusKind::Prefix));
         app.handle_key(Key::Char('a'), &mut keymap, &mut buffer, &mut view);
         assert_eq!(buffer.text(), "a");
+    }
+
+    #[test]
+    fn prompt_entry_and_canceled_prefix_end_typing_groups() {
+        for keys in [
+            vec![Key::Meta('x'), Key::Escape],
+            vec![Key::Ctrl('x'), Key::Ctrl('f'), Key::Escape],
+            vec![Key::Ctrl('x'), Key::Char('b'), Key::Escape],
+            vec![Key::Ctrl('x'), Key::Escape],
+        ] {
+            let mut app = AppState::default();
+            let mut keymap = Keymap::new();
+            let mut buffer = buffer_with_text("undo-prompts.txt", "");
+            let mut view = View::new();
+            for ch in "ab".chars() {
+                app.handle_key(Key::Char(ch), &mut keymap, &mut buffer, &mut view);
+            }
+            for key in keys {
+                app.handle_key(key, &mut keymap, &mut buffer, &mut view);
+            }
+            for ch in "cd".chars() {
+                app.handle_key(Key::Char(ch), &mut keymap, &mut buffer, &mut view);
+            }
+            app.execute_command(commands::Command::Undo, "", &mut buffer, &mut view);
+            assert_eq!(buffer.text(), "ab");
+            app.execute_command(commands::Command::Undo, "", &mut buffer, &mut view);
+            assert_eq!(buffer.text(), "");
+        }
+    }
+
+    #[test]
+    fn paste_and_yank_have_their_own_undo_groups_between_typed_words() {
+        for yank in [false, true] {
+            let mut app = AppState {
+                kill_ring: Some("P".to_string()),
+                ..AppState::default()
+            };
+            let mut keymap = Keymap::new();
+            let mut buffer = buffer_with_text("undo-paste.txt", "");
+            let mut view = View::new();
+            for ch in "ab".chars() {
+                app.handle_key(Key::Char(ch), &mut keymap, &mut buffer, &mut view);
+            }
+            if yank {
+                app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
+            } else {
+                app.handle_paste("P", &mut keymap, &mut buffer, &mut view);
+            }
+            for ch in "cd".chars() {
+                app.handle_key(Key::Char(ch), &mut keymap, &mut buffer, &mut view);
+            }
+            for expected in ["abP", "ab", ""] {
+                app.execute_command(commands::Command::Undo, "", &mut buffer, &mut view);
+                assert_eq!(buffer.text(), expected);
+            }
+        }
     }
 
     #[test]

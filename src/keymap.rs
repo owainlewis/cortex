@@ -51,7 +51,10 @@ impl Keymap {
             Key::Ctrl(' ') => KeymapResult::Command(Command::SetMark),
             Key::Meta('x') => KeymapResult::Command(Command::OpenCommandLine),
             Key::Command('z') => KeymapResult::Command(Command::Undo),
-            Key::Ctrl('/') | Key::Ctrl('_') => KeymapResult::Command(Command::Undo),
+            // Crossterm decodes the legacy C-/ and C-_ byte (0x1f) as C-7.
+            Key::Ctrl('/') | Key::Ctrl('_') | Key::Ctrl('7') => {
+                KeymapResult::Command(Command::Undo)
+            }
             _ => KeymapResult::Unbound,
         }
     }
