@@ -8,6 +8,7 @@ pub struct Keymap {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Prefix {
     CtrlX,
+    CtrlC,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,17 @@ impl Keymap {
         Self::default()
     }
 
+    pub fn pending_label(&self) -> Option<&'static str> {
+        self.pending_prefix.map(|prefix| match prefix {
+            Prefix::CtrlX => "C-x",
+            Prefix::CtrlC => "C-c",
+        })
+    }
+
+    pub fn clipboard_prefix_pending(&self) -> bool {
+        self.pending_prefix == Some(Prefix::CtrlC)
+    }
+
     pub fn resolve(&mut self, key: Key) -> KeymapResult {
         if let Some(prefix) = self.pending_prefix.take() {
             return resolve_prefixed(prefix, key);
@@ -32,6 +44,11 @@ impl Keymap {
                 self.pending_prefix = Some(Prefix::CtrlX);
                 KeymapResult::PendingPrefix
             }
+            Key::Ctrl('c') => {
+                self.pending_prefix = Some(Prefix::CtrlC);
+                KeymapResult::PendingPrefix
+            }
+            Key::Meta('w') => KeymapResult::Command(Command::CopyRegion),
             Key::Char(ch) => KeymapResult::Command(Command::Insert(ch)),
             Key::Enter => KeymapResult::Command(Command::InsertNewline),
             Key::Tab => KeymapResult::Command(Command::Indent),
@@ -63,6 +80,7 @@ impl Keymap {
 
 fn resolve_prefixed(prefix: Prefix, key: Key) -> KeymapResult {
     match (prefix, key) {
+        (Prefix::CtrlC, Key::Ctrl('v')) => KeymapResult::Command(Command::ClipboardPaste),
         (Prefix::CtrlX, Key::Ctrl('s')) => KeymapResult::Command(Command::SaveBuffer),
         (Prefix::CtrlX, Key::Ctrl('c')) => KeymapResult::Command(Command::Quit),
         (Prefix::CtrlX, Key::Ctrl('f')) => KeymapResult::Command(Command::OpenFile),
@@ -77,6 +95,27 @@ fn resolve_prefixed(prefix: Prefix, key: Key) -> KeymapResult {
 mod tests {
     use super::{Keymap, KeymapResult};
     use crate::{commands::Command, input::Key};
+
+    #[test]
+    fn clipboard_bindings_are_explicit_and_do_not_change_the_quit_prefix() {
+        let mut keymap = Keymap::new();
+        assert_eq!(
+            keymap.resolve(Key::Meta('w')),
+            KeymapResult::Command(Command::CopyRegion)
+        );
+        assert_eq!(keymap.resolve(Key::Ctrl('v')), KeymapResult::Unbound);
+        assert_eq!(keymap.resolve(Key::Ctrl('c')), KeymapResult::PendingPrefix);
+        assert_eq!(keymap.pending_label(), Some("C-c"));
+        assert_eq!(
+            keymap.resolve(Key::Ctrl('v')),
+            KeymapResult::Command(Command::ClipboardPaste)
+        );
+        assert_eq!(keymap.resolve(Key::Ctrl('x')), KeymapResult::PendingPrefix);
+        assert_eq!(
+            keymap.resolve(Key::Ctrl('c')),
+            KeymapResult::Command(Command::Quit)
+        );
+    }
 
     #[test]
     fn resolves_printable_and_editing_keys_to_commands() {

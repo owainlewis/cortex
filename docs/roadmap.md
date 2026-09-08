@@ -112,10 +112,10 @@ Shipped:
 - Find file.
 - Switch buffer.
 - Command registry and `M-x` with prefix completion.
+- Kill ring and yank-pop.
 
 Planned:
 - Incremental search.
-- Kill ring and yank-pop.
 
 Tracking issues:
 - [closed] [#27 Add undo and redo](https://github.com/owainlewis/cortex/issues/27)
@@ -123,7 +123,7 @@ Tracking issues:
 - [open] [#29 Add incremental search](https://github.com/owainlewis/cortex/issues/29)
 - [closed] [#30 Add multiple buffers, find-file, and switch-buffer](https://github.com/owainlewis/cortex/issues/30)
 - [closed] [#46 Add command registry and M-x](https://github.com/owainlewis/cortex/issues/46)
-- [open] [#47 Replace cut slot with a real kill ring](https://github.com/owainlewis/cortex/issues/47)
+- [closed] [#47 Replace cut slot with a real kill ring](https://github.com/owainlewis/cortex/issues/47)
 
 Release notes should focus on editing safety, search, and buffer navigation.
 
@@ -141,7 +141,7 @@ Delivery order:
 - [closed] [#164 Add typing and region indentation](https://github.com/owainlewis/cortex/issues/164)
 - [closed] [#165 Handle literal terminal paste](https://github.com/owainlewis/cortex/issues/165)
 - [closed] [#166 Group typing and deletion undo steps](https://github.com/owainlewis/cortex/issues/166)
-- [open] [#47 Add kill ring and yank-pop](https://github.com/owainlewis/cortex/issues/47)
+- [closed] [#47 Add kill ring and yank-pop](https://github.com/owainlewis/cortex/issues/47)
 - [open] [#167 Add explicit macOS clipboard commands](https://github.com/owainlewis/cortex/issues/167)
 - [open] [#168 Add word, page, and line navigation](https://github.com/owainlewis/cortex/issues/168)
 - [open] [#29 Add incremental search](https://github.com/owainlewis/cortex/issues/29)
