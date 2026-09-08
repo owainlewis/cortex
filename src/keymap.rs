@@ -34,6 +34,8 @@ impl Keymap {
             }
             Key::Char(ch) => KeymapResult::Command(Command::Insert(ch)),
             Key::Enter => KeymapResult::Command(Command::InsertNewline),
+            Key::Tab => KeymapResult::Command(Command::Indent),
+            Key::BackTab => KeymapResult::Command(Command::Outdent),
             Key::Backspace => KeymapResult::Command(Command::DeleteBackward),
             Key::Delete | Key::Ctrl('d') => KeymapResult::Command(Command::DeleteForward),
             Key::Ctrl('k') => KeymapResult::Command(Command::KillLine),

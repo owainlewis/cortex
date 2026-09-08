@@ -548,6 +548,22 @@ impl AppState {
         use commands::Command;
         match command {
             Command::OpenCommandLine => self.start_command_line(),
+            Command::Indent | Command::Outdent => {
+                if let Some(region) = self.active_region(buffer, view) {
+                    let point_at_start = view.point() == region.start;
+                    let region =
+                        commands::indent_region(buffer, view, region, command == Command::Outdent);
+                    self.mark = Some(if point_at_start {
+                        region.end
+                    } else {
+                        region.start
+                    });
+                    self.clear_status();
+                    AppAction::Continue
+                } else {
+                    self.dispatch_command(command, buffer, view)
+                }
+            }
             Command::SetMark => self.set_mark(view),
             Command::KillRegion => self.kill_region(buffer, view),
             Command::KillLine => self.kill_line(buffer, view),
@@ -781,6 +797,7 @@ fn keycast_text(key: crate::input::Key) -> Option<String> {
         crate::input::Key::Command(ch) => Some(format!("Cmd-{ch}")),
         crate::input::Key::Enter => Some("Enter".to_string()),
         crate::input::Key::Tab => Some("Tab".to_string()),
+        crate::input::Key::BackTab => Some("Shift-Tab".to_string()),
         crate::input::Key::Escape => Some("Esc".to_string()),
         crate::input::Key::Backspace => Some("Backspace".to_string()),
         crate::input::Key::Delete => Some("Delete".to_string()),
@@ -812,6 +829,8 @@ fn command_clears_mark(command: commands::Command) -> bool {
         command,
         commands::Command::Insert(_)
             | commands::Command::InsertNewline
+            | commands::Command::Indent
+            | commands::Command::Outdent
             | commands::Command::DeleteBackward
             | commands::Command::DeleteForward
             | commands::Command::ReloadBuffer
@@ -1791,6 +1810,74 @@ mod tests {
             app.status_message.as_deref(),
             Some("Unknown command: /bogus")
         );
+    }
+
+    #[test]
+    fn tab_and_backtab_preserve_forward_and_reverse_selected_regions() {
+        for reverse in [false, true] {
+            let mut app = AppState::default();
+            let mut keymap = Keymap::new();
+            let source = "pre\n\talpha\n beta\n";
+            let mut buffer = buffer_with_text("region.txt", source);
+            let mut view = View::new();
+            let start = buffer.line_start_char(1);
+            let end = buffer.len_chars();
+            let point = if reverse { start } else { end };
+            app.mark = Some(if reverse { end } else { start });
+            view.set_point(point, &buffer);
+            app.handle_key(Key::Tab, &mut keymap, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), "pre\n    \talpha\n     beta\n");
+            assert_eq!(app.active_region(&buffer, &view), Some(start..end + 8));
+            assert_eq!(view.point(), if reverse { start } else { end + 8 });
+            app.handle_key(Key::BackTab, &mut keymap, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), source);
+            assert_eq!(app.active_region(&buffer, &view), Some(start..end));
+            assert_eq!(view.point(), point);
+            run_slash_command("undo", &mut app, &mut keymap, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), "pre\n    \talpha\n     beta\n");
+            assert!(app.mark.is_none());
+            run_slash_command("undo", &mut app, &mut keymap, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), source);
+            assert_eq!(view.point(), point);
+            assert_eq!(buffer.undo(), None);
+        }
+    }
+
+    #[test]
+    fn region_indentation_keeps_blank_lines_and_graphemes_intact() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let source = " \u{301}a\n\n\t界\r\nlast";
+        let mut buffer = buffer_with_text("region.txt", source);
+        let mut view = View::new();
+        let end = buffer.line_start_char(3);
+        app.mark = Some(0);
+        view.set_point(end, &buffer);
+        app.handle_key(Key::Tab, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "     \u{301}a\n    \n    \t界\r\nlast");
+        assert_eq!(app.active_region(&buffer, &view), Some(0..end + 12));
+        app.handle_key(Key::BackTab, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), source);
+        assert_eq!(view.point(), end);
+        assert_eq!(app.mark, Some(0));
+    }
+
+    #[test]
+    fn named_indentation_preserves_partial_line_region_endpoints() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("region.txt", " a\n  b\nc");
+        let mut view = View::new();
+        app.mark = Some(1);
+        view.set_point(6, &buffer);
+        run_slash_command("indent", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "     a\n      b\nc");
+        assert_eq!(app.mark, Some(5));
+        assert_eq!(view.point(), 14);
+        run_slash_command("outdent", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), " a\n  b\nc");
+        assert_eq!(app.mark, Some(1));
+        assert_eq!(view.point(), 6);
     }
 
     #[test]

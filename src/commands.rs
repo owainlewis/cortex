@@ -7,6 +7,8 @@ use crate::{
 pub enum Command {
     Insert(char),
     InsertNewline,
+    Indent,
+    Outdent,
     DeleteBackward,
     DeleteForward,
     OpenCommandLine,
@@ -52,8 +54,23 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
         }
         Command::InsertNewline => {
             let point = view.point();
-            let point_after = buffer.insert(point, "\n");
+            let line = buffer.line_for_char(point);
+            let indentation: String =
+                buffer.leading_indentation(line, point - buffer.line_start_char(line));
+            let inserted = format!("{}{indentation}", buffer.newline_at(line));
+            let point_after = buffer.insert(point, &inserted);
             view.set_point(point_after, buffer);
+            CommandOutcome::default()
+        }
+        Command::Indent => {
+            let point = view.point();
+            let spaces = " ".repeat(4 - buffer.display_column(point) % 4);
+            let point_after = buffer.insert(point, &spaces);
+            view.set_point(point_after, buffer);
+            CommandOutcome::default()
+        }
+        Command::Outdent => {
+            indent_region(buffer, view, view.point()..view.point(), true);
             CommandOutcome::default()
         }
         Command::DeleteBackward => {
@@ -145,6 +162,81 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
     }
 }
 
+pub fn indent_region(
+    buffer: &mut Buffer,
+    view: &mut View,
+    region: std::ops::Range<usize>,
+    outdent: bool,
+) -> std::ops::Range<usize> {
+    let first = buffer.line_for_char(region.start);
+    let mut last = buffer.line_for_char(region.end);
+    if !region.is_empty() && region.end == buffer.line_start_char(last) {
+        last = last.saturating_sub(1);
+    }
+    let removals: Vec<_> = (first..=last)
+        .map(|line| {
+            if outdent {
+                outdent_chars(&buffer.leading_indentation(line, 4))
+            } else {
+                0
+            }
+        })
+        .collect();
+    if outdent && removals.iter().all(|count| *count == 0) {
+        return region;
+    }
+    // The last line's body is unchanged. End at its edited prefix so a
+    // single-line operation never copies that body into text or history.
+    let replaced =
+        buffer.line_start_char(first)..buffer.line_start_char(last) + removals[last - first];
+    let mut inserted = String::new();
+    let mut mapped = region.clone();
+    for (line, removed) in (first..=last).zip(removals) {
+        let start = buffer.line_start_char(line);
+        let end = if line == last {
+            replaced.end
+        } else {
+            buffer.line_start_char(line + 1)
+        };
+        let added = if outdent { 0 } else { 4 };
+        if !outdent {
+            inserted.push_str("    ");
+        }
+        inserted.push_str(&buffer.text_range(start + removed..end));
+        for (before, after) in [
+            (region.start, &mut mapped.start),
+            (region.end, &mut mapped.end),
+        ] {
+            if before > start {
+                *after = after.saturating_sub(removed.min(before - start)) + added;
+            }
+        }
+    }
+    let point_after = if view.point() == region.start {
+        mapped.start
+    } else {
+        mapped.end
+    };
+    let point_after = buffer.replace_with_points(replaced, &inserted, view.point(), point_after);
+    view.set_point(point_after, buffer);
+    mapped.start = buffer.grapheme_boundary_at_or_before(mapped.start);
+    mapped.end = buffer.grapheme_boundary_at_or_before(mapped.end);
+    mapped
+}
+
+fn outdent_chars(indentation: &str) -> usize {
+    let mut columns = 0;
+    let mut chars = 0;
+    for ch in indentation.chars() {
+        if columns >= 4 {
+            break;
+        }
+        columns += if ch == '\t' { 4 - columns % 4 } else { 1 };
+        chars += 1;
+    }
+    chars
+}
+
 fn reload_buffer(buffer: &mut Buffer, view: &mut View) -> CommandOutcome {
     let line = buffer.line_for_char(view.point());
     let column = buffer.display_column(view.point());
@@ -207,6 +299,113 @@ mod tests {
         assert_eq!(buffer.text(), "ab\nc");
         assert_eq!(view.point(), 3);
         assert!(buffer.is_dirty());
+    }
+
+    #[test]
+    fn tab_inserts_spaces_to_the_next_display_stop() {
+        for (source, point, expected, after) in [
+            ("", 0, "    ", 4),
+            ("a", 1, "a   ", 4),
+            ("界", 1, "界  ", 3),
+            ("a\tb", 2, "a\t    b", 6),
+            ("e\u{301}", 2, "e\u{301}   ", 5),
+            ("    ", 4, "        ", 8),
+        ] {
+            let mut buffer = buffer_with_text("tab.txt", source);
+            let mut view = View::new();
+            view.set_point(point, &buffer);
+            dispatch(Command::Indent, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), expected);
+            assert_eq!(view.point(), after);
+            dispatch(Command::Undo, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), source);
+            assert_eq!(view.point(), point);
+            assert!(!buffer.is_dirty());
+        }
+    }
+
+    #[test]
+    fn newline_carries_only_indentation_before_point_and_preserves_line_endings() {
+        for (source, point, expected, after) in [
+            ("    ab", 6, "    ab\n    ", 11),
+            ("\t  ab", 3, "\t  \n\t  ab", 7),
+            ("    code", 2, "  \n    code", 5),
+            ("  a\r\n  b", 3, "  a\r\n  \r\n  b", 7),
+            ("a\r\n  b", 6, "a\r\n  b\r\n  ", 10),
+            ("a\r\n  b\n", 6, "a\r\n  b\n  \n", 9),
+            (" \u{301}ab", 4, " \u{301}ab\n", 5),
+            (" \u{301}ab", 0, "\n \u{301}ab", 1),
+        ] {
+            let mut buffer = buffer_with_text("newline.txt", source);
+            let mut view = View::new();
+            view.set_point(point, &buffer);
+            dispatch(Command::InsertNewline, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), expected, "{source:?} at {point}");
+            assert_eq!(view.point(), after);
+            dispatch(Command::Undo, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), source);
+            assert_eq!(view.point(), point);
+            dispatch(Command::Redo, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), expected);
+            assert_eq!(view.point(), after);
+        }
+    }
+
+    #[test]
+    fn outdent_removes_one_display_level_without_converting_remaining_tabs() {
+        for (source, point, expected, after) in [
+            ("\t  abc", 6, "  abc", 5),
+            ("  \tabc", 6, "abc", 3),
+            ("    \tabc", 8, "\tabc", 4),
+            ("   abc", 1, "abc", 0),
+            ("  abc", 0, "abc", 0),
+        ] {
+            let mut buffer = buffer_with_text("outdent.txt", source);
+            let mut view = View::new();
+            view.set_point(point, &buffer);
+            dispatch(Command::Outdent, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), expected);
+            assert_eq!(view.point(), after);
+            dispatch(Command::Undo, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), source);
+            assert_eq!(view.point(), point);
+        }
+    }
+
+    #[test]
+    fn outdent_noop_preserves_graphemes_clean_state_and_history() {
+        for source in ["abc", " \u{301}abc", "\u{3000}abc", ""] {
+            let mut buffer = buffer_with_text("unchanged.txt", source);
+            let mut view = View::new();
+            dispatch(Command::Outdent, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), source);
+            assert!(!buffer.is_dirty());
+            assert_eq!(buffer.undo(), None);
+        }
+    }
+
+    #[test]
+    fn region_indent_excludes_end_at_line_start_and_is_one_undo_step() {
+        for ending in ["\n", "\r\n"] {
+            let source = format!("a{ending}b{ending}c{ending}");
+            let mut buffer = buffer_with_text("region.txt", &source);
+            let mut view = View::new();
+            let end = buffer.line_start_char(2);
+            view.set_point(end, &buffer);
+            let region = super::indent_region(&mut buffer, &mut view, 0..end, false);
+            let expected = format!("    a{ending}    b{ending}c{ending}");
+            assert_eq!(buffer.text(), expected);
+            assert_eq!(region, 0..end + 8);
+            assert_eq!(view.point(), end + 8);
+            dispatch(Command::Undo, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), source);
+            assert_eq!(view.point(), end);
+            assert!(!buffer.is_dirty());
+            assert_eq!(buffer.undo(), None);
+            dispatch(Command::Redo, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), expected);
+            assert_eq!(view.point(), end + 8);
+        }
     }
 
     #[test]

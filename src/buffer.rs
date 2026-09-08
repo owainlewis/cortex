@@ -388,6 +388,36 @@ impl Buffer {
         self.line_start_char(line_idx) + line_content_len_chars(line)
     }
 
+    pub(crate) fn leading_indentation(&self, line_idx: usize, max_chars: usize) -> String {
+        let line_idx = self.clamp_line_idx(line_idx);
+        let start = self.line_start_char(line_idx);
+        let count = self
+            .text
+            .line(line_idx)
+            .chars()
+            .take(max_chars)
+            .take_while(|ch| matches!(ch, ' ' | '\t'))
+            .count();
+        let end = self.grapheme_boundary_at_or_before(start + count);
+        self.text_range(start..end)
+    }
+
+    pub(crate) fn newline_at(&self, line_idx: usize) -> &'static str {
+        let line_idx = self.clamp_line_idx(line_idx);
+        for index in [line_idx, line_idx.saturating_sub(1)] {
+            let line = self.text.line(index);
+            let len = line.len_chars();
+            if len > 0 && line.char(len - 1) == '\n' {
+                return if len > 1 && line.char(len - 2) == '\r' {
+                    "\r\n"
+                } else {
+                    "\n"
+                };
+            }
+        }
+        "\n"
+    }
+
     pub fn line_prefix_text(&self, line_idx: usize, max_chars: usize) -> String {
         if max_chars == 0 {
             return String::new();
@@ -823,7 +853,7 @@ impl Buffer {
         line_idx.min(self.len_lines().saturating_sub(1))
     }
 
-    fn replace_with_points(
+    pub(crate) fn replace_with_points(
         &mut self,
         char_range: Range<usize>,
         inserted: &str,
@@ -2212,6 +2242,41 @@ mod tests {
         ("line-separator", "\u{2028}"),
         ("paragraph-separator", "\u{2029}"),
     ];
+
+    #[test]
+    fn single_line_indentation_history_retains_only_the_changed_prefix() {
+        use crate::{
+            commands::{self, Command},
+            view::View,
+        };
+        let dir = test_dir("indentation-history");
+        let path = dir.join("long.txt");
+        let source = format!("    {}", "x".repeat(1_000_000));
+        fs::write(&path, &source).unwrap();
+        for selected in [false, true] {
+            let mut buffer = Buffer::open(&path).unwrap();
+            let mut view = View::new();
+            let end = buffer.len_chars();
+            view.set_point(end, &buffer);
+            if selected {
+                commands::indent_region(&mut buffer, &mut view, 0..end, true);
+            } else {
+                commands::dispatch(Command::Outdent, &mut buffer, &mut view);
+            }
+            let edit = buffer.undo_stack.last().unwrap();
+            assert_eq!(edit.deleted, "    ");
+            assert!(edit.inserted.is_empty());
+            assert_eq!(view.point(), end - 4);
+            commands::dispatch(Command::Undo, &mut buffer, &mut view);
+            assert_eq!(view.point(), end);
+            assert_eq!(buffer.text(), source);
+            commands::indent_region(&mut buffer, &mut view, 0..end, false);
+            let edit = buffer.undo_stack.last().unwrap();
+            assert!(edit.deleted.is_empty());
+            assert_eq!(edit.inserted, "    ");
+        }
+        remove_dir(dir);
+    }
 
     #[test]
     fn loads_existing_files_into_the_buffer() {
