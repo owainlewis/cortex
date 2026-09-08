@@ -128,6 +128,8 @@ It includes shared prompts for commands and buffer navigation, a directory picke
 | `C-k` | Cut to the end of the line |
 | `C-y` | Yank the newest cut |
 | `M-y` | Replace the last yank with an older cut |
+| `M-w` | Copy the active region to the macOS clipboard |
+| `C-c C-v` | Paste the macOS clipboard into the buffer or active prompt |
 | `C-/` or `C-_` | Undo the last edit |
 | `C-x u` | Undo the last edit |
 | `Command-z` | Undo the last edit |
@@ -186,6 +188,8 @@ Escape cancels the prompt; unknown names and invalid arguments report an error w
 | `delete-char`, `delete-backward-char` | Delete one grapheme | |
 | `set-mark`, `kill-region`, `kill-line`, `yank` | Select, cut, or insert cut text | |
 | `yank-pop` | Replace the last yank with an older cut | |
+| `copy-region` | Copy the region without deleting it | `clipboard-copy` |
+| `clipboard-paste` | Insert literal clipboard text | |
 | `self-insert-command <character>` | Insert one printable character | |
 | `execute-extended-command` | Open the command prompt | |
 | `help`, `help <command>` | List commands or describe one | `/help`, `/commands` |
@@ -215,6 +219,12 @@ Movement, edits, save, buffer changes, and undo/redo end yank-pop, so it cannot 
 `M-x yank-pop` also works after a yank.
 Each kill, yank, and yank-pop is one undo step.
 The ring is local to this process and does not read or write the system clipboard.
+
+Clipboard commands run only when requested, using macOS `pbcopy` and `pbpaste`.
+Copy keeps the region and buffer unchanged; clipboard paste is one literal undo step and clears the selection.
+In editable prompts, `C-c C-v` flattens line breaks and tabs without submitting the prompt.
+Clipboard commands time out after two seconds and reject transfers above 16 MiB or invalid UTF-8, leaving buffer text intact.
+Clipboard errors in a prompt remain visible until the next prompt key; the entered text is preserved.
 
 Contiguous typing and same-direction deletion undo as a group.
 A pause of at least 750 ms, movement, save, prompt entry, buffer switch, or deliberate edit starts a new group.

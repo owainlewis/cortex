@@ -34,6 +34,8 @@ pub enum Command {
     Undo,
     Yank,
     YankPop,
+    CopyRegion,
+    ClipboardPaste,
     Quit,
 }
 
@@ -141,7 +143,9 @@ pub(crate) fn dispatch_at(
         | Command::SetMark
         | Command::SwitchBuffer
         | Command::Yank
-        | Command::YankPop => CommandOutcome::default(),
+        | Command::YankPop
+        | Command::CopyRegion
+        | Command::ClipboardPaste => CommandOutcome::default(),
         Command::Undo => {
             if let Some(point) = buffer.undo() {
                 view.set_point(point, buffer);

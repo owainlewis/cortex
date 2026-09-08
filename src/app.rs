@@ -1,5 +1,6 @@
 use crate::{
     buffer::Buffer,
+    clipboard::Clipboard,
     command_registry, commands,
     editor::{Editor, OpenResult, SwitchError},
     input::key_from_event,
@@ -38,6 +39,7 @@ struct AppState {
     last_search: Option<String>,
     mark: Option<usize>,
     kill_ring: KillRing,
+    clipboard: Clipboard,
     last_yank: Option<YankState>,
     last_disk_check: Option<Instant>,
 }
@@ -380,6 +382,19 @@ impl AppState {
         }
 
         if self.command_line.is_some() {
+            if self.status_kind == Some(StatusKind::Error) {
+                self.clear_status();
+            }
+            // Clipboard paste is the one editor prefix available inside
+            // editable prompts. Its text still follows prompt paste rules.
+            if key == crate::input::Key::Ctrl('c') || keymap.clipboard_prefix_pending() {
+                self.last_yank = None;
+                buffer.break_undo_group();
+                if keymap.resolve(key) == KeymapResult::Command(commands::Command::ClipboardPaste) {
+                    return self.paste_clipboard(buffer, view);
+                }
+                return AppAction::Continue;
+            }
             return self.handle_command_line_key(key, buffer, view);
         }
 
@@ -388,7 +403,7 @@ impl AppState {
             KeymapResult::PendingPrefix => {
                 self.last_yank = None;
                 buffer.break_undo_group();
-                self.set_status("C-x", StatusKind::Prefix);
+                self.set_status(keymap.pending_label().unwrap_or(""), StatusKind::Prefix);
                 AppAction::Continue
             }
             KeymapResult::Unbound => {
@@ -422,6 +437,7 @@ impl AppState {
         }
         if let Some(input) = self.command_line.as_mut() {
             input.push_str(&crate::input::single_line_paste(text));
+            self.clear_status();
             return;
         }
         let point_after = buffer.insert(view.point(), text);
@@ -557,6 +573,47 @@ impl AppState {
         AppAction::Continue
     }
 
+    fn copy_region(&mut self, buffer: &Buffer, view: &View) -> AppAction {
+        let Some(region) = self.active_region(buffer, view) else {
+            self.set_status("No active region", StatusKind::Error);
+            return AppAction::Continue;
+        };
+        let result = self
+            .clipboard
+            .check_size(buffer.text_range_len_bytes(region.clone()))
+            .and_then(|()| self.clipboard.copy(&buffer.text_range(region)));
+        match result {
+            Ok(()) => self.set_status("Copied region to clipboard", StatusKind::Success),
+            Err(error) => {
+                self.set_status(format!("Clipboard copy failed: {error}"), StatusKind::Error)
+            }
+        }
+        AppAction::Continue
+    }
+
+    fn paste_clipboard(&mut self, buffer: &mut Buffer, view: &mut View) -> AppAction {
+        match self.clipboard.paste() {
+            Ok(text) => {
+                self.handle_paste(&text, &mut Keymap::new(), buffer, view);
+                if self.command_line.is_none() {
+                    self.set_status(
+                        if text.is_empty() {
+                            "Clipboard is empty"
+                        } else {
+                            "Pasted clipboard"
+                        },
+                        StatusKind::Info,
+                    );
+                }
+            }
+            Err(error) => self.set_status(
+                format!("Clipboard paste failed: {error}"),
+                StatusKind::Error,
+            ),
+        }
+        AppAction::Continue
+    }
+
     fn handle_command_line_key(
         &mut self,
         key: crate::input::Key,
@@ -682,6 +739,8 @@ impl AppState {
             Command::KillLine => self.kill_line(buffer, view),
             Command::Yank => self.yank(buffer, view),
             Command::YankPop => self.yank_pop(buffer, view),
+            Command::CopyRegion => self.copy_region(buffer, view),
+            Command::ClipboardPaste => self.paste_clipboard(buffer, view),
             Command::RepeatSearch => self.repeat_search(buffer, view),
             Command::OpenFile => self.start_find_file(),
             Command::SwitchBuffer => self.start_switch_buffer(),
@@ -832,10 +891,18 @@ impl AppState {
 
     fn prompt_text(&self) -> Option<String> {
         let input = self.command_line.as_ref()?;
-        Some(match self.prompt_kind.unwrap_or(PromptKind::Command) {
+        let prompt = match self.prompt_kind.unwrap_or(PromptKind::Command) {
             PromptKind::Command => format!("M-x {input}"),
             PromptKind::FindFile => format!("Find file: {input}"),
             PromptKind::SwitchBuffer => format!("Switch buffer: {input}"),
+        };
+        Some(if self.status_kind == Some(StatusKind::Error) {
+            format!(
+                "{} | {prompt}",
+                self.status_message.as_deref().unwrap_or("Error")
+            )
+        } else {
+            prompt
         })
     }
 
@@ -971,6 +1038,194 @@ mod tests {
     };
 
     static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn app_with_test_clipboard(dir: &Path) -> AppState {
+        let copy = crate::clipboard::test_program(
+            dir,
+            "copy",
+            "exec /bin/cat > \"${0%/*}/clipboard-data\"",
+        );
+        let paste = crate::clipboard::test_program(
+            dir,
+            "paste",
+            "exec /bin/cat \"${0%/*}/clipboard-data\"",
+        );
+        AppState {
+            clipboard: crate::clipboard::Clipboard::with_test_programs(copy, paste),
+            ..AppState::default()
+        }
+    }
+
+    #[test]
+    fn clipboard_copy_preserves_region_text_history_and_kill_ring() {
+        let dir = test_dir("clipboard-copy");
+        let mut app = app_with_test_clipboard(&dir);
+        app.kill_ring.push("local cut".to_string());
+        let mut buffer = buffer_with_text("copy.txt", "ae\u{301}界z");
+        let mut view = View::new();
+        let mut keymap = Keymap::new();
+        app.handle_key(Key::Meta('w'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.status_message.as_deref(), Some("No active region"));
+        assert!(!dir.join("clipboard-data").exists());
+        app.mark = Some(1);
+        view.set_point(4, &buffer);
+        app.handle_key(Key::Meta('w'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(
+            fs::read_to_string(dir.join("clipboard-data")).unwrap(),
+            "e\u{301}界"
+        );
+        assert_eq!(buffer.text(), "ae\u{301}界z");
+        assert_eq!(app.mark, Some(1));
+        assert_eq!(view.point(), 4);
+        assert_eq!(app.kill_ring.get(0), Some("local cut"));
+        assert_eq!(buffer.undo(), None);
+        run_slash_command(
+            "clipboard-copy",
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+        );
+        assert_eq!(app.status_kind, Some(StatusKind::Success));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn clipboard_paste_is_literal_one_step_and_never_synchronizes_the_kill_ring() {
+        for named in [false, true] {
+            let dir = test_dir("clipboard-paste");
+            let mut app = app_with_test_clipboard(&dir);
+            app.kill_ring.push("local cut".to_string());
+            let payload = "e\tλ\r\n/quit!\x18\x03";
+            fs::write(dir.join("clipboard-data"), payload).unwrap();
+            let mut buffer = buffer_with_text("paste.txt", "\u{301}tail");
+            let mut view = View::new();
+            let mut keymap = Keymap::new();
+            app.mark = Some(1);
+            if named {
+                run_slash_command(
+                    "clipboard-paste",
+                    &mut app,
+                    &mut keymap,
+                    &mut buffer,
+                    &mut view,
+                );
+            } else {
+                app.handle_key(Key::Ctrl('c'), &mut keymap, &mut buffer, &mut view);
+                assert_eq!(app.status_message.as_deref(), Some("C-c"));
+                app.handle_key(Key::Ctrl('v'), &mut keymap, &mut buffer, &mut view);
+            }
+            assert_eq!(buffer.text(), format!("{payload}\u{301}tail"));
+            assert!(app.mark.is_none());
+            assert_eq!(app.kill_ring.get(0), Some("local cut"));
+            app.execute_command(commands::Command::Undo, "", &mut buffer, &mut view);
+            assert_eq!(buffer.text(), "\u{301}tail");
+            assert!(!buffer.is_dirty());
+            assert_eq!(buffer.undo(), None);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn clipboard_shortcut_pastes_in_each_prompt_without_submission() {
+        for kind in [
+            super::PromptKind::Command,
+            super::PromptKind::FindFile,
+            super::PromptKind::SwitchBuffer,
+        ] {
+            let dir = test_dir("clipboard-prompt");
+            let mut app = app_with_test_clipboard(&dir);
+            fs::write(dir.join("clipboard-data"), "λ\tbar\r\n\x1b\x03/quit!").unwrap();
+            app.command_line = Some("pre".to_string());
+            app.prompt_kind = Some(kind);
+            let mut buffer = buffer_with_text("prompt.txt", "keep");
+            let mut view = View::new();
+            let mut keymap = Keymap::new();
+            app.handle_key(Key::Ctrl('c'), &mut keymap, &mut buffer, &mut view);
+            app.handle_key(Key::Ctrl('v'), &mut keymap, &mut buffer, &mut view);
+            assert_eq!(app.command_line.as_deref(), Some("preλ bar /quit!"));
+            assert_eq!(app.prompt_kind, Some(kind));
+            assert_eq!(buffer.text(), "keep");
+            assert_eq!(buffer.undo(), None);
+            assert_eq!(keymap, Keymap::new());
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn clipboard_failures_preserve_text_and_are_visible_inside_a_prompt() {
+        let dir = test_dir("clipboard-failure");
+        let fail = crate::clipboard::test_program(&dir, "fail", "exit 7");
+        let mut app = AppState {
+            clipboard: crate::clipboard::Clipboard::with_test_programs(fail.clone(), fail),
+            ..AppState::default()
+        };
+        let mut buffer = buffer_with_text("failure.txt", "keep");
+        let mut view = View::new();
+        let mut keymap = Keymap::new();
+        app.mark = Some(0);
+        view.set_point(4, &buffer);
+        for command in [
+            commands::Command::CopyRegion,
+            commands::Command::ClipboardPaste,
+        ] {
+            app.execute_command(command, "", &mut buffer, &mut view);
+            assert_eq!(buffer.text(), "keep");
+            assert_eq!(app.mark, Some(0));
+            assert_eq!(view.point(), 4);
+            assert_eq!(app.status_kind, Some(StatusKind::Error));
+            assert_eq!(buffer.undo(), None);
+        }
+        app.start_command_line();
+        app.command_line = Some("original".to_string());
+        app.handle_key(Key::Ctrl('c'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('v'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.command_line.as_deref(), Some("original"));
+        assert!(app
+            .prompt_text()
+            .unwrap()
+            .starts_with("Clipboard paste failed:"));
+        let empty = crate::clipboard::test_program(&dir, "empty", "exit 0");
+        app.clipboard = crate::clipboard::Clipboard::with_test_programs(empty.clone(), empty);
+        app.handle_key(Key::Ctrl('c'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('v'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.prompt_text().as_deref(), Some("M-x original"));
+        app.handle_key(Key::Char('x'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.prompt_text().as_deref(), Some("M-x originalx"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn clipboard_commands_are_ignored_in_a_dirty_quit_confirmation() {
+        let dir = test_dir("clipboard-confirmation");
+        let called = crate::clipboard::test_program(
+            &dir,
+            "called",
+            "printf 'y'; /usr/bin/touch \"$0.called\"",
+        );
+        let mut app = AppState {
+            clipboard: crate::clipboard::Clipboard::with_test_programs(
+                called.clone(),
+                called.clone(),
+            ),
+            ..AppState::default()
+        };
+        let mut buffer = buffer_with_text("dirty.txt", "");
+        let mut view = View::new();
+        let mut keymap = Keymap::new();
+        buffer.insert(0, "keep");
+        app.request_dirty_quit();
+        for key in [Key::Meta('w'), Key::Ctrl('c'), Key::Ctrl('v')] {
+            assert_eq!(
+                app.handle_key(key, &mut keymap, &mut buffer, &mut view),
+                AppAction::Continue
+            );
+        }
+        assert!(app.dirty_quit_prompt);
+        assert_eq!(buffer.text(), "keep");
+        assert!(!called.with_extension("called").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn multiple_kills_yank_and_cycle_newest_first_with_independent_undo_steps() {

@@ -756,6 +756,10 @@ impl Buffer {
         (text, context_barriers)
     }
 
+    pub(crate) fn text_range_len_bytes(&self, range: Range<usize>) -> usize {
+        self.text.slice(range).len_bytes()
+    }
+
     pub fn text_range(&self, char_range: Range<usize>) -> String {
         let start = char_range.start.min(self.len_chars());
         let end = char_range.end.min(self.len_chars());

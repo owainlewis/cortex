@@ -220,7 +220,11 @@ There is no retry loop for ordinary editor commands.
 Stable file reads retry up to three times, and temporary-file creation tries up to 128 random names.
 
 The main UI path is synchronous.
-The only runtime background work is the terminal-disconnect monitor thread.
+The only persistent runtime background work is the terminal-disconnect monitor thread.
+Explicit clipboard commands spawn pbcopy or pbpaste with piped input/output and an enforced UTF-8 locale.
+Nonblocking pipe I/O and child exit polling share a two-second deadline; failures kill and reap the child.
+Transfers are limited to 16 MiB, and copy checks the selected Rope byte length before materializing text.
+Clipboard paste uses the same application text path as terminal paste, including single-line prompt conversion.
 Tree-sitter work is bounded by visible ranges, read-ahead windows, per-line character limits, and a small checkpoint cache for Rust and Markdown.
 The retained renderer rejects terminal sizes above 1,000,000 cells, which turns an uncontrolled allocation into a recoverable render error followed by terminal cleanup.
 

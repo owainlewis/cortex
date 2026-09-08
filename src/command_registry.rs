@@ -221,6 +221,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         Command::KillLine,
         None,
     ),
+    command(
+        "copy-region",
+        "Copy the active region to the macOS clipboard",
+        &["clipboard-copy"],
+        Command::CopyRegion,
+        None,
+    ),
+    command(
+        "clipboard-paste",
+        "Insert text from the macOS clipboard",
+        &[],
+        Command::ClipboardPaste,
+        None,
+    ),
     command("yank", "Insert the newest kill", &[], Command::Yank, None),
     command(
         "yank-pop",
