@@ -7,6 +7,7 @@ pub enum Key {
     Meta(char),
     Command(char),
     Enter,
+    Tab,
     Escape,
     Backspace,
     Delete,
@@ -41,6 +42,7 @@ pub fn key_from_event(event: KeyEvent) -> Key {
         }
         KeyCode::Char(ch) if printable_char(ch, event.modifiers) => Key::Char(ch),
         KeyCode::Enter => Key::Enter,
+        KeyCode::Tab if event.modifiers.is_empty() => Key::Tab,
         KeyCode::Esc => Key::Escape,
         KeyCode::Backspace => Key::Backspace,
         KeyCode::Delete => Key::Delete,
@@ -158,6 +160,18 @@ mod tests {
                 KeyCode::Char('x'),
                 KeyModifiers::SUPER | KeyModifiers::META
             )),
+            Key::Unhandled
+        );
+    }
+
+    #[test]
+    fn maps_plain_tab_for_prompt_completion() {
+        assert_eq!(
+            key_from_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Key::Tab
+        );
+        assert_eq!(
+            key_from_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL)),
             Key::Unhandled
         );
     }

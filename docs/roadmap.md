@@ -135,7 +135,8 @@ This extends the v0.3 editing work; individual ticket criteria define completion
 
 Delivery order:
 - [closed] [#161 Align the product direction](https://github.com/owainlewis/cortex/issues/161)
-- [open] [#162 Correct TypeScript and fenced Markdown colours](https://github.com/owainlewis/cortex/issues/162)
+- [closed] [#162 Correct TypeScript and fenced Markdown colours](https://github.com/owainlewis/cortex/issues/162)
+- [closed] [#175 Fix macOS PTY disconnect monitoring](https://github.com/owainlewis/cortex/issues/175)
 - [open] [#46 Add command registry and M-x](https://github.com/owainlewis/cortex/issues/46)
 - [open] [#164 Add typing and region indentation](https://github.com/owainlewis/cortex/issues/164)
 - [open] [#165 Handle literal terminal paste](https://github.com/owainlewis/cortex/issues/165)

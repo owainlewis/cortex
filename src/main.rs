@@ -1,6 +1,7 @@
 mod app;
 pub mod buffer;
 mod cli;
+mod command_registry;
 mod commands;
 mod editor;
 pub mod highlighter;

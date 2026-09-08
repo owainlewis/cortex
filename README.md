@@ -135,31 +135,46 @@ It includes shared prompts for commands and buffer navigation, a directory picke
 | `C-x C-r` | Reload a clean buffer from disk |
 | `C-x C-s` | Save the file |
 | `C-x C-c` | Quit |
-| `M-x` | Open the slash command line |
+| `M-x` | Open the named command prompt |
 
 If any open buffer is dirty, `C-x C-c` asks whether to quit without saving.
 Press `y` to confirm.
 Press `n` or Escape to cancel.
 
-## Slash Commands
+## Named commands
 
-| Command | Action |
-| --- | --- |
-| `/save` | Save the current file |
-| `/reload` | Reload a clean buffer from disk |
-| `/search <text>` | Search forward for text |
-| `/next` | Repeat the previous search |
-| `/undo` | Undo the last edit |
-| `/redo` | Redo the last undone edit |
-| `/quit` | Quit, using the same dirty-buffer prompt as `C-x C-c` |
-| `/quit!` | Quit without saving |
-| `/open <path>` | Open another file buffer |
-| `/help` | Show the available slash commands |
-| `/commands` | Show the available slash commands (alias for `/help`) |
+Press `M-x`, type a command name, and press Enter.
+The minibuffer shows matching names as you type.
+Tab completes a unique match or the shared prefix of several matches.
+Use `help <command>` for a description.
+Escape cancels the prompt; unknown names and invalid arguments report an error without changing text.
 
-Escape cancels the command line.
-Unknown slash commands leave the editor open and show an error message.
-`/open <path>` rejects directories and opens another buffer without discarding unsaved changes.
+| Command | Action | Existing alias |
+| --- | --- | --- |
+| `save-buffer` | Save the current file | `/save` |
+| `reload-buffer` | Reload a clean buffer from disk | `/reload` |
+| `find-file` | Prompt for a file or directory relative to the active file | |
+| `switch-buffer` | Prompt for an open buffer | |
+| `open-file <path>` | Open a file relative to the working directory | `/open <path>` |
+| `search-forward <text>` | Search forward for literal text | `/search <text>` |
+| `repeat-search` | Repeat the previous search | `/next` |
+| `undo`, `redo` | Undo or redo an edit | `/undo`, `/redo` |
+| `quit` | Quit with the dirty-buffer guard | `/quit` |
+| `force-quit` | Quit without saving | `/quit!` |
+| `forward-char`, `backward-char` | Move one grapheme | |
+| `next-line`, `previous-line` | Move one line | |
+| `beginning-of-line`, `end-of-line` | Move to a line boundary | |
+| `newline` | Insert a newline | |
+| `delete-char`, `delete-backward-char` | Delete one grapheme | |
+| `set-mark`, `kill-region`, `kill-line`, `yank` | Select, cut, or insert cut text | |
+| `self-insert-command <character>` | Insert one printable character | |
+| `execute-extended-command` | Open the command prompt | |
+| `help`, `help <command>` | List commands or describe one | `/help`, `/commands` |
+
+Aliases also work without a leading slash.
+`open-file` and `/open` reject directories and open another buffer without discarding unsaved changes.
+Use `find-file` to browse a directory.
+Typing `/` in the editor still inserts a slash.
 
 ## Directory Picker Keybindings
 
@@ -190,16 +205,16 @@ See [docs/release.md](docs/release.md) for the release checklist.
 
 ## Known Limitations
 
-Redo is available from the slash command line, but does not have a dedicated keybinding yet.
+Redo is available through `M-x redo` and has no dedicated keybinding.
 Cortex shows one active buffer at a time.
 The switch-buffer prompt requires an exact path or a unique file name and does not offer completion yet.
-Search is forward-only through `/search <text>`, with `C-s` or `/next` repeating the last search.
+Search is forward-only through `search-forward <text>` or `/search <text>`, with `C-s` or `/next` repeating the last search.
 Incremental and reverse search are not implemented yet.
 Cut and yank retain only the latest cut text, with no kill ring or yank-pop yet.
-Slash commands are entered through `M-x`; the leading slash remains part of the command syntax until the command registry lands.
 The directory picker can expand directories, but it is still a minimal picker.
 The slash command `/open <path>` opens files only, not directories.
-There are no splits, tabs, command registry, config, plugins, LSP, AI integration, or embedded terminal pane yet.
+Internal splits, tabs, and an embedded terminal are deferred in favour of external terminal panes.
+There is no config, plugin system, LSP, or AI integration.
 Long lines are clipped to the terminal width instead of wrapped.
 External file changes are not watched automatically.
 The modeline marks detected disk changes, and `C-x C-r` or `/reload` reloads the file.

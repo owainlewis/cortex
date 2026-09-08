@@ -1,6 +1,6 @@
 use crate::{
     buffer::Buffer,
-    commands,
+    command_registry, commands,
     editor::{Editor, OpenResult, SwitchError},
     input::key_from_event,
     keymap::{Keymap, KeymapResult},
@@ -25,8 +25,6 @@ use std::{
 const DIRTY_QUIT_PROMPT: &str = "Buffers modified; quit without saving? (y or n)";
 const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const SIGNAL_CHECK_INTERVAL: Duration = Duration::from_millis(50);
-const COMMAND_HELP: &str =
-    "Commands: /help, /commands, /open <path>, /search <text>, /next, /reload, /save, /undo, /redo, /quit, /quit!";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct AppState {
@@ -358,17 +356,7 @@ impl AppState {
         }
 
         match keymap.resolve(key) {
-            KeymapResult::Command(commands::Command::OpenCommandLine) => self.start_command_line(),
-            KeymapResult::Command(commands::Command::SetMark) => self.set_mark(view),
-            KeymapResult::Command(commands::Command::KillRegion) => self.kill_region(buffer, view),
-            KeymapResult::Command(commands::Command::KillLine) => self.kill_line(buffer, view),
-            KeymapResult::Command(commands::Command::Yank) => self.yank(buffer, view),
-            KeymapResult::Command(commands::Command::RepeatSearch) => {
-                self.repeat_search(buffer, view)
-            }
-            KeymapResult::Command(commands::Command::OpenFile) => self.start_find_file(),
-            KeymapResult::Command(commands::Command::SwitchBuffer) => self.start_switch_buffer(),
-            KeymapResult::Command(command) => self.dispatch_command(command, buffer, view),
+            KeymapResult::Command(command) => self.execute_command(command, "", buffer, view),
             KeymapResult::PendingPrefix => {
                 self.set_status("C-x", StatusKind::Prefix);
                 AppAction::Continue
@@ -381,7 +369,7 @@ impl AppState {
     }
 
     fn start_command_line(&mut self) -> AppAction {
-        self.command_line = Some("/".to_string());
+        self.command_line = Some(String::new());
         self.prompt_kind = Some(PromptKind::Command);
         self.clear_status();
         AppAction::Continue
@@ -483,6 +471,12 @@ impl AppState {
                 }
                 AppAction::Continue
             }
+            crate::input::Key::Tab if self.prompt_kind == Some(PromptKind::Command) => {
+                if let Some(input) = self.command_line.as_mut() {
+                    *input = command_registry::complete(input);
+                }
+                AppAction::Continue
+            }
             crate::input::Key::Enter => {
                 let input = self.command_line.take().unwrap_or_default();
                 match self.prompt_kind.take().unwrap_or(PromptKind::Command) {
@@ -533,44 +527,49 @@ impl AppState {
     }
 
     fn run_command_line(&mut self, input: &str, buffer: &mut Buffer, view: &mut View) -> AppAction {
-        let trimmed = input.trim();
-        let Some(command_text) = trimmed.strip_prefix('/') else {
-            self.set_status("Commands must start with /", StatusKind::Error);
-            return AppAction::Continue;
-        };
-        let command_text = command_text.trim();
-
-        match command_text {
-            "" | "help" | "commands" => {
-                self.set_status(COMMAND_HELP, StatusKind::Info);
-                AppAction::Continue
+        match command_registry::parse(input) {
+            Ok(invocation) => {
+                self.execute_command(invocation.command, invocation.argument, buffer, view)
             }
-            "save" => self.dispatch_command(commands::Command::SaveBuffer, buffer, view),
-            "reload" => self.dispatch_command(commands::Command::ReloadBuffer, buffer, view),
-            "undo" => self.dispatch_command(commands::Command::Undo, buffer, view),
-            "redo" => self.dispatch_command(commands::Command::Redo, buffer, view),
-            "quit" => self.dispatch_command(commands::Command::Quit, buffer, view),
-            "quit!" => AppAction::ForceQuit,
-            command if command == "search" || command.starts_with("search ") => {
-                self.run_search_command(command, buffer, view)
-            }
-            "next" => self.repeat_search(buffer, view),
-            command if command == "open" || command.starts_with("open ") => {
-                self.run_open_command(command)
-            }
-            command => {
-                self.set_status(format!("Unknown command: /{command}"), StatusKind::Error);
+            Err(error) => {
+                self.set_status(error, StatusKind::Error);
                 AppAction::Continue
             }
         }
     }
 
-    fn run_search_command(&mut self, command: &str, buffer: &Buffer, view: &mut View) -> AppAction {
-        let query = command
-            .strip_prefix("search")
-            .map(str::trim)
-            .unwrap_or_default();
+    fn execute_command(
+        &mut self,
+        command: commands::Command,
+        argument: &str,
+        buffer: &mut Buffer,
+        view: &mut View,
+    ) -> AppAction {
+        use commands::Command;
+        match command {
+            Command::OpenCommandLine => self.start_command_line(),
+            Command::SetMark => self.set_mark(view),
+            Command::KillRegion => self.kill_region(buffer, view),
+            Command::KillLine => self.kill_line(buffer, view),
+            Command::Yank => self.yank(buffer, view),
+            Command::RepeatSearch => self.repeat_search(buffer, view),
+            Command::OpenFile => self.start_find_file(),
+            Command::SwitchBuffer => self.start_switch_buffer(),
+            Command::Search => self.run_search_command(argument, buffer, view),
+            Command::OpenPath => self.run_open_command(argument),
+            Command::ForceQuit => AppAction::ForceQuit,
+            Command::Help => {
+                match command_registry::help(argument) {
+                    Ok(message) => self.set_status(message, StatusKind::Info),
+                    Err(error) => self.set_status(error, StatusKind::Error),
+                }
+                AppAction::Continue
+            }
+            command => self.dispatch_command(command, buffer, view),
+        }
+    }
 
+    fn run_search_command(&mut self, query: &str, buffer: &Buffer, view: &mut View) -> AppAction {
         if query.is_empty() {
             self.set_status("Usage: /search <text>", StatusKind::Error);
             return AppAction::Continue;
@@ -610,12 +609,7 @@ impl AppState {
         AppAction::Continue
     }
 
-    fn run_open_command(&mut self, command: &str) -> AppAction {
-        let path_text = command
-            .strip_prefix("open")
-            .map(str::trim)
-            .unwrap_or_default();
-
+    fn run_open_command(&mut self, path_text: &str) -> AppAction {
         if path_text.is_empty() {
             self.set_status("Usage: /open <path>", StatusKind::Error);
             return AppAction::Continue;
@@ -709,7 +703,7 @@ impl AppState {
     fn prompt_text(&self) -> Option<String> {
         let input = self.command_line.as_ref()?;
         Some(match self.prompt_kind.unwrap_or(PromptKind::Command) {
-            PromptKind::Command => input.clone(),
+            PromptKind::Command => format!("M-x {input}"),
             PromptKind::FindFile => format!("Find file: {input}"),
             PromptKind::SwitchBuffer => format!("Switch buffer: {input}"),
         })
@@ -786,6 +780,7 @@ fn keycast_text(key: crate::input::Key) -> Option<String> {
         crate::input::Key::Meta(ch) => Some(format!("M-{ch}")),
         crate::input::Key::Command(ch) => Some(format!("Cmd-{ch}")),
         crate::input::Key::Enter => Some("Enter".to_string()),
+        crate::input::Key::Tab => Some("Tab".to_string()),
         crate::input::Key::Escape => Some("Esc".to_string()),
         crate::input::Key::Backspace => Some("Backspace".to_string()),
         crate::input::Key::Delete => Some("Delete".to_string()),
@@ -828,8 +823,7 @@ fn command_clears_mark(command: commands::Command) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_app_action, AppAction, AppControl, AppState, COMMAND_HELP, DIRTY_QUIT_PROMPT,
-        DISK_CHECK_INTERVAL,
+        apply_app_action, AppAction, AppControl, AppState, DIRTY_QUIT_PROMPT, DISK_CHECK_INTERVAL,
     };
     use crate::{
         buffer::Buffer, editor::Editor, input::Key, keymap::Keymap, renderer::StatusKind,
@@ -1069,7 +1063,7 @@ mod tests {
         let action = app.handle_key(Key::Meta('x'), &mut keymap, &mut buffer, &mut view);
 
         assert_eq!(action, AppAction::Continue);
-        assert_eq!(app.command_line.as_deref(), Some("/"));
+        assert_eq!(app.command_line.as_deref(), Some(""));
         assert_eq!(buffer.text(), "old");
         assert!(!buffer.is_dirty());
     }
@@ -1087,9 +1081,9 @@ mod tests {
         }
 
         app.handle_key(Key::Backspace, &mut keymap, &mut buffer, &mut view);
-        assert_eq!(app.command_line.as_deref(), Some("/e\u{301}"));
+        assert_eq!(app.command_line.as_deref(), Some("e\u{301}"));
         app.handle_key(Key::Backspace, &mut keymap, &mut buffer, &mut view);
-        assert_eq!(app.command_line.as_deref(), Some("/"));
+        assert_eq!(app.command_line.as_deref(), Some(""));
     }
 
     #[test]
@@ -1104,7 +1098,10 @@ mod tests {
 
             assert_eq!(action, AppAction::Continue);
             assert_eq!(app.command_line, None);
-            assert_eq!(app.status_message.as_deref(), Some(COMMAND_HELP));
+            assert_eq!(
+                app.status_message.as_deref(),
+                crate::command_registry::help("").ok().as_deref()
+            );
             assert_eq!(app.status_kind, Some(StatusKind::Info));
             assert_eq!(buffer.text(), "old");
             assert!(!buffer.is_dirty());
@@ -1796,6 +1793,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn named_commands_match_editing_and_movement_keys() {
+        for (name, key) in [
+            ("forward-char", Key::Ctrl('f')),
+            ("backward-char", Key::Ctrl('b')),
+            ("next-line", Key::Ctrl('n')),
+            ("previous-line", Key::Ctrl('p')),
+            ("beginning-of-line", Key::Ctrl('a')),
+            ("end-of-line", Key::Ctrl('e')),
+            ("newline", Key::Enter),
+            ("delete-backward-char", Key::Backspace),
+            ("delete-char", Key::Ctrl('d')),
+            ("kill-line", Key::Ctrl('k')),
+            ("set-mark", Key::Ctrl(' ')),
+        ] {
+            let mut keyed = (
+                AppState::default(),
+                Keymap::new(),
+                buffer_with_text("keyed.txt", "a界b\ndef\n"),
+                View::new(),
+            );
+            let mut named = (
+                AppState::default(),
+                Keymap::new(),
+                buffer_with_text("named.txt", "a界b\ndef\n"),
+                View::new(),
+            );
+            keyed.3.set_point(2, &keyed.2);
+            named.3.set_point(2, &named.2);
+            let keyed_action = keyed
+                .0
+                .handle_key(key, &mut keyed.1, &mut keyed.2, &mut keyed.3);
+            let named_action =
+                run_slash_command(name, &mut named.0, &mut named.1, &mut named.2, &mut named.3);
+            assert_eq!(named_action, keyed_action, "{name}");
+            assert_eq!(named.2.text(), keyed.2.text(), "{name}");
+            assert_eq!(named.3.point(), keyed.3.point(), "{name}");
+            assert_eq!(named.0.mark, keyed.0.mark, "{name}");
+            assert_eq!(named.0.kill_ring, keyed.0.kill_ring, "{name}");
+        }
+    }
+
+    #[test]
+    fn named_prompt_completion_and_cancel_leave_editor_text_intact() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+        app.handle_key(Key::Meta('x'), &mut keymap, &mut buffer, &mut view);
+        for ch in "sav".chars() {
+            app.handle_key(Key::Char(ch), &mut keymap, &mut buffer, &mut view);
+        }
+        app.handle_key(Key::Tab, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.prompt_text().as_deref(), Some("M-x save-buffer"));
+        assert_eq!(buffer.text(), "old");
+        app.handle_key(Key::Escape, &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Char('!'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "!old");
+    }
+
+    #[test]
+    fn invalid_named_commands_and_help_leave_text_unchanged_then_resume_editing() {
+        for input in [
+            "missing-command",
+            "save-buffer extra",
+            "self-insert-command ab",
+            "help save-buffer",
+        ] {
+            let mut app = AppState::default();
+            let mut keymap = Keymap::new();
+            let mut buffer = buffer_with_text("notes.txt", "old");
+            let mut view = View::new();
+            run_slash_command(input, &mut app, &mut keymap, &mut buffer, &mut view);
+            assert!(app.command_line.is_none());
+            assert_eq!(buffer.text(), "old");
+            assert!(!buffer.is_dirty());
+            assert!(app.status_message.is_some());
+            app.handle_key(Key::Char('!'), &mut keymap, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), "!old");
+        }
+    }
+
     fn start_dirty_quit_prompt(
         app: &mut AppState,
         keymap: &mut Keymap,
@@ -1815,7 +1894,7 @@ mod tests {
         view: &mut View,
     ) -> AppAction {
         app.handle_key(Key::Meta('x'), keymap, buffer, view);
-        for ch in command.strip_prefix('/').unwrap_or(command).chars() {
+        for ch in command.chars() {
             app.handle_key(Key::Char(ch), keymap, buffer, view);
         }
         app.handle_key(Key::Enter, keymap, buffer, view)
