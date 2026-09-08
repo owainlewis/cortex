@@ -30,8 +30,6 @@ const MAX_PICKER_INDENT_DEPTH: usize = 4;
 /// The current and previous frame coexist while diffing, so arbitrary `u16`
 /// dimensions could otherwise retain billions of `Cell` values.
 const MAX_RETAINED_FRAME_CELLS: usize = 1_000_000;
-const COMMAND_LINE_HINT: &str =
-    "/help  /commands  /open <path>  /search <text>  /next  /reload  /save  /undo  /redo  /quit  /quit!";
 
 const THEME: Theme = Theme {
     editor_fg: Color::Rgb {
@@ -758,10 +756,15 @@ fn empty_gutter(width: usize) -> String {
 }
 
 fn command_line_text(input: &str) -> String {
-    if input == "/" {
-        return format!(" /  {COMMAND_LINE_HINT}");
+    if let Some(command) = input.strip_prefix("M-x ") {
+        let matches = crate::command_registry::matches(command)
+            .take(4)
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>();
+        if !matches.is_empty() {
+            return format!(" {input}  [{}]", matches.join("  "));
+        }
     }
-
     format!(" {input}")
 }
 
@@ -1559,8 +1562,7 @@ mod tests {
         build_frame, build_frame_with_keycast, build_frame_with_selection, build_picker_frame,
         fill_row, fit_line_cells, fit_status_line, measure_cells, modeline_text, plain_style,
         push_cells, retained_cell_count, CellFrame, CursorPosition, Frame, ModelineStyle, Renderer,
-        ScreenLineKind, StatusKind, TerminalSize, COMMAND_LINE_HINT, MAX_RETAINED_FRAME_CELLS,
-        THEME,
+        ScreenLineKind, StatusKind, TerminalSize, MAX_RETAINED_FRAME_CELLS, THEME,
     };
     use crate::{
         buffer::Buffer,
@@ -2842,7 +2844,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_modeline_lists_commands_when_slash_prompt_opens() {
+    fn frame_modeline_lists_commands_when_named_prompt_opens() {
         let buffer = buffer_with_text("notes.txt", "alpha\n");
 
         let frame = build_frame(
@@ -2851,13 +2853,34 @@ mod tests {
             TerminalSize { cols: 120, rows: 3 },
             None,
             None,
-            Some("/"),
+            Some("M-x "),
         );
 
-        assert!(frame.modeline.contains(COMMAND_LINE_HINT));
-        assert!(frame.modeline.contains("/open <path>"));
-        assert!(frame.modeline.contains("/search <text>"));
-        assert_eq!(frame.cursor, CursorPosition { col: 2, row: 2 });
+        assert!(frame.modeline.contains("save-buffer"));
+        assert!(frame.modeline.contains("find-file"));
+        assert!(frame.modeline.contains("switch-buffer"));
+        assert_eq!(frame.cursor, CursorPosition { col: 5, row: 2 });
+    }
+
+    #[test]
+    fn command_completion_hint_does_not_move_the_input_cursor() {
+        let buffer = buffer_with_text("notes.txt", "alpha\n");
+        for cols in [12, 40, 80] {
+            let frame = build_frame(
+                &buffer,
+                &View::new(),
+                TerminalSize { cols, rows: 3 },
+                None,
+                None,
+                Some("M-x sav"),
+            );
+            assert!(frame.modeline.starts_with(" M-x sav"));
+            assert_eq!(frame.cursor, CursorPosition { col: 8, row: 2 });
+            if cols >= 40 {
+                assert!(frame.modeline.contains("save-buffer"));
+                assert!(!frame.modeline.contains("find-file"));
+            }
+        }
     }
 
     #[test]

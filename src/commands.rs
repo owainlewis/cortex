@@ -10,6 +10,10 @@ pub enum Command {
     DeleteBackward,
     DeleteForward,
     OpenCommandLine,
+    OpenPath,
+    Search,
+    Help,
+    ForceQuit,
     KillLine,
     KillRegion,
     MoveForwardChar,
@@ -72,6 +76,10 @@ pub fn dispatch(command: Command, buffer: &mut Buffer, view: &mut View) -> Comma
         }
         Command::KillLine
         | Command::KillRegion
+        | Command::OpenPath
+        | Command::Search
+        | Command::Help
+        | Command::ForceQuit
         | Command::OpenCommandLine
         | Command::OpenFile
         | Command::SetMark

@@ -95,6 +95,7 @@ There is no formal crate-level enforcement because all modules are in one binary
 | `buffer.rs` | Rope text, file identity and baseline, history, revisions, changed lines, save and reload rules | Ropey, Unicode helpers, filesystem, randomness, and macOS file APIs | Point, scrolling, prompt state, or screen cells |
 | `view.rs` | Point, scroll offsets, and preferred display column | Buffer queries | Text, file identity, or rendering styles |
 | `commands.rs` | Core editing, movement, save, reload, undo, redo, and quit outcomes | Buffer and View | Prompt-driven commands and application-wide state |
+| `command_registry.rs` | Static names, aliases, descriptions, argument validation, and prefix completion | Command enum | Editor state or command execution |
 | `input.rs` and `keymap.rs` | Terminal-key normalization and one pending `C-x` prefix | Crossterm events and the command enum | Command execution or configurable bindings |
 | `picker.rs` | Directory tree rows, selection, lazy expansion, and picker key handling | Filesystem directory reads and normalized input keys | File buffers or the editor event loop |
 | `highlighter.rs` | Language definitions and buffer-revision keyed highlight caches | Buffer text windows and Tree-sitter | Buffer text or terminal styles |
@@ -166,10 +167,12 @@ There is no formal crate-level enforcement because all modules are in one binary
 
 The user-facing process interface is `cortex [path]`, `cortex --version`, and `cortex --check-update`.
 The editor accepts Crossterm key and resize events and emits terminal control operations and styled text.
-Named slash commands are parsed directly in `AppState`; they are not yet entries in a registry.
+Named commands and slash aliases are parsed through the static table in `command_registry.rs`.
+The same table supplies minibuffer prefix hints, Tab completion, and command help.
 
-The internal command interface is the `Command` enum plus `commands::dispatch`.
-It is incomplete as a system seam because several enum variants are intentionally intercepted by `AppState` and return an empty outcome from the dispatcher.
+The keymap and named commands pass typed `Command` values through `AppState::execute_command`.
+Application actions run there; buffer and view actions delegate to `commands::dispatch`.
+Named path and search arguments are separate from keymap state.
 
 ### 6.2 Identity and stored data
 
@@ -243,10 +246,10 @@ Those properties still require the manual smoke checks described in `CONTRIBUTIN
 
 ## 10. Known limitations of the current architecture
 
-- `app.rs` is both coordinator and owner of several editor behaviors, so the command dispatcher is not yet the single command seam described by the product spec.
+- `app.rs` remains both the event-loop coordinator and owner of several editor behaviors.
 - The directory picker runs a nested event loop and has its own renderer instance rather than being another state in one application loop.
 - Mark and the single cut slot live in global application state instead of view state and a real editor-level kill ring.
-- Prompt behavior is shared, but command discovery, completion, incremental search, and fuzzy buffer or file selection are not implemented.
+- Command completion uses name prefixes; incremental search and fuzzy buffer or file selection are not implemented.
 - External disk changes are polled only for the active buffer when another event causes a render.
 - Syntax parsing and all filesystem operations run synchronously on the main thread.
 - Undo and redo history, open-buffer count, and clean Rope baselines have no explicit memory budget.
