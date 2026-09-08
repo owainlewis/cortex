@@ -3,8 +3,9 @@ use crossterm::{
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{
-    ffi::CStr,
     io::{self, Write},
+    mem::MaybeUninit,
+    os::unix::fs::MetadataExt,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -133,7 +134,7 @@ impl<W: Write> Drop for TerminalSession<W> {
 impl TerminalDisconnectGuard {
     fn start() -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
-        let monitor = terminal_stdin_descriptor()
+        let monitor = terminal_stdin_descriptor()?
             .map(|descriptor| {
                 let monitor_stop = Arc::clone(&stop);
                 thread::Builder::new()
@@ -155,43 +156,47 @@ impl Drop for TerminalDisconnectGuard {
     }
 }
 
-fn terminal_stdin_descriptor() -> Option<libc::c_int> {
-    let stdin_is_terminal = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
-    if !stdin_is_terminal {
-        return None;
+fn terminal_stdin_descriptor() -> io::Result<Option<libc::c_int>> {
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        return Ok(None);
     }
 
-    let stdin_is_dev_tty = stdin_terminal_name()?.as_slice() == b"/dev/tty";
-    disconnect_descriptor(true, stdin_is_dev_tty)
+    // /dev/tty is a special device that macOS poll rejects even when it is
+    // attached to a terminal. Compare device identities: ttyname_r can fail
+    // during device-name lookup and must not silently disable the guard.
+    let stdin_is_dev_tty = descriptor_is_dev_tty(libc::STDIN_FILENO)?;
+    Ok(disconnect_descriptor(true, stdin_is_dev_tty))
 }
 
-fn stdin_terminal_name() -> Option<Vec<u8>> {
-    let mut path = [0 as libc::c_char; libc::PATH_MAX as usize];
-    if unsafe { libc::ttyname_r(libc::STDIN_FILENO, path.as_mut_ptr(), path.len()) } != 0 {
-        return None;
+fn descriptor_is_dev_tty(descriptor: libc::c_int) -> io::Result<bool> {
+    let mut state = MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(descriptor, state.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
     }
-
-    Some(unsafe { CStr::from_ptr(path.as_ptr()) }.to_bytes().to_vec())
+    let device = unsafe { state.assume_init() }.st_rdev as u64;
+    Ok(device == std::fs::metadata("/dev/tty")?.rdev())
 }
 
 fn disconnect_descriptor(stdin_is_terminal: bool, stdin_is_dev_tty: bool) -> Option<libc::c_int> {
     (stdin_is_terminal && !stdin_is_dev_tty).then_some(libc::STDIN_FILENO)
 }
 
-fn monitor_disconnect(terminal_descriptor: libc::c_int, stop: Arc<AtomicBool>) {
+fn poll_disconnect(terminal_descriptor: libc::c_int) -> MonitorAction {
     let mut descriptor = libc::pollfd {
-        // Terminal stdin is the exact descriptor Crossterm reads. Redirected
-        // stdin may make Crossterm open /dev/tty, but macOS poll rejects that
-        // descriptor and no other standard descriptor is guaranteed to match.
         fd: terminal_descriptor,
-        events: 0,
+        // macOS does not report PTY hangups with an empty event mask.
+        // Watching readability does not consume the editor's input.
+        events: libc::POLLIN,
         revents: 0,
     };
+    let result = unsafe { libc::poll(&mut descriptor, 1, DISCONNECT_CHECK_MILLIS) };
+    let error_kind = (result == -1).then(|| io::Error::last_os_error().kind());
+    monitor_action(result, descriptor.revents, error_kind)
+}
 
+fn monitor_disconnect(terminal_descriptor: libc::c_int, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::Acquire) {
-        let result = unsafe { libc::poll(&mut descriptor, 1, DISCONNECT_CHECK_MILLIS) };
-        let error_kind = (result == -1).then(|| io::Error::last_os_error().kind());
-        match monitor_action(result, descriptor.revents, error_kind) {
+        match poll_disconnect(terminal_descriptor) {
             MonitorAction::Continue => {}
             MonitorAction::Retry => {
                 thread::sleep(Duration::from_millis(DISCONNECT_CHECK_MILLIS as u64));
@@ -220,6 +225,11 @@ fn monitor_action(
     if result > 0 && events & DISCONNECT_EVENTS != 0 {
         return MonitorAction::Disconnect;
     }
+    if result > 0 {
+        // Input may remain readable until the editor consumes it. Throttle
+        // those wakeups so the monitor never spins while the editor is busy.
+        return MonitorAction::Retry;
+    }
     MonitorAction::Continue
 }
 
@@ -229,7 +239,94 @@ fn setup_error(context: &str, error: io::Error) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{disconnect_descriptor, monitor_action, CleanupStep, MonitorAction, TerminalState};
+    use super::{
+        disconnect_descriptor, monitor_action, poll_disconnect, CleanupStep, MonitorAction,
+        TerminalState,
+    };
+
+    #[test]
+    fn direct_pty_is_not_the_special_dev_tty_device() {
+        use std::os::fd::AsRawFd;
+        let (_master, slave) = test_pty();
+        assert!(!super::descriptor_is_dev_tty(slave.as_raw_fd()).unwrap());
+        assert!(super::descriptor_is_dev_tty(-1).is_err());
+    }
+
+    #[test]
+    fn disconnect_poll_observes_a_real_pty_hangup() {
+        let (master, slave) = test_pty();
+        use std::os::fd::AsRawFd;
+        assert_eq!(poll_disconnect(slave.as_raw_fd()), MonitorAction::Continue);
+        // A concurrently spawned metadata tool must not inherit the PTY.
+        let mut child = std::process::Command::new("/bin/cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(master);
+        let action = poll_disconnect(slave.as_raw_fd());
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        assert_eq!(action, MonitorAction::Disconnect);
+    }
+
+    #[test]
+    fn disconnect_poll_leaves_readable_input_for_the_editor() {
+        use std::{
+            io::{Read, Write},
+            os::fd::AsRawFd,
+        };
+        let (mut master, mut slave) = test_pty();
+        master.write_all(b"hello\n").unwrap();
+        assert_eq!(poll_disconnect(slave.as_raw_fd()), MonitorAction::Retry);
+        let mut input = [0; 6];
+        slave.read_exact(&mut input).unwrap();
+        assert_eq!(&input, b"hello\n");
+    }
+
+    fn test_pty() -> (std::fs::File, std::fs::File) {
+        use std::{
+            ffi::CStr,
+            os::fd::{AsRawFd, FromRawFd},
+        };
+        // libc does not yet expose Darwin's ptsname_r binding.
+        unsafe extern "C" {
+            fn ptsname_r(
+                fd: libc::c_int,
+                name: *mut libc::c_char,
+                len: libc::size_t,
+            ) -> libc::c_int;
+        }
+        // Other unit tests spawn metadata tools. Set CLOEXEC atomically so
+        // those children cannot keep this test's controller alive.
+        let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+        assert!(
+            master >= 0,
+            "open PTY controller: {}",
+            std::io::Error::last_os_error()
+        );
+        let master = unsafe { std::fs::File::from_raw_fd(master) };
+        assert_eq!(unsafe { libc::grantpt(master.as_raw_fd()) }, 0);
+        assert_eq!(unsafe { libc::unlockpt(master.as_raw_fd()) }, 0);
+        let mut name = [0; libc::PATH_MAX as usize];
+        assert_eq!(
+            unsafe { ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) },
+            0
+        );
+        let path = unsafe { CStr::from_ptr(name.as_ptr()) };
+        let slave = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+            )
+        };
+        assert!(
+            slave >= 0,
+            "open PTY slave: {}",
+            std::io::Error::last_os_error()
+        );
+        (master, unsafe { std::fs::File::from_raw_fd(slave) })
+    }
 
     #[test]
     fn disconnect_monitor_requires_terminal_stdin() {
