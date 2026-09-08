@@ -26,7 +26,7 @@ Run the full suite, formatting, Clippy, release build, and a real PTY flow cover
 
 ## Verification
 
-The final local suite passed 341 unit tests and eight terminal integration tests.
+The final local suite passed 342 unit tests and eight terminal integration tests.
 The two redirected-input cases fail under the local sandbox and require the unchanged GitHub checks.
 Formatting, all-target Clippy with warnings denied, and the release build passed.
 A release PTY session verified named movement, insertion, undo, dirty quit cancellation, Tab completion and cursor placement, save, search, unknown commands, prompt cancellation, find/open paths containing spaces, buffer switching, help, and restored shell settings.

@@ -217,8 +217,13 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
 ];
 
+fn command_text(input: &str) -> &str {
+    let input = input.trim_start();
+    input.strip_prefix('/').unwrap_or(input).trim_start()
+}
+
 pub fn lookup(name: &str) -> Option<&'static CommandSpec> {
-    let name = name.strip_prefix('/').unwrap_or(name);
+    let name = command_text(name);
     COMMANDS
         .iter()
         .find(|spec| spec.name == name || spec.aliases.contains(&name))
@@ -226,7 +231,7 @@ pub fn lookup(name: &str) -> Option<&'static CommandSpec> {
 
 pub fn parse(input: &str) -> Result<Invocation<'_>, String> {
     let input = input.trim_start();
-    let command_text = input.strip_prefix('/').unwrap_or(input).trim_start();
+    let command_text = command_text(input);
     if command_text.trim().is_empty() {
         return Ok(Invocation {
             command: Command::Help,
@@ -259,20 +264,21 @@ pub fn parse(input: &str) -> Result<Invocation<'_>, String> {
 }
 
 pub fn matches(input: &str) -> impl Iterator<Item = &'static CommandSpec> + '_ {
-    let prefix = input.strip_prefix('/').unwrap_or(input);
+    let prefix = command_text(input);
     COMMANDS.iter().filter(move |spec| {
         spec.name.starts_with(prefix) || spec.aliases.iter().any(|alias| alias.starts_with(prefix))
     })
 }
 
 pub fn complete(input: &str) -> String {
-    if input.chars().any(char::is_whitespace) {
+    let name = command_text(input);
+    if name.chars().any(char::is_whitespace) {
         return input.to_string();
     }
-    if let Some(spec) = lookup(input) {
+    if let Some(spec) = lookup(name) {
         return spec.name.to_string();
     }
-    let mut candidates = matches(input);
+    let mut candidates = matches(name);
     let Some(first) = candidates.next() else {
         return input.to_string();
     };
@@ -400,6 +406,24 @@ mod tests {
         assert_eq!(complete("no-such-command"), "no-such-command");
         assert_eq!(complete("search-forward save"), "search-forward save");
         assert_eq!(complete("日"), "日");
+    }
+
+    #[test]
+    fn leading_whitespace_is_accepted_by_parsing_hints_and_completion() {
+        for input in ["  sav", " /  sav", "\u{2003}save"] {
+            assert_eq!(complete(input), "save-buffer");
+            assert_eq!(
+                super::matches(input)
+                    .map(|spec| spec.name)
+                    .collect::<Vec<_>>(),
+                ["save-buffer"]
+            );
+            assert_eq!(
+                parse(&complete(input)).unwrap().command,
+                Command::SaveBuffer
+            );
+        }
+        assert_eq!(complete("  search-forward save"), "  search-forward save");
     }
 
     #[test]
