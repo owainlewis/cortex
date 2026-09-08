@@ -126,7 +126,8 @@ It includes shared prompts for commands and buffer navigation, a directory picke
 | `C-Space` | Set the mark |
 | `C-w` | Cut the active region |
 | `C-k` | Cut to the end of the line |
-| `C-y` | Yank the last cut text |
+| `C-y` | Yank the newest cut |
+| `M-y` | Replace the last yank with an older cut |
 | `C-/` or `C-_` | Undo the last edit |
 | `C-x u` | Undo the last edit |
 | `Command-z` | Undo the last edit |
@@ -184,6 +185,7 @@ Escape cancels the prompt; unknown names and invalid arguments report an error w
 | `indent`, `outdent` | Apply Tab or Shift-Tab behavior | |
 | `delete-char`, `delete-backward-char` | Delete one grapheme | |
 | `set-mark`, `kill-region`, `kill-line`, `yank` | Select, cut, or insert cut text | |
+| `yank-pop` | Replace the last yank with an older cut | |
 | `self-insert-command <character>` | Insert one printable character | |
 | `execute-extended-command` | Open the command prompt | |
 | `help`, `help <command>` | List commands or describe one | `/help`, `/commands` |
@@ -205,6 +207,20 @@ Typing `/` in the editor still inserts a slash.
 | Escape | Quit the picker |
 | `C-x C-c` | Quit the picker |
 
+## Cuts and history
+
+Cortex keeps the last 32 nonempty cuts in memory.
+`C-y` inserts the newest cut; repeated `M-y` cycles through older cuts and wraps to the newest.
+Movement, edits, save, buffer changes, and undo/redo end yank-pop, so it cannot replace unrelated text.
+`M-x yank-pop` also works after a yank.
+Each kill, yank, and yank-pop is one undo step.
+The ring is local to this process and does not read or write the system clipboard.
+
+Contiguous typing and same-direction deletion undo as a group.
+A pause of at least 750 ms, movement, save, prompt entry, buffer switch, or deliberate edit starts a new group.
+Paste, indentation, kills, and yanks remain separate undo steps.
+History retains up to 16 MiB of inserted and deleted text per buffer, evicting the oldest whole groups and always keeping the newest group even if it exceeds that limit.
+
 ## Syntax Highlighting
 
 Cortex highlights Rust, Markdown, JSON, TOML, Python, JavaScript, JSX, TypeScript, TSX, Ruby, and OCaml files.
@@ -222,17 +238,11 @@ See [docs/release.md](docs/release.md) for the release checklist.
 
 ## Known Limitations
 
-Contiguous typing and same-direction deletion undo as a group.
-A pause of at least 750 ms, movement, save, prompt entry, buffer switch, or deliberate edit starts a new group.
-Paste, indentation, kills, and yanks remain separate undo steps.
-History retains up to 16 MiB of inserted and deleted text per buffer, evicting the oldest whole groups and always keeping the newest group even if it exceeds that limit.
-
 Redo is available through `M-x redo` and has no dedicated keybinding.
 Cortex shows one active buffer at a time.
 The switch-buffer prompt requires an exact path or a unique file name and does not offer completion yet.
 Search is forward-only through `search-forward <text>` or `/search <text>`, with `C-s` or `/next` repeating the last search.
 Incremental and reverse search are not implemented yet.
-Cut and yank retain only the latest cut text, with no kill ring or yank-pop yet.
 The directory picker can expand directories, but it is still a minimal picker.
 The slash command `/open <path>` opens files only, not directories.
 Internal splits, tabs, and an embedded terminal are deferred in favour of external terminal panes.

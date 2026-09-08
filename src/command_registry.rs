@@ -221,7 +221,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         Command::KillLine,
         None,
     ),
-    command("yank", "Insert the last cut text", &[], Command::Yank, None),
+    command("yank", "Insert the newest kill", &[], Command::Yank, None),
+    command(
+        "yank-pop",
+        "Replace the last yank with an older kill",
+        &[],
+        Command::YankPop,
+        None,
+    ),
     CommandSpec {
         name: "self-insert-command",
         description: "Insert one printable character",

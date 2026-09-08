@@ -230,7 +230,10 @@ The buffer evicts oldest whole groups with a deque and keeps history identities 
 Each edit keeps its structural line-change metadata; grouped undo reverses these edits in order.
 Typing and same-direction deletion use explicit timestamps with a 750 ms pause boundary.
 The application, command dispatch, and buffer-switch paths end groups for deliberate actions.
-There is no configured memory budget for these structures.
+Open-buffer count, clean baselines, and history metadata have no separate memory budget.
+The kill ring retains at most 32 complete nonempty cuts; its text has no separate byte limit.
+Application yank state records buffer identity, revision, the exact inserted range, point, and ring index.
+Yank-pop validates that state before replacing text, and other completed commands invalidate it.
 Forward search currently materializes the complete Rope as one `String` for each search.
 
 Disk-change checks only occur immediately before a render and only inspect the active buffer.
@@ -254,7 +257,7 @@ Those properties still require the manual smoke checks described in `CONTRIBUTIN
 
 - `app.rs` remains both the event-loop coordinator and owner of several editor behaviors.
 - The directory picker runs a nested event loop and has its own renderer instance rather than being another state in one application loop.
-- Mark and the single cut slot live in global application state instead of view state and a real editor-level kill ring.
+- Mark and the kill ring live in application state; mark has not moved into View.
 - Command completion uses name prefixes; incremental search and fuzzy buffer or file selection are not implemented.
 - External disk changes are polled only for the active buffer when another event causes a render.
 - Syntax parsing and all filesystem operations run synchronously on the main thread.

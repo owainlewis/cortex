@@ -41,6 +41,7 @@ impl Keymap {
             Key::Ctrl('k') => KeymapResult::Command(Command::KillLine),
             Key::Ctrl('w') => KeymapResult::Command(Command::KillRegion),
             Key::Ctrl('y') => KeymapResult::Command(Command::Yank),
+            Key::Meta('y') => KeymapResult::Command(Command::YankPop),
             Key::Right | Key::Ctrl('f') => KeymapResult::Command(Command::MoveForwardChar),
             Key::Left | Key::Ctrl('b') => KeymapResult::Command(Command::MoveBackwardChar),
             Key::Down | Key::Ctrl('n') => KeymapResult::Command(Command::MoveNextLine),
