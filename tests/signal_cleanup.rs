@@ -29,6 +29,31 @@ static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 static PTY_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn legacy_control_underscore_undoes_a_typed_group() {
+    let fixture = Fixture::new("legacy-undo-group");
+    let path = fixture.path().join("file.txt");
+    fs::write(&path, "").unwrap();
+    let mut session = PtySession::spawn(&path);
+    session.wait_for_output(CURSOR_SHOW);
+    session
+        .master_mut()
+        .write_all(b"alpha\x05beta\x18\x13")
+        .unwrap();
+    session.wait_until(
+        |_| fs::read_to_string(&path).unwrap() == "alphabeta",
+        "two typed groups saved",
+    );
+    session.master_mut().write_all(b"\x1f\x18\x13").unwrap();
+    session.wait_until(
+        |_| fs::read_to_string(&path).unwrap() == "alpha",
+        "legacy C-_ undoes the complete second group",
+    );
+    session.master_mut().write_all(b"\x18\x03").unwrap();
+    assert!(session.wait_for_exit().success());
+    session.assert_raw_mode_restored();
+}
+
+#[test]
 fn empty_paste_cancels_the_directory_picker_prefix() {
     let fixture = Fixture::new("empty-picker-paste");
     let path = fixture.path().join("file.txt");

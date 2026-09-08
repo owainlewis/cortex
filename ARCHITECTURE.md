@@ -135,7 +135,7 @@ There is no formal crate-level enforcement because all modules are in one binary
 1. Opening resolves the path as a missing file, regular file, or symlink to a regular file.
 2. A file read is accepted only when its metadata is stable before and after the read and its visible path still resolves to the same location.
 3. `Editor` computes a normalized identity so aliases of the same path switch to the existing buffer instead of opening a duplicate.
-4. Editing updates the Rope, records an undo edit, advances the revision and history state, clears redo, and updates changed-line ranges.
+4. Editing updates the Rope, records an edit in an undo group, advances the revision and history state, clears redo, and updates changed-line ranges.
 5. A save first verifies that the path, file identity, metadata stamp, and clean text baseline have not changed unexpectedly.
 6. Cortex creates a private sibling temporary file with a random name, writes and syncs the new text, copies existing metadata or derives new-file metadata, and validates the source again.
 7. A missing target commits with `RENAME_EXCL`, while an existing target commits with `RENAME_SWAP`.
@@ -224,7 +224,12 @@ The only runtime background work is the terminal-disconnect monitor thread.
 Tree-sitter work is bounded by visible ranges, read-ahead windows, per-line character limits, and a small checkpoint cache for Rust and Markdown.
 The retained renderer rejects terminal sizes above 1,000,000 cells, which turns an uncontrolled allocation into a recoverable render error followed by terminal cleanup.
 
-Rope text, clean baselines, undo history, redo history, open buffers, and some syntax caches grow with user work.
+Rope text, clean baselines, open buffers, and some syntax caches grow with user work.
+Undo and redo retain at most 16 MiB of inserted and deleted UTF-8 text per buffer, except that the newest group is always retained.
+The buffer evicts oldest whole groups with a deque and keeps history identities independent of retention.
+Each edit keeps its structural line-change metadata; grouped undo reverses these edits in order.
+Typing and same-direction deletion use explicit timestamps with a 750 ms pause boundary.
+The application, command dispatch, and buffer-switch paths end groups for deliberate actions.
 There is no configured memory budget for these structures.
 Forward search currently materializes the complete Rope as one `String` for each search.
 
@@ -253,7 +258,7 @@ Those properties still require the manual smoke checks described in `CONTRIBUTIN
 - Command completion uses name prefixes; incremental search and fuzzy buffer or file selection are not implemented.
 - External disk changes are polled only for the active buffer when another event causes a render.
 - Syntax parsing and all filesystem operations run synchronously on the main thread.
-- Undo and redo history, open-buffer count, and clean Rope baselines have no explicit memory budget.
+- History text has a retention budget; per-edit metadata, open-buffer count, and clean Rope baselines have no separate memory budget.
 - The update response parser extracts one JSON field without a JSON parser, although its failure is isolated to the explicit update-check command.
 
 ## 11. Target architecture for daily editing
@@ -291,7 +296,7 @@ The command registry owns names and discovery metadata while command handlers pe
 The editor retains unique file buffers, an active buffer, and each buffer's view state.
 Closing a dirty buffer requires confirmation and never discards another buffer's text.
 
-Buffer history gains explicit edit boundaries and grouped typing without losing save-baseline or changed-line metadata.
+Buffer history now has explicit edit boundaries and grouped typing without losing save-baseline or changed-line metadata.
 The retained undo/redo text payload has a 16 MiB per-buffer budget with whole-group eviction; the newest group is retained even when it exceeds that budget.
 Paste, indentation, kills, yanks, and replacement remain deliberate edits.
 Clipboard access is isolated behind a small macOS adapter and occurs only on explicit commands.

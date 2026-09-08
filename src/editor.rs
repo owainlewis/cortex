@@ -59,7 +59,7 @@ impl Editor {
     pub fn open(&mut self, path: &Path) -> io::Result<OpenResult> {
         let identity = path_identity(path)?;
         if let Some(index) = self.index_for_identity(&identity) {
-            self.active = index;
+            self.activate(index);
             return Ok(OpenResult::AlreadyOpen);
         }
 
@@ -68,7 +68,7 @@ impl Editor {
             view: View::new(),
             identity,
         });
-        self.active = self.buffers.len() - 1;
+        self.activate(self.buffers.len() - 1);
         Ok(OpenResult::Opened)
     }
 
@@ -83,13 +83,13 @@ impl Editor {
             .collect();
 
         if let Some(index) = unique_match(&path_matches)? {
-            self.active = index;
+            self.activate(index);
             return Ok(());
         }
 
         if let Ok(identity) = path_identity(Path::new(name)) {
             if let Some(index) = self.index_for_identity(&identity) {
-                self.active = index;
+                self.activate(index);
                 return Ok(());
             }
         }
@@ -109,7 +109,7 @@ impl Editor {
             .collect();
 
         let index = unique_match(&file_name_matches)?.ok_or(SwitchError::NotFound)?;
-        self.active = index;
+        self.activate(index);
         Ok(())
     }
 
@@ -123,6 +123,12 @@ impl Editor {
             .map(|entry| entry.buffer.path().display().to_string())
             .collect::<Vec<_>>()
             .join(", ")
+    }
+
+    fn activate(&mut self, index: usize) {
+        self.buffers[self.active].buffer.break_undo_group();
+        self.active = index;
+        self.buffers[self.active].buffer.break_undo_group();
     }
 
     fn index_for_identity(&self, identity: &Path) -> Option<usize> {
@@ -246,6 +252,27 @@ mod tests {
     };
 
     static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn opening_and_switching_breaks_typing_groups_in_both_buffers() {
+        let dir = test_dir("undo-switch");
+        let first = dir.join("first.txt");
+        let second = dir.join("second.txt");
+        let now = std::time::Instant::now();
+        let mut editor = Editor::new(Buffer::open(&first).unwrap()).unwrap();
+        editor.active_mut().0.insert_typed(0, 'a', now);
+        editor.open(&second).unwrap();
+        editor.active_mut().0.insert_typed(0, 'b', now);
+        editor.switch_to("first.txt").unwrap();
+        editor.active_mut().0.insert_typed(1, 'c', now);
+        assert_eq!(editor.active_mut().0.undo(), Some(1));
+        assert_eq!(editor.active().0.text(), "a");
+        editor.open(&second).unwrap();
+        editor.active_mut().0.insert_typed(1, 'd', now);
+        assert_eq!(editor.active_mut().0.undo(), Some(1));
+        assert_eq!(editor.active().0.text(), "b");
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn opening_and_switching_buffers_preserves_unsaved_text_and_view() {

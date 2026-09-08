@@ -222,6 +222,11 @@ See [docs/release.md](docs/release.md) for the release checklist.
 
 ## Known Limitations
 
+Contiguous typing and same-direction deletion undo as a group.
+A pause of at least 750 ms, movement, save, prompt entry, buffer switch, or deliberate edit starts a new group.
+Paste, indentation, kills, and yanks remain separate undo steps.
+History retains up to 16 MiB of inserted and deleted text per buffer, evicting the oldest whole groups and always keeping the newest group even if it exceeds that limit.
+
 Redo is available through `M-x redo` and has no dedicated keybinding.
 Cortex shows one active buffer at a time.
 The switch-buffer prompt requires an exact path or a unique file name and does not offer completion yet.
