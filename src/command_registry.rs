@@ -125,9 +125,23 @@ pub const COMMANDS: &[CommandSpec] = &[
     ),
     command(
         "newline",
-        "Insert a newline at point",
+        "Insert a newline carrying the current indentation",
         &[],
         Command::InsertNewline,
+        None,
+    ),
+    command(
+        "indent",
+        "Insert spaces to a tab stop or indent selected lines",
+        &[],
+        Command::Indent,
+        None,
+    ),
+    command(
+        "outdent",
+        "Remove one indentation level from current or selected lines",
+        &[],
+        Command::Outdent,
         None,
     ),
     command(
@@ -439,6 +453,8 @@ mod tests {
             })
             .chain([
                 Key::Enter,
+                Key::Tab,
+                Key::BackTab,
                 Key::Backspace,
                 Key::Delete,
                 Key::Left,

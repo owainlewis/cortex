@@ -135,11 +135,20 @@ It includes shared prompts for commands and buffer navigation, a directory picke
 | `C-x C-r` | Reload a clean buffer from disk |
 | `C-x C-s` | Save the file |
 | `C-x C-c` | Quit |
+| Tab / Shift-Tab | Indent or outdent the active region; otherwise insert to a tab stop or outdent the current line |
 | `M-x` | Open the named command prompt |
 
 If any open buffer is dirty, `C-x C-c` asks whether to quit without saving.
 Press `y` to confirm.
 Press `n` or Escape to cancel.
+
+Tab inserts spaces to the next four-column stop.
+Enter carries leading spaces and tabs from the current line, limited to indentation before point.
+Newlines retain the current line's LF or CRLF style; an unterminated final line uses the previous line's style, and a new file uses LF.
+With a region active, Tab adds four spaces to each selected line and Shift-Tab removes up to four columns of leading indentation.
+Each region change is one undo step and keeps the region active for another indentation command.
+A selection ending at the start of a line excludes that line.
+Shift-Tab without a region outdents the current line and preserves any remaining tabs.
 
 ## Named commands
 
@@ -164,7 +173,8 @@ Escape cancels the prompt; unknown names and invalid arguments report an error w
 | `forward-char`, `backward-char` | Move one grapheme | |
 | `next-line`, `previous-line` | Move one line | |
 | `beginning-of-line`, `end-of-line` | Move to a line boundary | |
-| `newline` | Insert a newline | |
+| `newline` | Insert a newline carrying leading indentation | |
+| `indent`, `outdent` | Apply Tab or Shift-Tab behavior | |
 | `delete-char`, `delete-backward-char` | Delete one grapheme | |
 | `set-mark`, `kill-region`, `kill-line`, `yank` | Select, cut, or insert cut text | |
 | `self-insert-command <character>` | Insert one printable character | |

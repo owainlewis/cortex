@@ -8,6 +8,7 @@ pub enum Key {
     Command(char),
     Enter,
     Tab,
+    BackTab,
     Escape,
     Backspace,
     Delete,
@@ -43,6 +44,9 @@ pub fn key_from_event(event: KeyEvent) -> Key {
         KeyCode::Char(ch) if printable_char(ch, event.modifiers) => Key::Char(ch),
         KeyCode::Enter => Key::Enter,
         KeyCode::Tab if event.modifiers.is_empty() => Key::Tab,
+        KeyCode::BackTab if event.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+            Key::BackTab
+        }
         KeyCode::Esc => Key::Escape,
         KeyCode::Backspace => Key::Backspace,
         KeyCode::Delete => Key::Delete,
@@ -172,6 +176,23 @@ mod tests {
         );
         assert_eq!(
             key_from_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL)),
+            Key::Unhandled
+        );
+    }
+
+    #[test]
+    fn maps_shift_tab_without_accepting_unrelated_modifiers() {
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            assert_eq!(
+                key_from_event(KeyEvent::new(KeyCode::BackTab, modifiers)),
+                Key::BackTab
+            );
+        }
+        assert_eq!(
+            key_from_event(KeyEvent::new(
+                KeyCode::BackTab,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
             Key::Unhandled
         );
     }

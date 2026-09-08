@@ -111,10 +111,10 @@ Shipped:
 - Multiple buffers.
 - Find file.
 - Switch buffer.
+- Command registry and `M-x` with prefix completion.
 
 Planned:
 - Incremental search.
-- Command registry and `M-x`.
 - Kill ring and yank-pop.
 
 Tracking issues:
@@ -122,7 +122,7 @@ Tracking issues:
 - [closed] [#28 Add minibuffer foundation](https://github.com/owainlewis/cortex/issues/28)
 - [open] [#29 Add incremental search](https://github.com/owainlewis/cortex/issues/29)
 - [closed] [#30 Add multiple buffers, find-file, and switch-buffer](https://github.com/owainlewis/cortex/issues/30)
-- [open] [#46 Add command registry and M-x](https://github.com/owainlewis/cortex/issues/46)
+- [closed] [#46 Add command registry and M-x](https://github.com/owainlewis/cortex/issues/46)
 - [open] [#47 Replace cut slot with a real kill ring](https://github.com/owainlewis/cortex/issues/47)
 
 Release notes should focus on editing safety, search, and buffer navigation.
@@ -137,7 +137,7 @@ Delivery order:
 - [closed] [#161 Align the product direction](https://github.com/owainlewis/cortex/issues/161)
 - [closed] [#162 Correct TypeScript and fenced Markdown colours](https://github.com/owainlewis/cortex/issues/162)
 - [closed] [#175 Fix macOS PTY disconnect monitoring](https://github.com/owainlewis/cortex/issues/175)
-- [open] [#46 Add command registry and M-x](https://github.com/owainlewis/cortex/issues/46)
+- [closed] [#46 Add command registry and M-x](https://github.com/owainlewis/cortex/issues/46)
 - [open] [#164 Add typing and region indentation](https://github.com/owainlewis/cortex/issues/164)
 - [open] [#165 Handle literal terminal paste](https://github.com/owainlewis/cortex/issues/165)
 - [open] [#166 Group typing and deletion undo steps](https://github.com/owainlewis/cortex/issues/166)
