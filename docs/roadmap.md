@@ -138,7 +138,7 @@ Delivery order:
 - [closed] [#162 Correct TypeScript and fenced Markdown colours](https://github.com/owainlewis/cortex/issues/162)
 - [closed] [#175 Fix macOS PTY disconnect monitoring](https://github.com/owainlewis/cortex/issues/175)
 - [closed] [#46 Add command registry and M-x](https://github.com/owainlewis/cortex/issues/46)
-- [open] [#164 Add typing and region indentation](https://github.com/owainlewis/cortex/issues/164)
+- [closed] [#164 Add typing and region indentation](https://github.com/owainlewis/cortex/issues/164)
 - [open] [#165 Handle literal terminal paste](https://github.com/owainlewis/cortex/issues/165)
 - [open] [#166 Group typing and deletion undo steps](https://github.com/owainlewis/cortex/issues/166)
 - [open] [#47 Add kill ring and yank-pop](https://github.com/owainlewis/cortex/issues/47)

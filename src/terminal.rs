@@ -1,5 +1,7 @@
 use crossterm::{
-    cursor, execute,
+    cursor,
+    event::{DisableBracketedPaste, EnableBracketedPaste},
+    execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{
@@ -41,10 +43,12 @@ struct TerminalState {
     raw_enabled: bool,
     alternate_screen: bool,
     cursor_hidden: bool,
+    bracketed_paste: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CleanupStep {
+    DisableBracketedPaste,
     ShowCursor,
     LeaveAlternateScreen,
     DisableRawMode,
@@ -53,6 +57,10 @@ enum CleanupStep {
 impl TerminalState {
     fn cleanup_steps(self) -> Vec<CleanupStep> {
         let mut steps = Vec::new();
+
+        if self.bracketed_paste {
+            steps.push(CleanupStep::DisableBracketedPaste);
+        }
 
         if self.cursor_hidden {
             steps.push(CleanupStep::ShowCursor);
@@ -98,7 +106,19 @@ impl<W: Write> TerminalSession<W> {
             return Err(setup_error("could not hide terminal cursor", error));
         }
         session.state.cursor_hidden = true;
+        if let Err(error) = session.enable_bracketed_paste() {
+            session.cleanup();
+            return Err(error);
+        }
         Ok(session)
+    }
+
+    fn enable_bracketed_paste(&mut self) -> io::Result<()> {
+        // A successful write followed by a failed flush may have enabled the
+        // terminal mode. Record the cleanup obligation before either can fail.
+        self.state.bracketed_paste = true;
+        execute!(self.writer, EnableBracketedPaste)
+            .map_err(|error| setup_error("could not enable bracketed paste", error))
     }
 
     pub fn writer_mut(&mut self) -> &mut W {
@@ -108,6 +128,10 @@ impl<W: Write> TerminalSession<W> {
     fn cleanup(&mut self) {
         for step in self.state.cleanup_steps() {
             match step {
+                CleanupStep::DisableBracketedPaste => {
+                    let _ = execute!(self.writer, DisableBracketedPaste);
+                    self.state.bracketed_paste = false;
+                }
                 CleanupStep::ShowCursor => {
                     let _ = execute!(self.writer, cursor::Show);
                     self.state.cursor_hidden = false;
@@ -369,16 +393,61 @@ mod tests {
     }
 
     #[test]
+    fn failed_paste_enable_flush_still_disables_the_mode() {
+        use std::{
+            io::{self, Write},
+            sync::{atomic::AtomicBool, Arc},
+        };
+        struct FailFirstFlush {
+            output: Vec<u8>,
+            fail: bool,
+        }
+        impl Write for FailFirstFlush {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.output.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                if std::mem::take(&mut self.fail) {
+                    Err(io::Error::other("flush failed"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let mut session = super::TerminalSession {
+            writer: FailFirstFlush {
+                output: Vec::new(),
+                fail: true,
+            },
+            state: TerminalState::default(),
+            _disconnect_guard: super::TerminalDisconnectGuard {
+                stop: Arc::new(AtomicBool::new(false)),
+                monitor: None,
+            },
+        };
+        assert!(session.enable_bracketed_paste().is_err());
+        assert!(session.state.bracketed_paste);
+        session.cleanup();
+        assert_eq!(session.writer.output, b"\x1b[?2004h\x1b[?2004l");
+        assert!(!session.state.bracketed_paste);
+        session.cleanup();
+        assert_eq!(session.writer.output, b"\x1b[?2004h\x1b[?2004l");
+    }
+
+    #[test]
     fn cleanup_steps_restore_terminal_in_reverse_setup_order() {
         let state = TerminalState {
             raw_enabled: true,
             alternate_screen: true,
             cursor_hidden: true,
+            bracketed_paste: true,
         };
 
         assert_eq!(
             state.cleanup_steps(),
             vec![
+                CleanupStep::DisableBracketedPaste,
                 CleanupStep::ShowCursor,
                 CleanupStep::LeaveAlternateScreen,
                 CleanupStep::DisableRawMode
@@ -392,6 +461,7 @@ mod tests {
             raw_enabled: true,
             alternate_screen: true,
             cursor_hidden: false,
+            bracketed_paste: false,
         };
 
         assert_eq!(

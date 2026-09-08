@@ -2824,6 +2824,21 @@ mod tests {
     }
 
     #[test]
+    fn pasted_terminal_controls_are_sanitized_in_the_frame() {
+        let buffer = buffer_with_text("paste.txt", "x\x1b]0;cortex-paste-test\x07\x18\x03y");
+        let frame = build_frame(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 80, rows: 3 },
+            None,
+            None,
+            None,
+        );
+        assert!(frame.lines[0].text.contains("]0;cortex-paste-test"));
+        assert!(!frame.lines[0].text.chars().any(char::is_control));
+    }
+
+    #[test]
     fn frame_modeline_shows_active_command_line_and_moves_cursor_to_it() {
         let buffer = buffer_with_text("notes.txt", "alpha\n");
 

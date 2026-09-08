@@ -166,7 +166,8 @@ There is no formal crate-level enforcement because all modules are in one binary
 ### 6.1 Runtime interfaces
 
 The user-facing process interface is `cortex [path]`, `cortex --version`, and `cortex --check-update`.
-The editor accepts Crossterm key and resize events and emits terminal control operations and styled text.
+The editor accepts Crossterm key, paste, and resize events and emits terminal control operations and styled text.
+Paste events insert one literal text edit or append sanitized single-line text to the active prompt.
 Named commands and slash aliases are parsed through the static table in `command_registry.rs`.
 The same table supplies minibuffer prefix hints, Tab completion, and command help.
 

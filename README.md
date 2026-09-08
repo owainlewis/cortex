@@ -150,6 +150,13 @@ Each region change is one undo step and keeps the region active for another inde
 A selection ending at the start of a line excludes that line.
 Shift-Tab without a region outdents the current line and preserves any remaining tabs.
 
+Terminal paste uses bracketed paste mode.
+Pasted text, including tabs and line endings, is inserted literally as one undo step and clears the active selection.
+Paste does not run keybindings or add automatic indentation.
+In command, file, and buffer prompts, line breaks and tabs become spaces; CRLF becomes one space and other control characters are removed.
+Pasting does not submit a prompt or confirm a dirty quit.
+Pasted text is ignored in the directory picker.
+
 ## Named commands
 
 Press `M-x`, type a command name, and press Enter.
