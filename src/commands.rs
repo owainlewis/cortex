@@ -33,6 +33,7 @@ pub enum Command {
     SwitchBuffer,
     Undo,
     Yank,
+    YankPop,
     Quit,
 }
 
@@ -139,7 +140,8 @@ pub(crate) fn dispatch_at(
         | Command::OpenFile
         | Command::SetMark
         | Command::SwitchBuffer
-        | Command::Yank => CommandOutcome::default(),
+        | Command::Yank
+        | Command::YankPop => CommandOutcome::default(),
         Command::Undo => {
             if let Some(point) = buffer.undo() {
                 view.set_point(point, buffer);

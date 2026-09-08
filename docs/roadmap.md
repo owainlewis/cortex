@@ -140,7 +140,7 @@ Delivery order:
 - [closed] [#46 Add command registry and M-x](https://github.com/owainlewis/cortex/issues/46)
 - [closed] [#164 Add typing and region indentation](https://github.com/owainlewis/cortex/issues/164)
 - [closed] [#165 Handle literal terminal paste](https://github.com/owainlewis/cortex/issues/165)
-- [open] [#166 Group typing and deletion undo steps](https://github.com/owainlewis/cortex/issues/166)
+- [closed] [#166 Group typing and deletion undo steps](https://github.com/owainlewis/cortex/issues/166)
 - [open] [#47 Add kill ring and yank-pop](https://github.com/owainlewis/cortex/issues/47)
 - [open] [#167 Add explicit macOS clipboard commands](https://github.com/owainlewis/cortex/issues/167)
 - [open] [#168 Add word, page, and line navigation](https://github.com/owainlewis/cortex/issues/168)

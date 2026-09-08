@@ -7,6 +7,7 @@ mod editor;
 pub mod highlighter;
 mod input;
 mod keymap;
+mod kill_ring;
 #[cfg(test)]
 mod performance;
 mod picker;

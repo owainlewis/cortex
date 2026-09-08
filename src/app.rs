@@ -4,6 +4,7 @@ use crate::{
     editor::{Editor, OpenResult, SwitchError},
     input::key_from_event,
     keymap::{Keymap, KeymapResult},
+    kill_ring::KillRing,
     picker::{DirectoryPicker, DirectoryPickerAction},
     renderer::{Renderer, StatusKind, TerminalSize},
     signals::TerminationSignals,
@@ -36,8 +37,18 @@ struct AppState {
     keycast: Option<String>,
     last_search: Option<String>,
     mark: Option<usize>,
-    kill_ring: Option<String>,
+    kill_ring: KillRing,
+    last_yank: Option<YankState>,
     last_disk_check: Option<Instant>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct YankState {
+    buffer_id: u64,
+    revision: u64,
+    range: Range<usize>,
+    point_after: usize,
+    ring_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,10 +265,12 @@ fn open_file_in_editor(editor: &mut Editor, path: &Path, app_state: &mut AppStat
         Ok(false) => match editor.open(path) {
             Ok(OpenResult::Opened) => {
                 app_state.mark = None;
+                app_state.last_yank = None;
                 app_state.set_status(format!("Opened {}", path.display()), StatusKind::Success);
             }
             Ok(OpenResult::AlreadyOpen) => {
                 app_state.mark = None;
+                app_state.last_yank = None;
                 app_state.set_status(
                     format!("Switched to {}", path.display()),
                     StatusKind::Success,
@@ -273,6 +286,7 @@ fn switch_buffer(editor: &mut Editor, name: &str, app_state: &mut AppState) {
     match editor.switch_to(name) {
         Ok(()) => {
             app_state.mark = None;
+            app_state.last_yank = None;
             let path = editor.active().0.path().display().to_string();
             app_state.set_status(format!("Switched to {path}"), StatusKind::Success);
         }
@@ -372,11 +386,13 @@ impl AppState {
         match keymap.resolve(key) {
             KeymapResult::Command(command) => self.execute_command(command, "", buffer, view),
             KeymapResult::PendingPrefix => {
+                self.last_yank = None;
                 buffer.break_undo_group();
                 self.set_status("C-x", StatusKind::Prefix);
                 AppAction::Continue
             }
             KeymapResult::Unbound => {
+                self.last_yank = None;
                 buffer.break_undo_group();
                 self.clear_status();
                 AppAction::Continue
@@ -391,6 +407,7 @@ impl AppState {
         buffer: &mut Buffer,
         view: &mut View,
     ) {
+        self.last_yank = None;
         buffer.break_undo_group();
         *keymap = Keymap::new();
         self.keycast = Some("Paste".to_string());
@@ -461,7 +478,7 @@ impl AppState {
         let text = buffer.text_range(region.clone());
         let point_after = buffer.delete_with_points(region.clone(), view.point(), region.start);
         view.set_point(point_after, buffer);
-        self.kill_ring = Some(text);
+        self.kill_ring.push(text);
         self.mark = None;
         self.set_status("Cut region", StatusKind::Success);
         AppAction::Continue
@@ -477,23 +494,66 @@ impl AppState {
         let text = buffer.text_range(region.clone());
         let point_after = buffer.delete_with_points(region, point, point);
         view.set_point(point_after, buffer);
-        self.kill_ring = Some(text);
+        self.kill_ring.push(text);
         self.mark = None;
         self.set_status("Cut line", StatusKind::Success);
         AppAction::Continue
     }
 
     fn yank(&mut self, buffer: &mut Buffer, view: &mut View) -> AppAction {
-        let Some(text) = self.kill_ring.clone().filter(|text| !text.is_empty()) else {
+        let Some(text) = self.kill_ring.get(0) else {
             self.set_status("No cut text", StatusKind::Error);
             return AppAction::Continue;
         };
 
         let point = view.point();
-        let point_after = buffer.insert(point, &text);
+        let inserted_chars = text.chars().count();
+        let point_after = buffer.insert(point, text);
         view.set_point(point_after, buffer);
+        self.last_yank = Some(YankState {
+            buffer_id: buffer.id(),
+            revision: buffer.revision(),
+            range: point..point + inserted_chars,
+            point_after,
+            ring_index: 0,
+        });
         self.mark = None;
         self.set_status("Yanked", StatusKind::Success);
+        AppAction::Continue
+    }
+
+    fn yank_pop(&mut self, buffer: &mut Buffer, view: &mut View) -> AppAction {
+        let Some(mut yank) = self.last_yank.take().filter(|yank| {
+            yank.buffer_id == buffer.id()
+                && yank.revision == buffer.revision()
+                && yank.point_after == view.point()
+        }) else {
+            self.set_status("Yank-pop requires a preceding yank", StatusKind::Error);
+            return AppAction::Continue;
+        };
+        if self.kill_ring.len() < 2 {
+            self.last_yank = Some(yank);
+            self.set_status("No older cut text", StatusKind::Info);
+            return AppAction::Continue;
+        }
+
+        let ring_index = (yank.ring_index + 1) % self.kill_ring.len();
+        let text = self.kill_ring.get(ring_index).unwrap();
+        let end = yank.range.start + text.chars().count();
+        // A yank can join neighboring graphemes. Replace only its literal
+        // character range, just as undo does, preserving both neighbors.
+        let point_after = buffer.replace_with_points(yank.range.clone(), text, view.point(), end);
+        view.set_point(point_after, buffer);
+        yank.range.end = end;
+        yank.point_after = point_after;
+        yank.revision = buffer.revision();
+        yank.ring_index = ring_index;
+        self.last_yank = Some(yank);
+        self.mark = None;
+        self.set_status(
+            format!("Yanked {}/{}", ring_index + 1, self.kill_ring.len()),
+            StatusKind::Success,
+        );
         AppAction::Continue
     }
 
@@ -531,6 +591,7 @@ impl AppState {
                 }
             }
             crate::input::Key::Escape => {
+                self.last_yank = None;
                 self.command_line = None;
                 let message = match self.prompt_kind.take().unwrap_or(PromptKind::Command) {
                     PromptKind::Command => "Command canceled",
@@ -577,6 +638,7 @@ impl AppState {
                 self.execute_command(invocation.command, invocation.argument, buffer, view)
             }
             Err(error) => {
+                self.last_yank = None;
                 self.set_status(error, StatusKind::Error);
                 AppAction::Continue
             }
@@ -591,6 +653,9 @@ impl AppState {
         view: &mut View,
     ) -> AppAction {
         use commands::Command;
+        if !matches!(command, Command::YankPop | Command::OpenCommandLine) {
+            self.last_yank = None;
+        }
         if !command.continues_undo_group() {
             buffer.break_undo_group();
         }
@@ -616,6 +681,7 @@ impl AppState {
             Command::KillRegion => self.kill_region(buffer, view),
             Command::KillLine => self.kill_line(buffer, view),
             Command::Yank => self.yank(buffer, view),
+            Command::YankPop => self.yank_pop(buffer, view),
             Command::RepeatSearch => self.repeat_search(buffer, view),
             Command::OpenFile => self.start_find_file(),
             Command::SwitchBuffer => self.start_switch_buffer(),
@@ -907,6 +973,201 @@ mod tests {
     static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
+    fn multiple_kills_yank_and_cycle_newest_first_with_independent_undo_steps() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("ring.txt", "alpha\nbeta\ngamma");
+        let mut view = View::new();
+        for key in [Key::Ctrl('k'), Key::Ctrl('d'), Key::Ctrl('k')] {
+            app.handle_key(key, &mut keymap, &mut buffer, &mut view);
+        }
+        assert_eq!(app.kill_ring.get(0), Some("beta"));
+        assert_eq!(app.kill_ring.get(1), Some("alpha"));
+        assert_eq!(buffer.text(), "\ngamma");
+        app.mark = Some(1);
+        app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "beta\ngamma");
+        assert!(app.mark.is_none());
+        for expected in ["alpha\ngamma", "beta\ngamma", "alpha\ngamma"] {
+            app.handle_key(Key::Meta('y'), &mut keymap, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), expected);
+        }
+        for expected in [
+            "beta\ngamma",
+            "alpha\ngamma",
+            "beta\ngamma",
+            "\ngamma",
+            "beta\ngamma",
+            "\nbeta\ngamma",
+            "alpha\nbeta\ngamma",
+        ] {
+            app.execute_command(commands::Command::Undo, "", &mut buffer, &mut view);
+            assert_eq!(buffer.text(), expected);
+        }
+        assert!(!buffer.is_dirty());
+        for expected in [
+            "\nbeta\ngamma",
+            "beta\ngamma",
+            "\ngamma",
+            "beta\ngamma",
+            "alpha\ngamma",
+            "beta\ngamma",
+            "alpha\ngamma",
+        ] {
+            app.execute_command(commands::Command::Redo, "", &mut buffer, &mut view);
+            assert_eq!(buffer.text(), expected);
+        }
+    }
+
+    #[test]
+    fn yank_pop_preserves_neighbors_when_yanked_text_joins_graphemes() {
+        for (source, point, latest, older, yanked, popped) in [
+            ("ex", 1, "\u{301}", "界", "e\u{301}x", "e界x"),
+            ("\u{301}x", 0, "e", "q", "e\u{301}x", "q\u{301}x"),
+            ("🇦", 1, "🇧", "x", "🇦🇧", "🇦x"),
+            ("👨👩", 1, "\u{200d}", " ", "👨‍👩", "👨 👩"),
+        ] {
+            let mut app = AppState::default();
+            app.kill_ring.push(older.to_string());
+            app.kill_ring.push(latest.to_string());
+            let mut keymap = Keymap::new();
+            let mut buffer = buffer_with_text("unicode-yank.txt", source);
+            let mut view = View::new();
+            view.set_point(point, &buffer);
+            app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), yanked);
+            let before_pop = view.point();
+            app.handle_key(Key::Meta('y'), &mut keymap, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), popped);
+            assert_eq!(
+                view.point(),
+                buffer.grapheme_boundary_at_or_before(view.point())
+            );
+            app.execute_command(commands::Command::Undo, "", &mut buffer, &mut view);
+            assert_eq!(buffer.text(), yanked);
+            assert_eq!(view.point(), before_pop);
+            app.execute_command(commands::Command::Undo, "", &mut buffer, &mut view);
+            assert_eq!(buffer.text(), source);
+            assert_eq!(view.point(), point);
+            assert!(!buffer.is_dirty());
+        }
+    }
+
+    #[test]
+    fn yank_pop_rejects_intervening_commands_paste_and_stale_revisions() {
+        for intervening in [
+            Some(Key::Ctrl('a')),
+            Some(Key::Char('z')),
+            Some(Key::Ctrl('_')),
+            Some(Key::Ctrl(' ')),
+            Some(Key::Ctrl('x')),
+            Some(Key::Escape),
+            None,
+        ] {
+            let mut app = AppState::default();
+            app.kill_ring.push("old".to_string());
+            app.kill_ring.push("new".to_string());
+            let mut keymap = Keymap::new();
+            let mut buffer = buffer_with_text("invalid-yank.txt", "");
+            let mut view = View::new();
+            app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
+            if let Some(key) = intervening {
+                app.handle_key(key, &mut keymap, &mut buffer, &mut view);
+            } else {
+                app.handle_paste("", &mut keymap, &mut buffer, &mut view);
+            }
+            let before = buffer.text();
+            let revision = buffer.revision();
+            app.execute_command(commands::Command::YankPop, "", &mut buffer, &mut view);
+            assert_eq!(buffer.text(), before);
+            assert_eq!(buffer.revision(), revision);
+            assert_eq!(app.status_kind, Some(StatusKind::Error));
+        }
+        let mut app = AppState::default();
+        app.kill_ring.push("old".to_string());
+        app.kill_ring.push("new".to_string());
+        let mut buffer = buffer_with_text("stale-yank.txt", "");
+        let mut view = View::new();
+        app.yank(&mut buffer, &mut view);
+        buffer.insert(buffer.len_chars(), "x");
+        app.yank_pop(&mut buffer, &mut view);
+        assert_eq!(buffer.text(), "newx");
+        assert!(app.last_yank.is_none());
+    }
+
+    #[test]
+    fn yank_pop_rejects_a_different_buffer_and_a_round_trip_switch() {
+        let dir = test_dir("yank-switch");
+        let first = dir.join("first.txt");
+        let second = dir.join("second.txt");
+        fs::write(&first, "").unwrap();
+        fs::write(&second, "keep").unwrap();
+        let mut editor = Editor::new(Buffer::open(&first).unwrap()).unwrap();
+        let mut app = AppState::default();
+        app.kill_ring.push("old".to_string());
+        app.kill_ring.push("new".to_string());
+        let (buffer, view) = editor.active_mut();
+        app.yank(buffer, view);
+        editor.open(&second).unwrap();
+        let (buffer, view) = editor.active_mut();
+        app.yank_pop(buffer, view);
+        assert_eq!(buffer.text(), "keep");
+        super::switch_buffer(&mut editor, "first.txt", &mut app);
+        let (buffer, view) = editor.active_mut();
+        app.yank(buffer, view);
+        super::switch_buffer(&mut editor, "second.txt", &mut app);
+        super::switch_buffer(&mut editor, "first.txt", &mut app);
+        let (buffer, view) = editor.active_mut();
+        let before = buffer.text();
+        app.yank_pop(buffer, view);
+        assert_eq!(buffer.text(), before);
+        assert_eq!(app.status_kind, Some(StatusKind::Error));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn named_yank_pop_cycles_and_history_preserves_the_saved_baseline() {
+        let dir = test_dir("named-yank-history");
+        let mut buffer = Buffer::open(dir.join("notes.txt")).unwrap();
+        let mut app = AppState::default();
+        app.kill_ring.push("old".to_string());
+        app.kill_ring.push("new".to_string());
+        let mut keymap = Keymap::new();
+        let mut view = View::new();
+        run_slash_command("yank", &mut app, &mut keymap, &mut buffer, &mut view);
+        run_slash_command("yank-pop", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "old");
+        run_slash_command("save-buffer", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert!(!buffer.is_dirty());
+        run_slash_command("undo", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "new");
+        assert!(buffer.line_changed(0));
+        run_slash_command("redo", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "old");
+        assert!(!buffer.is_dirty());
+        assert!(!buffer.line_changed(0));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn empty_ring_and_single_entry_yank_pop_do_not_add_history() {
+        let mut app = AppState::default();
+        let mut buffer = buffer_with_text("empty-ring.txt", "");
+        let mut view = View::new();
+        app.yank(&mut buffer, &mut view);
+        app.yank_pop(&mut buffer, &mut view);
+        assert_eq!(buffer.undo(), None);
+        app.kill_ring.push("only".to_string());
+        app.yank(&mut buffer, &mut view);
+        app.yank_pop(&mut buffer, &mut view);
+        assert_eq!(buffer.text(), "only");
+        assert_eq!(app.status_message.as_deref(), Some("No older cut text"));
+        buffer.undo();
+        assert_eq!(buffer.text(), "");
+        assert_eq!(buffer.undo(), None);
+    }
+
+    #[test]
     fn empty_paste_cancels_the_editor_prefix_without_a_history_edit() {
         let mut app = AppState::default();
         let mut keymap = Keymap::new();
@@ -951,10 +1212,8 @@ mod tests {
     #[test]
     fn paste_and_yank_have_their_own_undo_groups_between_typed_words() {
         for yank in [false, true] {
-            let mut app = AppState {
-                kill_ring: Some("P".to_string()),
-                ..AppState::default()
-            };
+            let mut app = AppState::default();
+            app.kill_ring.push("P".to_string());
             let mut keymap = Keymap::new();
             let mut buffer = buffer_with_text("undo-paste.txt", "");
             let mut view = View::new();
@@ -1311,7 +1570,7 @@ mod tests {
         assert_eq!(action, AppAction::Continue);
         assert_eq!(buffer.text(), "ad");
         assert_eq!(view.point(), 1);
-        assert_eq!(app.kill_ring.as_deref(), Some("bc"));
+        assert_eq!(app.kill_ring.get(0), Some("bc"));
         assert_eq!(app.mark, None);
         assert_eq!(app.status_message.as_deref(), Some("Cut region"));
     }
@@ -1331,7 +1590,7 @@ mod tests {
 
         app.handle_key(Key::Ctrl('w'), &mut keymap, &mut buffer, &mut view);
         assert_eq!(buffer.text(), "ab");
-        assert_eq!(app.kill_ring.as_deref(), Some("👨‍💻🇺🇸"));
+        assert_eq!(app.kill_ring.get(0), Some("👨‍💻🇺🇸"));
         assert_eq!(view.point(), 1);
 
         app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
@@ -1401,7 +1660,7 @@ mod tests {
         assert_eq!(action, AppAction::Continue);
         assert_eq!(buffer.text(), "");
         assert_eq!(view.point(), 0);
-        assert_eq!(app.kill_ring.as_deref(), Some("abc"));
+        assert_eq!(app.kill_ring.get(0), Some("abc"));
         assert_eq!(app.mark, None);
     }
 
@@ -1419,7 +1678,7 @@ mod tests {
         assert_eq!(action, AppAction::Continue);
         assert_eq!(buffer.text(), "al\nbeta");
         assert_eq!(view.point(), 2);
-        assert_eq!(app.kill_ring.as_deref(), Some("pha"));
+        assert_eq!(app.kill_ring.get(0), Some("pha"));
 
         let action = app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
 
@@ -1442,7 +1701,7 @@ mod tests {
         assert_eq!(action, AppAction::Continue);
         assert_eq!(buffer.text(), "alphabeta");
         assert_eq!(view.point(), 5);
-        assert_eq!(app.kill_ring.as_deref(), Some("\n"));
+        assert_eq!(app.kill_ring.get(0), Some("\n"));
     }
 
     #[test]
