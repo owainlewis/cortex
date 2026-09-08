@@ -6,6 +6,7 @@ pub struct View {
     scroll_line: usize,
     scroll_column: usize,
     preferred_column: Option<usize>,
+    viewport_height: usize,
 }
 
 impl View {
@@ -60,12 +61,50 @@ impl View {
         self.clear_preferred_column();
     }
 
+    pub fn move_word(&mut self, buffer: &Buffer, forward: bool) {
+        self.set_point(buffer.word_boundary(self.point, forward), buffer);
+    }
+
+    pub fn move_to_buffer_start(&mut self, buffer: &Buffer) {
+        self.set_point(0, buffer);
+    }
+
+    pub fn move_to_buffer_end(&mut self, buffer: &Buffer) {
+        self.set_point(buffer.len_chars(), buffer);
+    }
+
+    pub fn move_page(&mut self, buffer: &Buffer, forward: bool) {
+        let step = self
+            .viewport_height
+            .saturating_sub(2)
+            .max(1)
+            .min(isize::MAX as usize);
+        self.move_vertical(
+            buffer,
+            if forward {
+                step as isize
+            } else {
+                -(step as isize)
+            },
+        );
+        self.scroll_line = if forward {
+            self.scroll_line.saturating_add(step).min(
+                buffer
+                    .len_lines()
+                    .saturating_sub(self.viewport_height.max(1)),
+            )
+        } else {
+            self.scroll_line.saturating_sub(step)
+        };
+    }
+
     pub fn ensure_point_visible(
         &mut self,
         buffer: &Buffer,
         viewport_height: usize,
         viewport_width: usize,
     ) {
+        self.viewport_height = viewport_height;
         let point_line = buffer.line_for_char(self.point);
         if viewport_height > 0 {
             if point_line < self.scroll_line {
@@ -126,6 +165,105 @@ mod tests {
     };
 
     static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn word_movement_keeps_unicode_words_and_graphemes_whole() {
+        let buffer = buffer_with_text("  α_2...e\u{301}lan 👨‍💻 東京");
+        let mut view = View::new();
+        for point in [5, 13, 20, 20] {
+            view.move_word(&buffer, true);
+            assert_eq!(view.point(), point);
+        }
+        for point in [18, 8, 2, 0, 0] {
+            view.move_word(&buffer, false);
+            assert_eq!(view.point(), point);
+        }
+        view.set_point(10, &buffer);
+        view.move_word(&buffer, false);
+        assert_eq!(view.point(), 8);
+        view.move_word(&buffer, true);
+        assert_eq!(view.point(), 13);
+    }
+
+    #[test]
+    fn word_and_buffer_movement_handle_empty_files_and_long_lines() {
+        let empty = buffer_with_text("");
+        let mut view = View::new();
+        view.move_word(&empty, true);
+        view.move_word(&empty, false);
+        view.move_to_buffer_end(&empty);
+        view.move_to_buffer_start(&empty);
+        assert_eq!(view.point(), 0);
+        let source = format!("{}α_beta", " ".repeat(100_000));
+        let buffer = buffer_with_text(&source);
+        view.move_word(&buffer, true);
+        assert_eq!(view.point(), 100_006);
+        view.move_word(&buffer, false);
+        assert_eq!(view.point(), 100_000);
+        view.move_to_buffer_start(&buffer);
+        assert_eq!(view.point(), 0);
+        view.move_to_buffer_end(&buffer);
+        assert_eq!(view.point(), buffer.len_chars());
+    }
+
+    #[test]
+    fn pages_use_viewport_overlap_and_restore_the_preferred_column() {
+        let source: String = (0..40)
+            .map(|line| {
+                if line == 11 {
+                    "a\n".to_string()
+                } else {
+                    format!("{}\n", "x".repeat(30))
+                }
+            })
+            .collect();
+        let buffer = buffer_with_text(&source);
+        let mut view = View::new();
+        view.set_point(buffer.line_start_char(3) + 20, &buffer);
+        view.ensure_point_visible(&buffer, 10, 8);
+        view.move_page(&buffer, true);
+        assert_eq!(buffer.line_for_char(view.point()), 11);
+        assert_eq!(buffer.display_column(view.point()), 1);
+        assert_eq!(view.scroll_line(), 8);
+        view.move_page(&buffer, false);
+        assert_eq!(buffer.line_for_char(view.point()), 3);
+        assert_eq!(buffer.display_column(view.point()), 20);
+        assert_eq!(view.scroll_line(), 0);
+        view.ensure_point_visible(&buffer, 6, 8);
+        view.move_page(&buffer, true);
+        assert_eq!(buffer.line_for_char(view.point()), 7);
+        assert_eq!(view.scroll_line(), 4);
+        for _ in 0..50 {
+            view.move_page(&buffer, true);
+        }
+        assert_eq!(view.point(), buffer.len_chars());
+        assert!(buffer.line_for_char(view.point()) < view.scroll_line() + 6);
+        for _ in 0..50 {
+            view.move_page(&buffer, false);
+        }
+        assert_eq!(buffer.line_for_char(view.point()), 0);
+        assert_eq!(view.scroll_line(), 0);
+    }
+
+    #[test]
+    fn pages_move_at_least_one_line_in_tiny_viewports_and_clamp_empty_buffers() {
+        let buffer = buffer_with_text("a\nb\nc");
+        for height in [0, 1, 2, 3] {
+            let mut view = View::new();
+            view.ensure_point_visible(&buffer, height, 1);
+            view.move_page(&buffer, true);
+            assert_eq!(buffer.line_for_char(view.point()), 1);
+            view.move_page(&buffer, false);
+            assert_eq!(buffer.line_for_char(view.point()), 0);
+        }
+        let buffer = buffer_with_text("");
+        let mut view = View::new();
+        view.ensure_point_visible(&buffer, usize::MAX, 1);
+        view.move_page(&buffer, true);
+        view.move_page(&buffer, false);
+        assert_eq!(view.point(), 0);
+        assert_eq!(view.scroll_line(), 0);
+    }
 
     #[test]
     fn forward_char_moves_one_character_and_clamps_at_eof() {

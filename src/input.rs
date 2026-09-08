@@ -11,6 +11,9 @@ pub enum Key {
     BackTab,
     Escape,
     Backspace,
+    MetaBackspace,
+    PageDown,
+    PageUp,
     Delete,
     Left,
     Right,
@@ -33,6 +36,15 @@ pub fn key_from_event(event: KeyEvent) -> Key {
         {
             Key::Meta(ch.to_ascii_lowercase())
         }
+        KeyCode::Backspace
+            if event.modifiers.intersects(meta_modifiers)
+                && event
+                    .modifiers
+                    .difference(allowed_meta_modifiers)
+                    .is_empty() =>
+        {
+            Key::MetaBackspace
+        }
         _ if event.modifiers.intersects(meta_modifiers) => Key::Unhandled,
         KeyCode::Null => Key::Ctrl(' '),
         KeyCode::Char(ch) if event.modifiers.contains(KeyModifiers::SUPER) => {
@@ -54,6 +66,8 @@ pub fn key_from_event(event: KeyEvent) -> Key {
         KeyCode::Right => Key::Right,
         KeyCode::Up => Key::Up,
         KeyCode::Down => Key::Down,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::PageUp => Key::PageUp,
         _ => Key::Unhandled,
     }
 }
@@ -84,6 +98,41 @@ fn printable_char(ch: char, modifiers: KeyModifiers) -> bool {
 mod tests {
     use super::{key_from_event, Key};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn maps_page_keys_and_shifted_meta_buffer_boundaries() {
+        for (event, key) in [
+            (
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                Key::PageDown,
+            ),
+            (
+                KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+                Key::PageUp,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('<'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+                Key::Meta('<'),
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('>'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+                Key::Meta('>'),
+            ),
+            (
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::META),
+                Key::MetaBackspace,
+            ),
+            (
+                KeyEvent::new(
+                    KeyCode::Backspace,
+                    KeyModifiers::ALT | KeyModifiers::CONTROL,
+                ),
+                Key::Unhandled,
+            ),
+        ] {
+            assert_eq!(key_from_event(event), key);
+        }
+    }
 
     #[test]
     fn prompt_paste_flattens_line_breaks_and_tabs_without_command_controls() {
@@ -163,10 +212,10 @@ mod tests {
     }
 
     #[test]
-    fn maps_meta_modified_non_characters_to_unhandled() {
+    fn maps_meta_backspace_and_rejects_other_meta_non_characters() {
         assert_eq!(
             key_from_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)),
-            Key::Unhandled
+            Key::MetaBackspace
         );
         assert_eq!(
             key_from_event(KeyEvent::new(KeyCode::Left, KeyModifiers::META)),

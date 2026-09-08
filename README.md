@@ -122,6 +122,10 @@ It includes shared prompts for commands and buffer navigation, a directory picke
 | Down or `C-n` | Move to next line |
 | `C-a` | Move to start of line |
 | `C-e` | Move to end of line |
+| `M-f`, `M-b` | Move forward or backward by word |
+| `M-<`, `M->` | Move to buffer start or end |
+| `C-v` / PageDown, `M-v` / PageUp | Move forward or backward by one page with overlap |
+| `M-d`, `M-Backspace` | Cut forward or backward by word |
 | `C-s` | Repeat the previous search |
 | `C-Space` | Set the mark |
 | `C-w` | Cut the active region |
@@ -183,6 +187,11 @@ Escape cancels the prompt; unknown names and invalid arguments report an error w
 | `forward-char`, `backward-char` | Move one grapheme | |
 | `next-line`, `previous-line` | Move one line | |
 | `beginning-of-line`, `end-of-line` | Move to a line boundary | |
+| `forward-word`, `backward-word` | Move by Unicode words | |
+| `beginning-of-buffer`, `end-of-buffer` | Move to a buffer boundary | |
+| `scroll-up`, `scroll-down` | Move forward or backward by one page | |
+| `goto-line <line>` | Move to a positive one-based line number, clamped at EOF | |
+| `kill-word`, `backward-kill-word` | Cut by word into the kill ring | |
 | `newline` | Insert a newline carrying leading indentation | |
 | `indent`, `outdent` | Apply Tab or Shift-Tab behavior | |
 | `delete-char`, `delete-backward-char` | Delete one grapheme | |
@@ -198,6 +207,12 @@ Aliases also work without a leading slash.
 `open-file` and `/open` reject directories and open another buffer without discarding unsaved changes.
 Use `find-file` to browse a directory.
 Typing `/` in the editor still inserts a slash.
+
+Words contain Unicode letters and numbers plus underscore; combining marks remain with their grapheme.
+Word movement skips separators and reaches the next word end or previous word beginning.
+Word kills use the same boundaries.
+Pages overlap by two lines, move at least one line, and retain the preferred display column.
+`goto-line` rejects invalid numbers without moving point and clamps numbers beyond the file to its last line.
 
 ## Directory Picker Keybindings
 
