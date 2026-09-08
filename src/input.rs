@@ -58,6 +58,23 @@ pub fn key_from_event(event: KeyEvent) -> Key {
     }
 }
 
+pub fn single_line_paste(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut previous_cr = false;
+    for ch in text.chars() {
+        match ch {
+            '\n' if previous_cr => {}
+            '\r' | '\n' | '\t' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}' => {
+                result.push(' ')
+            }
+            ch if !ch.is_control() => result.push(ch),
+            _ => {}
+        }
+        previous_cr = ch == '\r';
+    }
+    result
+}
+
 fn printable_char(ch: char, modifiers: KeyModifiers) -> bool {
     let allowed_modifiers = KeyModifiers::NONE | KeyModifiers::SHIFT;
     !ch.is_control() && modifiers.difference(allowed_modifiers).is_empty()
@@ -67,6 +84,17 @@ fn printable_char(ch: char, modifiers: KeyModifiers) -> bool {
 mod tests {
     use super::{key_from_event, Key};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn prompt_paste_flattens_line_breaks_and_tabs_without_command_controls() {
+        assert_eq!(
+            super::single_line_paste("  λ\r\nfoo\tbar\rnext\nlast\u{2028}line\u{2029}end  "),
+            "  λ foo bar next last line end  "
+        );
+        assert_eq!(super::single_line_paste("x\x1b\x03\x18\x00y"), "xy");
+        assert_eq!(super::single_line_paste("\r\r\n"), "  ");
+        assert_eq!(super::single_line_paste(""), "");
+    }
 
     #[test]
     fn maps_printable_characters() {

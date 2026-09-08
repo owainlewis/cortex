@@ -14,6 +14,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+const PASTE_ENABLE: &[u8] = b"\x1b[?2004h";
+const PASTE_DISABLE: &[u8] = b"\x1b[?2004l";
 const ALT_SCREEN_ENTER: &[u8] = b"\x1b[?1049h";
 const ALT_SCREEN_LEAVE: &[u8] = b"\x1b[?1049l";
 const CURSOR_HIDE: &[u8] = b"\x1b[?25l";
@@ -25,6 +27,44 @@ const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const GUARD_SETTLE_INTERVAL: Duration = Duration::from_millis(150);
 static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 static PTY_SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn bracketed_paste_is_literal_and_undoes_in_one_step() {
+    let fixture = Fixture::new("bracketed-paste");
+    let path = fixture.path().join("paste.txt");
+    fs::write(&path, "base\n").unwrap();
+    let mut session = PtySession::spawn(&path);
+    session.wait_for_output(PASTE_ENABLE);
+    session.wait_for_output(CURSOR_SHOW);
+    let text = "PASTE_TOKEN λ\tfoo\r\nbar\n\x18\x03\x18\x13\x1b]0;cortex-paste-test\x07";
+    let paste = format!("\x1b[200~{text}\x1b[201~");
+    session.master_mut().write_all(paste.as_bytes()).unwrap();
+    session.wait_for_output(b"PASTE_TOKEN");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "base\n",
+        "paste must not invoke save"
+    );
+    assert!(
+        !contains(&session.output, b"\x1b]0;cortex-paste-test\x07"),
+        "paste must not emit terminal controls"
+    );
+    session.master_mut().write_all(b"\x18\x13").unwrap();
+    let expected = format!("{text}base\n");
+    session.wait_until(
+        |_| fs::read_to_string(&path).unwrap() == expected,
+        "literal pasted text saved",
+    );
+    session.master_mut().write_all(b"\x18u\x18\x13").unwrap();
+    session.wait_until(
+        |_| fs::read_to_string(&path).unwrap() == "base\n",
+        "one undo restores original text",
+    );
+    session.master_mut().write_all(b"\x18\x03").unwrap();
+    assert!(session.wait_for_exit().success());
+    session.assert_raw_mode_restored();
+    assert_contains(&session.output, ALT_SCREEN_LEAVE, "alternate screen leave");
+}
 
 #[test]
 fn editor_exits_when_pty_controller_disconnects() {
@@ -480,6 +520,9 @@ impl PtySession {
     }
 
     fn assert_raw_mode_restored(&self) {
+        if contains(&self.output, PASTE_ENABLE) {
+            assert_contains(&self.output, PASTE_DISABLE, "bracketed paste disabled");
+        }
         let restored = read_termios(
             self.master
                 .as_ref()

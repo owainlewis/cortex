@@ -161,6 +161,16 @@ fn run_editor<W: io::Write>(
                     )?;
                 }
             }
+            Event::Paste(text) => {
+                let (buffer, view) = editor.active_mut();
+                app_state.handle_paste(&text, &mut keymap, buffer, view);
+                render_editor(
+                    &renderer,
+                    terminal.writer_mut(),
+                    &mut editor,
+                    &mut app_state,
+                )?;
+            }
             Event::Resize(_, _) => render_editor(
                 &renderer,
                 terminal.writer_mut(),
@@ -309,6 +319,10 @@ fn run_directory_picker<W: io::Write>(
                     }
                 }
             }
+            Event::Paste(text) if !text.is_empty() => {
+                picker.handle_key(crate::input::Key::Unhandled);
+                render_directory_picker(&renderer, terminal.writer_mut(), &picker)?;
+            }
             Event::Resize(_, _) => {
                 render_directory_picker(&renderer, terminal.writer_mut(), &picker)?
             }
@@ -366,6 +380,31 @@ impl AppState {
                 AppAction::Continue
             }
         }
+    }
+
+    fn handle_paste(
+        &mut self,
+        text: &str,
+        keymap: &mut Keymap,
+        buffer: &mut Buffer,
+        view: &mut View,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        *keymap = Keymap::new();
+        self.keycast = Some("Paste".to_string());
+        if self.dirty_quit_prompt {
+            return;
+        }
+        if let Some(input) = self.command_line.as_mut() {
+            input.push_str(&crate::input::single_line_paste(text));
+            return;
+        }
+        let point_after = buffer.insert(view.point(), text);
+        view.set_point(point_after, buffer);
+        self.mark = None;
+        self.clear_status();
     }
 
     fn start_command_line(&mut self) -> AppAction {
@@ -1810,6 +1849,96 @@ mod tests {
             app.status_message.as_deref(),
             Some("Unknown command: /bogus")
         );
+    }
+
+    #[test]
+    fn paste_inserts_literal_text_at_point_as_one_undo_step() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("paste.txt", "    a");
+        let mut view = View::new();
+        view.set_point(4, &buffer);
+        app.mark = Some(0);
+        let pasted = "\tλ\r\nnext\n/quit!\x18\x03\x1b[31m";
+        app.handle_paste(pasted, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), format!("    {pasted}a"));
+        assert_eq!(view.point(), 4 + pasted.chars().count());
+        assert!(app.mark.is_none());
+        run_slash_command("undo", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "    a");
+        assert_eq!(view.point(), 4);
+        assert!(!buffer.is_dirty());
+        assert_eq!(buffer.undo(), None);
+        run_slash_command("redo", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), format!("    {pasted}a"));
+    }
+
+    #[test]
+    fn paste_keeps_graphemes_whole_and_empty_paste_changes_nothing() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("paste.txt", "e");
+        let mut view = View::new();
+        view.set_point(1, &buffer);
+        app.mark = Some(0);
+        app.handle_paste("", &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.mark, Some(0));
+        assert_eq!(view.point(), 1);
+        assert_eq!(buffer.undo(), None);
+        app.handle_paste("\u{301}👨‍💻", &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "e\u{301}👨‍💻");
+        assert_eq!(view.point(), 5);
+        run_slash_command("undo", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "e");
+        assert_eq!(view.point(), 1);
+    }
+
+    #[test]
+    fn paste_edits_each_prompt_without_submitting_or_editing_the_buffer() {
+        for kind in [
+            super::PromptKind::Command,
+            super::PromptKind::FindFile,
+            super::PromptKind::SwitchBuffer,
+        ] {
+            let mut app = AppState::default();
+            let mut keymap = Keymap::new();
+            let mut buffer = buffer_with_text("paste.txt", "old");
+            let mut view = View::new();
+            app.command_line = Some(String::new());
+            app.prompt_kind = Some(kind);
+            app.handle_paste(
+                "  foo\r\nbar\t\x1b\x03é ",
+                &mut keymap,
+                &mut buffer,
+                &mut view,
+            );
+            assert_eq!(app.command_line.as_deref(), Some("  foo bar é "));
+            assert_eq!(app.prompt_kind, Some(kind));
+            assert_eq!(buffer.text(), "old");
+            assert!(!buffer.is_dirty());
+            assert_eq!(view.point(), 0);
+        }
+    }
+
+    #[test]
+    fn paste_cancels_a_key_prefix_and_cannot_answer_a_quit_confirmation() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("paste.txt", "old");
+        let mut view = View::new();
+        app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
+        app.handle_paste("\x18\x03\x18\x13", &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "\x18\x03\x18\x13old");
+        assert_eq!(
+            keymap.resolve(Key::Ctrl('s')),
+            crate::keymap::KeymapResult::Command(crate::commands::Command::RepeatSearch)
+        );
+        app.request_dirty_quit();
+        let before = buffer.text();
+        app.handle_paste("y\r/quit!", &mut keymap, &mut buffer, &mut view);
+        assert!(app.dirty_quit_prompt);
+        assert_eq!(app.status_message.as_deref(), Some(DIRTY_QUIT_PROMPT));
+        assert_eq!(buffer.text(), before);
     }
 
     #[test]
