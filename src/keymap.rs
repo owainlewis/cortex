@@ -58,6 +58,14 @@ impl Keymap {
             Key::Ctrl('k') => KeymapResult::Command(Command::KillLine),
             Key::Ctrl('w') => KeymapResult::Command(Command::KillRegion),
             Key::Ctrl('y') => KeymapResult::Command(Command::Yank),
+            Key::Meta('f') => KeymapResult::Command(Command::MoveForwardWord),
+            Key::Meta('b') => KeymapResult::Command(Command::MoveBackwardWord),
+            Key::Meta('<') => KeymapResult::Command(Command::MoveToBufferStart),
+            Key::Meta('>') => KeymapResult::Command(Command::MoveToBufferEnd),
+            Key::Meta('d') => KeymapResult::Command(Command::KillWord),
+            Key::MetaBackspace => KeymapResult::Command(Command::BackwardKillWord),
+            Key::Ctrl('v') | Key::PageDown => KeymapResult::Command(Command::PageDown),
+            Key::Meta('v') | Key::PageUp => KeymapResult::Command(Command::PageUp),
             Key::Meta('y') => KeymapResult::Command(Command::YankPop),
             Key::Right | Key::Ctrl('f') => KeymapResult::Command(Command::MoveForwardChar),
             Key::Left | Key::Ctrl('b') => KeymapResult::Command(Command::MoveBackwardChar),
@@ -97,13 +105,34 @@ mod tests {
     use crate::{commands::Command, input::Key};
 
     #[test]
+    fn word_buffer_and_page_keys_resolve_to_navigation_commands() {
+        for (key, command) in [
+            (Key::Meta('f'), Command::MoveForwardWord),
+            (Key::Meta('b'), Command::MoveBackwardWord),
+            (Key::Meta('<'), Command::MoveToBufferStart),
+            (Key::Meta('>'), Command::MoveToBufferEnd),
+            (Key::Meta('d'), Command::KillWord),
+            (Key::MetaBackspace, Command::BackwardKillWord),
+            (Key::Ctrl('v'), Command::PageDown),
+            (Key::PageDown, Command::PageDown),
+            (Key::Meta('v'), Command::PageUp),
+            (Key::PageUp, Command::PageUp),
+        ] {
+            assert_eq!(Keymap::new().resolve(key), KeymapResult::Command(command));
+        }
+    }
+
+    #[test]
     fn clipboard_bindings_are_explicit_and_do_not_change_the_quit_prefix() {
         let mut keymap = Keymap::new();
         assert_eq!(
             keymap.resolve(Key::Meta('w')),
             KeymapResult::Command(Command::CopyRegion)
         );
-        assert_eq!(keymap.resolve(Key::Ctrl('v')), KeymapResult::Unbound);
+        assert_eq!(
+            keymap.resolve(Key::Ctrl('v')),
+            KeymapResult::Command(Command::PageDown)
+        );
         assert_eq!(keymap.resolve(Key::Ctrl('c')), KeymapResult::PendingPrefix);
         assert_eq!(keymap.pending_label(), Some("C-c"));
         assert_eq!(

@@ -19,6 +19,15 @@ pub enum Command {
     KillLine,
     KillRegion,
     MoveForwardChar,
+    MoveForwardWord,
+    MoveBackwardWord,
+    MoveToBufferStart,
+    MoveToBufferEnd,
+    PageDown,
+    PageUp,
+    GotoLine,
+    KillWord,
+    BackwardKillWord,
     MoveBackwardChar,
     MoveNextLine,
     MovePreviousLine,
@@ -145,7 +154,10 @@ pub(crate) fn dispatch_at(
         | Command::Yank
         | Command::YankPop
         | Command::CopyRegion
-        | Command::ClipboardPaste => CommandOutcome::default(),
+        | Command::ClipboardPaste
+        | Command::GotoLine
+        | Command::KillWord
+        | Command::BackwardKillWord => CommandOutcome::default(),
         Command::Undo => {
             if let Some(point) = buffer.undo() {
                 view.set_point(point, buffer);
@@ -160,6 +172,22 @@ pub(crate) fn dispatch_at(
         }
         Command::ReloadBuffer => reload_buffer(buffer, view),
         Command::RepeatSearch => CommandOutcome::default(),
+        Command::MoveForwardWord | Command::MoveBackwardWord => {
+            view.move_word(buffer, command == Command::MoveForwardWord);
+            CommandOutcome::default()
+        }
+        Command::MoveToBufferStart => {
+            view.move_to_buffer_start(buffer);
+            CommandOutcome::default()
+        }
+        Command::MoveToBufferEnd => {
+            view.move_to_buffer_end(buffer);
+            CommandOutcome::default()
+        }
+        Command::PageDown | Command::PageUp => {
+            view.move_page(buffer, command == Command::PageDown);
+            CommandOutcome::default()
+        }
         Command::MoveForwardChar => {
             view.move_forward_char(buffer);
             CommandOutcome::default()

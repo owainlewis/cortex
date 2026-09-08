@@ -70,7 +70,7 @@ There is no formal crate-level enforcement because all modules are in one binary
 ## 3. Current architectural invariants
 
 1. A `Buffer` owns text, file path, disk baseline, dirty state, undo and redo history, change markers, and text revision.
-2. A `View` owns point, vertical scroll, horizontal scroll, and the preferred terminal column for vertical movement.
+2. A `View` owns point, vertical scroll, horizontal scroll, the last rendered viewport height, and the preferred terminal column for vertical movement.
 3. Point and edit boundaries are Rope character indexes that are clamped to extended grapheme cluster boundaries.
 4. `Editor` deduplicates open buffers by normalized macOS path identity and keeps one active buffer.
 5. The active buffer has exactly one stored `View` in the current implementation.
@@ -93,7 +93,7 @@ There is no formal crate-level enforcement because all modules are in one binary
 | `app.rs` | Main event loop, transient UI state, nested picker flow, and coordination | Editor, commands, input, picker, renderer, terminal, and signals | Buffer text or retained terminal cells |
 | `editor.rs` | Buffer collection, active index, per-buffer view, and path deduplication | Buffer, View, filesystem path metadata, and macOS path rules | Editing operations or screen layout |
 | `buffer.rs` | Rope text, file identity and baseline, history, revisions, changed lines, save and reload rules | Ropey, Unicode helpers, filesystem, randomness, and macOS file APIs | Point, scrolling, prompt state, or screen cells |
-| `view.rs` | Point, scroll offsets, and preferred display column | Buffer queries | Text, file identity, or rendering styles |
+| `view.rs` | Point, scroll offsets, viewport height, and preferred display column | Buffer queries | Text, file identity, or rendering styles |
 | `commands.rs` | Core editing, movement, save, reload, undo, redo, and quit outcomes | Buffer and View | Prompt-driven commands and application-wide state |
 | `command_registry.rs` | Static names, aliases, descriptions, argument validation, and prefix completion | Command enum | Editor state or command execution |
 | `input.rs` and `keymap.rs` | Terminal-key normalization and one pending `C-x` prefix | Crossterm events and the command enum | Command execution or configurable bindings |
@@ -234,6 +234,8 @@ The buffer evicts oldest whole groups with a deque and keeps history identities 
 Each edit keeps its structural line-change metadata; grouped undo reverses these edits in order.
 Typing and same-direction deletion use explicit timestamps with a 750 ms pause boundary.
 The application, command dispatch, and buffer-switch paths end groups for deliberate actions.
+Word boundaries traverse Rope graphemes using Unicode alphanumeric and underscore classes, without copying the buffer.
+Word movement and word kills share these boundaries; paging uses the View viewport height with a two-line overlap.
 Open-buffer count, clean baselines, and history metadata have no separate memory budget.
 The kill ring retains at most 32 complete nonempty cuts; its text has no separate byte limit.
 Application yank state records buffer identity, revision, the exact inserted range, point, and ring index.

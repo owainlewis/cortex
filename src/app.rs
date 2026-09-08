@@ -516,6 +516,37 @@ impl AppState {
         AppAction::Continue
     }
 
+    fn kill_word(&mut self, buffer: &mut Buffer, view: &mut View, forward: bool) -> AppAction {
+        let point = view.point();
+        let end = buffer.word_boundary(point, forward);
+        if point == end {
+            self.set_status("Nothing to cut", StatusKind::Info);
+            return AppAction::Continue;
+        }
+        let range = point.min(end)..point.max(end);
+        let text = buffer.text_range(range.clone());
+        let point_after = buffer.delete_with_points(range.clone(), point, range.start);
+        view.set_point(point_after, buffer);
+        self.kill_ring.push(text);
+        self.mark = None;
+        self.set_status("Cut word", StatusKind::Success);
+        AppAction::Continue
+    }
+
+    fn goto_line(&mut self, argument: &str, buffer: &Buffer, view: &mut View) -> AppAction {
+        let Some(line) = argument.parse::<usize>().ok().filter(|line| *line > 0) else {
+            self.set_status(
+                "goto-line requires a positive line number",
+                StatusKind::Error,
+            );
+            return AppAction::Continue;
+        };
+        let line = (line - 1).min(buffer.len_lines().saturating_sub(1));
+        view.set_point(buffer.line_start_char(line), buffer);
+        self.set_status(format!("Line {}", line + 1), StatusKind::Info);
+        AppAction::Continue
+    }
+
     fn yank(&mut self, buffer: &mut Buffer, view: &mut View) -> AppAction {
         let Some(text) = self.kill_ring.get(0) else {
             self.set_status("No cut text", StatusKind::Error);
@@ -741,6 +772,10 @@ impl AppState {
             Command::YankPop => self.yank_pop(buffer, view),
             Command::CopyRegion => self.copy_region(buffer, view),
             Command::ClipboardPaste => self.paste_clipboard(buffer, view),
+            Command::KillWord | Command::BackwardKillWord => {
+                self.kill_word(buffer, view, command == Command::KillWord)
+            }
+            Command::GotoLine => self.goto_line(argument, buffer, view),
             Command::RepeatSearch => self.repeat_search(buffer, view),
             Command::OpenFile => self.start_find_file(),
             Command::SwitchBuffer => self.start_switch_buffer(),
@@ -981,6 +1016,9 @@ fn keycast_text(key: crate::input::Key) -> Option<String> {
         crate::input::Key::BackTab => Some("Shift-Tab".to_string()),
         crate::input::Key::Escape => Some("Esc".to_string()),
         crate::input::Key::Backspace => Some("Backspace".to_string()),
+        crate::input::Key::MetaBackspace => Some("M-Backspace".to_string()),
+        crate::input::Key::PageDown => Some("PageDown".to_string()),
+        crate::input::Key::PageUp => Some("PageUp".to_string()),
         crate::input::Key::Delete => Some("Delete".to_string()),
         crate::input::Key::Left => Some("Left".to_string()),
         crate::input::Key::Right => Some("Right".to_string()),
@@ -1054,6 +1092,54 @@ mod tests {
             clipboard: crate::clipboard::Clipboard::with_test_programs(copy, paste),
             ..AppState::default()
         }
+    }
+
+    #[test]
+    fn word_kills_use_the_same_boundaries_and_retain_complete_text() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("words.txt", "one, café_2 👨‍💻 東京");
+        let mut view = View::new();
+        view.set_point(3, &buffer);
+        app.mark = Some(0);
+        app.handle_key(Key::Meta('d'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "one 👨‍💻 東京");
+        assert_eq!(view.point(), 3);
+        assert_eq!(app.kill_ring.get(0), Some(", café_2"));
+        assert!(app.mark.is_none());
+        app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "one, café_2 👨‍💻 東京");
+        app.handle_key(Key::MetaBackspace, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "one,  👨‍💻 東京");
+        assert_eq!(app.kill_ring.get(0), Some("café_2"));
+        assert_eq!(app.kill_ring.get(1), Some(", café_2"));
+        app.execute_command(commands::Command::Undo, "", &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "one, café_2 👨‍💻 東京");
+        assert_eq!(view.point(), 11);
+    }
+
+    #[test]
+    fn goto_line_validates_input_and_clamps_to_the_last_line() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("lines.txt", "a\r\n界\nlast");
+        let mut view = View::new();
+        run_slash_command("goto-line 2", &mut app, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(view.point(), 3);
+        for invalid in ["", "0", "-1", "1.5", "abc", "184467440737095516160"] {
+            app.execute_command(commands::Command::GotoLine, invalid, &mut buffer, &mut view);
+            assert_eq!(view.point(), 3);
+            assert_eq!(app.status_kind, Some(StatusKind::Error));
+        }
+        run_slash_command(
+            "goto-line 999",
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+        );
+        assert_eq!(view.point(), 5);
+        assert_eq!(buffer.undo(), None);
     }
 
     #[test]
@@ -2607,6 +2693,14 @@ mod tests {
     fn named_commands_match_editing_and_movement_keys() {
         for (name, key) in [
             ("forward-char", Key::Ctrl('f')),
+            ("forward-word", Key::Meta('f')),
+            ("backward-word", Key::Meta('b')),
+            ("beginning-of-buffer", Key::Meta('<')),
+            ("end-of-buffer", Key::Meta('>')),
+            ("scroll-up", Key::PageDown),
+            ("scroll-down", Key::PageUp),
+            ("kill-word", Key::Meta('d')),
+            ("backward-kill-word", Key::MetaBackspace),
             ("backward-char", Key::Ctrl('b')),
             ("next-line", Key::Ctrl('n')),
             ("previous-line", Key::Ctrl('p')),

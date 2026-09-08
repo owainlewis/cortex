@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use ropey::{iter::Chunks, str_utils::byte_to_char_idx, RopeSlice};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
 use unicode_width::UnicodeWidthStr;
@@ -113,57 +115,115 @@ pub(crate) fn rope_boundary_at_or_after(text: RopeSlice<'_>, char_index: usize) 
     }
 }
 
-pub(crate) fn next_rope_boundary(text: RopeSlice<'_>, char_index: usize) -> usize {
-    let byte_index = text.char_to_byte(char_index);
-    let (mut chunk, mut chunk_start, mut chunk_char_start, _) = text.chunk_at_byte(byte_index);
-    let mut cursor = GraphemeCursor::new(byte_index, text.len_bytes(), true);
+// Retain Unicode context while walking a run of graphemes. In particular, regional
+// indicators need the parity of the preceding run in either direction.
+struct RopeBoundaryCursor<'a> {
+    text: RopeSlice<'a>,
+    chunk: Cow<'a, str>,
+    chunk_start: usize,
+    chunk_char_start: usize,
+    cursor: GraphemeCursor,
+    context_bytes: usize,
+}
 
-    loop {
-        match cursor.next_boundary(chunk, chunk_start) {
-            Ok(None) => return text.len_chars(),
-            Ok(Some(boundary)) => {
-                return chunk_char_start + byte_to_char_idx(chunk, boundary - chunk_start);
+impl<'a> RopeBoundaryCursor<'a> {
+    fn new(text: RopeSlice<'a>, char_index: usize) -> Self {
+        let byte_index = text.char_to_byte(char_index);
+        let (chunk, chunk_start, chunk_char_start, _) = text.chunk_at_byte(byte_index);
+        Self {
+            text,
+            chunk: Cow::Borrowed(chunk),
+            chunk_start,
+            chunk_char_start,
+            cursor: GraphemeCursor::new(byte_index, text.len_bytes(), true),
+            context_bytes: 0,
+        }
+    }
+
+    fn boundary(&mut self, forward: bool) -> usize {
+        loop {
+            let result = if forward {
+                self.cursor.next_boundary(&self.chunk, self.chunk_start)
+            } else {
+                self.cursor.prev_boundary(&self.chunk, self.chunk_start)
+            };
+            match result {
+                Ok(None) => return if forward { self.text.len_chars() } else { 0 },
+                Ok(Some(boundary)) => {
+                    return self.chunk_char_start
+                        + byte_to_char_idx(&self.chunk, boundary - self.chunk_start);
+                }
+                Err(GraphemeIncomplete::NextChunk) => {
+                    self.set_chunk(self.chunk_start + self.chunk.len(), true);
+                }
+                Err(GraphemeIncomplete::PrevChunk) => {
+                    self.set_chunk(self.chunk_start - 1, false);
+                }
+                Err(GraphemeIncomplete::PreContext(byte_idx)) => {
+                    let (context, context_start, _, _) =
+                        self.text.chunk_at_byte(byte_idx.saturating_sub(1));
+                    let context = &context[..byte_idx - context_start];
+                    self.context_bytes += context.len();
+                    self.cursor.provide_context(context, context_start);
+                }
+                Err(_) => unreachable!("rope chunks must cover the grapheme cursor"),
             }
-            Err(GraphemeIncomplete::NextChunk) => {
-                chunk_start += chunk.len();
-                let (next_chunk, _, next_char_start, _) = text.chunk_at_byte(chunk_start);
-                chunk = next_chunk;
-                chunk_char_start = next_char_start;
-            }
-            Err(GraphemeIncomplete::PreContext(byte_idx)) => {
-                let (context, context_start, _, _) = text.chunk_at_byte(byte_idx.saturating_sub(1));
-                cursor.provide_context(context, context_start);
-            }
-            Err(_) => unreachable!("rope chunks must cover the grapheme cursor"),
+        }
+    }
+
+    fn set_chunk(&mut self, byte_index: usize, overlap: bool) {
+        let (chunk, chunk_start, chunk_char_start, _) = self.text.chunk_at_byte(byte_index);
+        self.chunk = Cow::Borrowed(chunk);
+        self.chunk_start = chunk_start;
+        self.chunk_char_start = chunk_char_start;
+        if overlap && chunk_char_start > 0 {
+            // GraphemeCursor requests fresh RI context at an exact chunk start,
+            // even with cached parity. One overlapping scalar keeps that parity
+            // usable while copying only one rope chunk, never a growing prefix.
+            let previous = self.text.char(chunk_char_start - 1);
+            let mut joined = String::with_capacity(previous.len_utf8() + chunk.len());
+            joined.push(previous);
+            joined.push_str(chunk);
+            self.chunk = Cow::Owned(joined);
+            self.chunk_start -= previous.len_utf8();
+            self.chunk_char_start -= 1;
         }
     }
 }
 
-pub(crate) fn previous_rope_boundary(text: RopeSlice<'_>, char_index: usize) -> usize {
-    let byte_index = text.char_to_byte(char_index);
-    let (mut chunk, mut chunk_start, mut chunk_char_start, _) = text.chunk_at_byte(byte_index);
-    let mut cursor = GraphemeCursor::new(byte_index, text.len_bytes(), true);
+pub(crate) fn next_rope_boundary(text: RopeSlice<'_>, char_index: usize) -> usize {
+    RopeBoundaryCursor::new(text, char_index).boundary(true)
+}
 
-    loop {
-        match cursor.prev_boundary(chunk, chunk_start) {
-            Ok(None) => return 0,
-            Ok(Some(boundary)) => {
-                return chunk_char_start + byte_to_char_idx(chunk, boundary - chunk_start);
-            }
-            Err(GraphemeIncomplete::PrevChunk) => {
-                let (previous_chunk, previous_start, previous_char_start, _) =
-                    text.chunk_at_byte(chunk_start - 1);
-                chunk = previous_chunk;
-                chunk_start = previous_start;
-                chunk_char_start = previous_char_start;
-            }
-            Err(GraphemeIncomplete::PreContext(byte_idx)) => {
-                let (context, context_start, _, _) = text.chunk_at_byte(byte_idx.saturating_sub(1));
-                cursor.provide_context(context, context_start);
-            }
-            Err(_) => unreachable!("rope chunks must cover the grapheme cursor"),
+pub(crate) fn previous_rope_boundary(text: RopeSlice<'_>, char_index: usize) -> usize {
+    RopeBoundaryCursor::new(text, char_index).boundary(false)
+}
+
+pub(crate) fn rope_word_boundary(
+    text: RopeSlice<'_>,
+    point: usize,
+    forward: bool,
+) -> (usize, usize) {
+    let mut point = rope_boundary_at_or_before(text, point.min(text.len_chars()));
+    let mut cursor = RopeBoundaryCursor::new(text, point);
+    let mut found_word = false;
+    while if forward {
+        point < text.len_chars()
+    } else {
+        point > 0
+    } {
+        let next = cursor.boundary(forward);
+        let word = text
+            .slice(point.min(next)..point.max(next))
+            .chars()
+            .any(|ch| ch.is_alphanumeric() || ch == '_');
+        if found_word && !word {
+            break;
         }
+        found_word |= word;
+        point = next;
     }
+    (point, cursor.context_bytes)
 }
 
 #[cfg(test)]
@@ -325,7 +385,53 @@ mod tests {
         grapheme_char_indices, measure_rope_width, measure_width, next_rope_boundary, pop_grapheme,
         previous_rope_boundary, rope_boundary_at_or_after, rope_boundary_at_or_before,
         rope_char_index_at_column, rope_char_index_at_or_after_column, rope_prefix_for_width,
+        rope_word_boundary,
     };
+
+    #[test]
+    fn retained_cursor_matches_flat_graphemes_across_rope_chunks() {
+        for value in [
+            format!("{}end", "🇦🇧🇨".repeat(1_001)),
+            "a\u{301}👨‍💻🇦🇧👍🏽\u{600}界क्ष\r\n".repeat(301),
+        ] {
+            let rope = Rope::from_str(&value);
+            let mut boundaries: Vec<_> = grapheme_char_indices(&value)
+                .map(|(start, _)| start)
+                .collect();
+            boundaries.push(rope.len_chars());
+            let mut forward = super::RopeBoundaryCursor::new(rope.slice(..), 0);
+            for expected in boundaries.iter().skip(1) {
+                assert_eq!(forward.boundary(true), *expected);
+            }
+            let mut backward = super::RopeBoundaryCursor::new(rope.slice(..), rope.len_chars());
+            for expected in boundaries.iter().rev().skip(1) {
+                assert_eq!(backward.boundary(false), *expected);
+            }
+        }
+    }
+
+    #[test]
+    fn word_traversal_keeps_regional_indicator_context_in_both_directions() {
+        for count in [1_000, 4_000, 16_000] {
+            let flags = "🇦🇧".repeat(count);
+            for (value, point, forward, expected) in [
+                (format!("{flags}end"), 0, true, count * 2 + 3),
+                (format!("start{flags}"), count * 2 + 5, false, 0),
+                (format!("{flags}end"), count, true, count * 2 + 3),
+                (format!("start{flags}"), count + 5, false, 0),
+            ] {
+                let rope = Rope::from_str(&value);
+                let (boundary, context_bytes) = rope_word_boundary(rope.slice(..), point, forward);
+                assert_eq!(boundary, expected);
+                // One initial context scan is enough. Restarting the cursor for
+                // every flag makes this grow quadratically across rope chunks.
+                assert!(
+                    context_bytes <= rope.len_bytes() * 2,
+                    "n={count} point={point} forward={forward} context={context_bytes}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn boundaries_keep_common_extended_graphemes_whole() {

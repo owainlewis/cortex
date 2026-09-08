@@ -717,6 +717,10 @@ impl Buffer {
         self.line_change_range_probes.replace(0)
     }
 
+    pub(crate) fn word_boundary(&self, point: usize, forward: bool) -> usize {
+        text::rope_word_boundary(self.text.slice(..), point, forward).0
+    }
+
     pub fn find_forward(&self, query: &str, start_char: usize) -> Option<usize> {
         if query.is_empty() {
             return None;
