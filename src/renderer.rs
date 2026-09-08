@@ -2351,6 +2351,33 @@ mod tests {
     }
 
     #[test]
+    fn fenced_rust_string_retains_its_rendered_style() {
+        let code = "let s = \"**hello**\";";
+        let buffer = buffer_with_text("notes.md", &format!("```rust\n{code}\n```\n"));
+        let renderer = super::Renderer::new();
+        let size = TerminalSize { cols: 80, rows: 5 };
+        renderer
+            .render(
+                &mut Vec::new(),
+                &buffer,
+                &View::new(),
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let column = super::editor_gutter_width(&buffer, 80) + code.find("hello").unwrap();
+        let frame = renderer.last_frame.borrow();
+        assert_eq!(
+            frame.as_ref().unwrap().cells[80 + column].style,
+            super::highlight_style(crate::highlighter::HighlightKind::String)
+        );
+    }
+
+    #[test]
     fn render_emits_markdown_document_styles() {
         let buffer = buffer_with_text(
             "notes.md",

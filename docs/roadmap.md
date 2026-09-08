@@ -134,7 +134,7 @@ Parent: [#160 Deliver a minimalist daily coding editor](https://github.com/owain
 This extends the v0.3 editing work; individual ticket criteria define completion.
 
 Delivery order:
-- [open] [#161 Align the product direction](https://github.com/owainlewis/cortex/issues/161)
+- [closed] [#161 Align the product direction](https://github.com/owainlewis/cortex/issues/161)
 - [open] [#162 Correct TypeScript and fenced Markdown colours](https://github.com/owainlewis/cortex/issues/162)
 - [open] [#46 Add command registry and M-x](https://github.com/owainlewis/cortex/issues/46)
 - [open] [#164 Add typing and region indentation](https://github.com/owainlewis/cortex/issues/164)
@@ -159,7 +159,7 @@ Publishing a release is separate from this implementation batch.
 Manual reload, the dirty reload guard, and the disk-changed indicator are implemented through [#48](https://github.com/owainlewis/cortex/issues/48).
 Idle disk-change notification and a verified tmux workflow are included in #172.
 Internal split layouts (#31), tabs (#32), and an embedded terminal pane (#49) are superseded by the external-terminal direction in #161.
-Their original tickets retain the design history and will be closed as not planned after that decision merges.
+Those tickets are closed as not planned and retain their original design history.
 Revisit internal views only for a demonstrated need to show the same unsaved buffer in two places.
 
 ## Release and Install

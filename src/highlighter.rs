@@ -1143,10 +1143,6 @@ impl SyntaxHighlighter {
             }
         }
 
-        if is_markdown_path(path) {
-            self.highlight_markdown_inline_lines(&lines, &mut highlighted_lines);
-        }
-
         highlighted_lines
     }
 
@@ -1155,66 +1151,6 @@ impl SyntaxHighlighter {
         self.languages
             .iter()
             .position(|language| language.extensions.contains(&extension.as_str()))
-    }
-
-    fn language_idx_for_name(&self, name: &str) -> Option<usize> {
-        self.languages
-            .iter()
-            .position(|language| language.config.language_name == name)
-    }
-
-    fn highlight_markdown_inline_lines(
-        &mut self,
-        lines: &[String],
-        highlighted_lines: &mut [Vec<HighlightSpan>],
-    ) {
-        let Some(language_idx) = self.language_idx_for_name("markdown_inline") else {
-            return;
-        };
-
-        let languages = &self.languages;
-        let language = &languages[language_idx];
-
-        for (line_idx, line) in lines.iter().enumerate() {
-            if line.is_empty() {
-                continue;
-            }
-
-            let events =
-                self.highlighter
-                    .highlight(&language.config, line.as_bytes(), None, |name| {
-                        language_config_for_name(languages, name)
-                    });
-            let Ok(events) = events else {
-                continue;
-            };
-
-            let mut highlight_stack = Vec::new();
-            for event in events {
-                let Ok(event) = event else {
-                    break;
-                };
-
-                match event {
-                    HighlightEvent::Source { start, end } => {
-                        if start < end {
-                            if let Some(kind) =
-                                highlight_stack.last().copied().and_then(highlight_kind)
-                            {
-                                highlighted_lines[line_idx].push(HighlightSpan {
-                                    range: start..end,
-                                    kind,
-                                });
-                            }
-                        }
-                    }
-                    HighlightEvent::HighlightStart(highlight) => highlight_stack.push(highlight.0),
-                    HighlightEvent::HighlightEnd => {
-                        highlight_stack.pop();
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -1278,13 +1214,45 @@ fn rust_definition() -> Option<LanguageDefinition> {
     )
 }
 
+// Markdown's inline and code-content nodes contain children that belong to the
+// injected language. Include them so emphasis and string punctuation are parsed
+// in context instead of applying a second inline pass to every source line.
+const MARKDOWN_INJECTIONS: &str = r#"
+(fenced_code_block
+  (info_string (language) @injection.language)
+  (code_fence_content) @injection.content
+  (#set! injection.include-children))
+
+([(inline) (pipe_table_cell)] @injection.content
+  (#set! injection.language "markdown_inline")
+  (#set! injection.include-children))
+
+((html_block) @injection.content
+  (#set! injection.language "html"))
+
+(document
+  .
+  (section
+    .
+    (thematic_break)
+    (_) @injection.content
+    (thematic_break))
+  (#set! injection.language "yaml"))
+
+((minus_metadata) @injection.content
+  (#set! injection.language "yaml"))
+
+((plus_metadata) @injection.content
+  (#set! injection.language "toml"))
+"#;
+
 fn markdown_definition() -> Option<LanguageDefinition> {
     language_definition(
         MARKDOWN_EXTENSIONS,
         tree_sitter_md::LANGUAGE.into(),
         "markdown",
         tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
-        tree_sitter_md::INJECTION_QUERY_BLOCK,
+        MARKDOWN_INJECTIONS,
     )
 }
 
@@ -1345,22 +1313,33 @@ fn javascript_definition() -> Option<LanguageDefinition> {
 }
 
 fn typescript_definition() -> Option<LanguageDefinition> {
+    let highlights = format!(
+        "{}\n{}",
+        tree_sitter_javascript::HIGHLIGHT_QUERY,
+        tree_sitter_typescript::HIGHLIGHTS_QUERY
+    );
     language_definition(
         TYPESCRIPT_EXTENSIONS,
         tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         "typescript",
-        tree_sitter_typescript::HIGHLIGHTS_QUERY,
-        "",
+        &highlights,
+        tree_sitter_javascript::INJECTIONS_QUERY,
     )
 }
 
 fn typescript_tsx_definition() -> Option<LanguageDefinition> {
+    let highlights = format!(
+        "{}\n{}\n{}",
+        tree_sitter_javascript::HIGHLIGHT_QUERY,
+        tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+        tree_sitter_typescript::HIGHLIGHTS_QUERY
+    );
     language_definition(
         TYPESCRIPT_TSX_EXTENSIONS,
         tree_sitter_typescript::LANGUAGE_TSX.into(),
         "tsx",
-        tree_sitter_typescript::HIGHLIGHTS_QUERY,
-        "",
+        &highlights,
+        tree_sitter_javascript::INJECTIONS_QUERY,
     )
 }
 
@@ -1454,13 +1433,6 @@ fn language_config_for_name<'a>(
         .iter()
         .find(|language| language.config.language_name == name)
         .map(|language| &language.config)
-}
-
-fn is_markdown_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown"))
-        .unwrap_or(false)
 }
 
 fn document_lines(source: &str) -> Vec<String> {
@@ -1664,6 +1636,130 @@ mod tests {
                 highlighted.iter().flatten().next().is_some(),
                 "{} should produce at least one highlight",
                 path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_highlights_javascript_tokens_and_types() {
+        let mut highlighter = SyntaxHighlighter::new();
+        let source = "const message: string = \"hello\"; // greeting\nfunction answer(): number { return 42; }";
+        let highlighted = highlighter.highlight_document(Path::new("app.ts"), source);
+        for (line, token, kind) in [
+            (0, "const", HighlightKind::Keyword),
+            (0, "string", HighlightKind::Type),
+            (0, "hello", HighlightKind::String),
+            (0, "greeting", HighlightKind::Comment),
+            (1, "function", HighlightKind::Keyword),
+            (1, "answer", HighlightKind::Function),
+            (1, "number", HighlightKind::Type),
+            (1, "return", HighlightKind::Keyword),
+            (1, "42", HighlightKind::Number),
+        ] {
+            let offset = source.lines().nth(line).unwrap().find(token).unwrap();
+            assert_eq!(
+                highlighted[line]
+                    .iter()
+                    .rev()
+                    .find(|span| span.range.contains(&offset))
+                    .map(|span| span.kind),
+                Some(kind),
+                "expected {kind:?} for {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn tsx_highlights_jsx_tags_attributes_and_typescript() {
+        let mut highlighter = SyntaxHighlighter::new();
+        let source =
+            "const Button = (props: Props) => <button title=\"save\">{props.label}</button>;";
+        let highlighted = highlighter.highlight_document(Path::new("button.tsx"), source);
+        for (token, kind) in [
+            ("const", HighlightKind::Keyword),
+            ("Props", HighlightKind::Type),
+            ("button", HighlightKind::Tag),
+            ("title", HighlightKind::Attribute),
+            ("save", HighlightKind::String),
+            ("label", HighlightKind::Property),
+        ] {
+            let offset = source.find(token).unwrap();
+            assert_eq!(
+                highlighted[0]
+                    .iter()
+                    .rev()
+                    .find(|span| span.range.contains(&offset))
+                    .map(|span| span.kind),
+                Some(kind),
+                "expected {kind:?} for {token}"
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_inline_markup_does_not_override_fenced_source() {
+        let mut highlighter = SyntaxHighlighter::new();
+        for source in [
+            "```rust\nlet s = \"**hello**\";\n```\n**outside**",
+            "~~~rust\nlet s = \"**hello**\";\n~~~\n**outside**",
+            "> ```rust\n> let s = \"**hello**\";\n> ```\n\n**outside**",
+        ] {
+            let highlighted = highlighter.highlight_document(Path::new("notes.md"), source);
+            let offset = source.lines().nth(1).unwrap().find("hello").unwrap();
+            assert_eq!(
+                highlighted[1]
+                    .iter()
+                    .rev()
+                    .find(|span| span.range.contains(&offset))
+                    .map(|span| span.kind),
+                Some(HighlightKind::String),
+                "fenced source must retain its string style: {source}"
+            );
+            assert!(line_has_kind(
+                highlighted.last().unwrap(),
+                HighlightKind::MarkupBold
+            ));
+        }
+    }
+
+    #[test]
+    fn markdown_inline_emphasis_keeps_multiline_context() {
+        let mut highlighter = SyntaxHighlighter::new();
+        let source = "A **bold\ncontinued** phrase.";
+        let highlighted = highlighter.highlight_document(Path::new("notes.md"), source);
+        assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupBold));
+        assert!(line_has_kind(&highlighted[1], HighlightKind::MarkupBold));
+    }
+
+    #[test]
+    fn markdown_table_cells_keep_inline_formatting() {
+        let mut highlighter = SyntaxHighlighter::new();
+        let source = "| **Title** | `Code` |\n| --- | --- |\n| *body* | [link](uri) |";
+        let highlighted = highlighter.highlight_document(Path::new("notes.md"), source);
+        assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupBold));
+        assert!(line_has_kind(&highlighted[0], HighlightKind::MarkupRaw));
+        assert!(line_has_kind(&highlighted[2], HighlightKind::MarkupItalic));
+        assert!(line_has_kind(&highlighted[2], HighlightKind::MarkupLink));
+        assert!(line_has_kind(&highlighted[2], HighlightKind::MarkupLinkUrl));
+    }
+
+    #[test]
+    fn markdown_code_without_a_grammar_does_not_gain_inline_markup() {
+        let mut highlighter = SyntaxHighlighter::new();
+        for source in [
+            "```\n**literal** and [link](uri)\n```",
+            "```unknown\n**literal** and [link](uri)\n```",
+            "    **literal** and [link](uri)",
+        ] {
+            let highlighted = highlighter.highlight_document(Path::new("notes.md"), source);
+            assert!(
+                !highlighted.iter().flatten().any(|span| matches!(
+                    span.kind,
+                    HighlightKind::MarkupBold
+                        | HighlightKind::MarkupItalic
+                        | HighlightKind::MarkupLink
+                )),
+                "code must not be interpreted as prose: {source}"
             );
         }
     }
