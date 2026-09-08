@@ -29,6 +29,26 @@ static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 static PTY_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn empty_paste_cancels_the_directory_picker_prefix() {
+    let fixture = Fixture::new("empty-picker-paste");
+    let path = fixture.path().join("file.txt");
+    fs::write(&path, "base").unwrap();
+    let mut session = PtySession::spawn(fixture.path());
+    session.wait_for_output(b"file.txt");
+    session
+        .master_mut()
+        .write_all(b"\x18\x1b[200~\x1b[201~\redited\x18\x13")
+        .unwrap();
+    session.wait_until(
+        |_| fs::read_to_string(&path).unwrap() == "editedbase",
+        "Enter after empty paste opens the selected file",
+    );
+    session.master_mut().write_all(b"\x18\x03").unwrap();
+    assert!(session.wait_for_exit().success());
+    session.assert_raw_mode_restored();
+}
+
+#[test]
 fn bracketed_paste_is_literal_and_undoes_in_one_step() {
     let fixture = Fixture::new("bracketed-paste");
     let path = fixture.path().join("paste.txt");

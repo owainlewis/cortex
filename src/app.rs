@@ -319,7 +319,7 @@ fn run_directory_picker<W: io::Write>(
                     }
                 }
             }
-            Event::Paste(text) if !text.is_empty() => {
+            Event::Paste(_) => {
                 picker.handle_key(crate::input::Key::Unhandled);
                 render_directory_picker(&renderer, terminal.writer_mut(), &picker)?;
             }
@@ -389,11 +389,14 @@ impl AppState {
         buffer: &mut Buffer,
         view: &mut View,
     ) {
-        if text.is_empty() {
-            return;
-        }
         *keymap = Keymap::new();
         self.keycast = Some("Paste".to_string());
+        if text.is_empty() {
+            if self.status_kind == Some(StatusKind::Prefix) {
+                self.clear_status();
+            }
+            return;
+        }
         if self.dirty_quit_prompt {
             return;
         }
@@ -895,6 +898,20 @@ mod tests {
     };
 
     static TEST_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn empty_paste_cancels_the_editor_prefix_without_a_history_edit() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("empty-paste.txt", "");
+        let mut view = View::new();
+        app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
+        app.handle_paste("", &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.undo(), None);
+        assert_ne!(app.status_kind, Some(StatusKind::Prefix));
+        app.handle_key(Key::Char('a'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "a");
+    }
 
     #[test]
     fn save_key_sequence_saves_clears_dirty_state_and_shows_status() {
