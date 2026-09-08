@@ -19,6 +19,8 @@ Status meanings:
 Cortex is a macOS-only terminal code editor.
 It is built for the author's own workflow first.
 The goal is a small, fast editor with Emacs-style keys and a terminal-native agent workflow.
+Cortex keeps multiple buffers and one visible editor view.
+Use tmux or host-terminal panes for shells and coding agents.
 
 Cortex should stay simple.
 It should prefer one clear way to do a thing.
@@ -125,44 +127,40 @@ Tracking issues:
 
 Release notes should focus on editing safety, search, and buffer navigation.
 
-## v0.4 Windows
-
-Status: Planned.
-
-Goal: show and manage more than one working context.
-
-Likely includes:
-- Split layout tree.
-- Tabs.
-- Per-window view state.
-- Focus movement.
-- Modeline behavior for windows.
-
-Tracking issues:
-- [open] [#31 Add split window layout tree](https://github.com/owainlewis/cortex/issues/31)
-- [open] [#32 Add tabs over window layouts](https://github.com/owainlewis/cortex/issues/32)
-
-Release notes should focus on splits, tabs, and navigation.
-
-## v0.5 Agent Workflow
+## Daily coding delivery
 
 Status: In progress.
+Parent: [#160 Deliver a minimalist daily coding editor](https://github.com/owainlewis/cortex/issues/160).
+This extends the v0.3 editing work; individual ticket criteria define completion.
 
-Goal: support terminal-based coding agents without adding an AI platform.
+Delivery order:
+- [open] [#161 Align the product direction](https://github.com/owainlewis/cortex/issues/161)
+- [open] [#162 Correct TypeScript and fenced Markdown colours](https://github.com/owainlewis/cortex/issues/162)
+- [open] [#46 Add command registry and M-x](https://github.com/owainlewis/cortex/issues/46)
+- [open] [#164 Add typing and region indentation](https://github.com/owainlewis/cortex/issues/164)
+- [open] [#165 Handle literal terminal paste](https://github.com/owainlewis/cortex/issues/165)
+- [open] [#166 Group typing and deletion undo steps](https://github.com/owainlewis/cortex/issues/166)
+- [open] [#47 Add kill ring and yank-pop](https://github.com/owainlewis/cortex/issues/47)
+- [open] [#167 Add explicit macOS clipboard commands](https://github.com/owainlewis/cortex/issues/167)
+- [open] [#168 Add word, page, and line navigation](https://github.com/owainlewis/cortex/issues/168)
+- [open] [#29 Add incremental search](https://github.com/owainlewis/cortex/issues/29)
+- [open] [#169 Add fuzzy file and buffer navigation](https://github.com/owainlewis/cortex/issues/169)
+- [open] [#170 Add literal query-replace](https://github.com/owainlewis/cortex/issues/170)
+- [open] [#163 Keep deep-file highlighting responsive](https://github.com/owainlewis/cortex/issues/163)
+- [open] [#171 Refine the coding surface](https://github.com/owainlewis/cortex/issues/171)
+- [open] [#172 Verify the full coding workflow](https://github.com/owainlewis/cortex/issues/172)
 
-Shipped:
-- Manual file reload.
-- Dirty reload guard.
-- Disk changed indicator.
+Dependencies are recorded in each issue.
+The final workflow check must verify code, terminal behavior, performance, and documentation against every delivered task.
+Publishing a release is separate from this implementation batch.
 
-Planned:
-- Terminal pane as a window leaf.
+## External terminal workflow
 
-Tracking issues:
-- [closed] [#48 Add agent-safe file reload](https://github.com/owainlewis/cortex/issues/48)
-- [open] [#49 Add terminal pane as a window leaf](https://github.com/owainlewis/cortex/issues/49)
-
-Release notes should focus on reload safety and working with files changed by agents.
+Manual reload, the dirty reload guard, and the disk-changed indicator are implemented through [#48](https://github.com/owainlewis/cortex/issues/48).
+Idle disk-change notification and a verified tmux workflow are included in #172.
+Internal split layouts (#31), tabs (#32), and an embedded terminal pane (#49) are superseded by the external-terminal direction in #161.
+Their original tickets retain the design history and will be closed as not planned after that decision merges.
+Revisit internal views only for a demonstrated need to show the same unsaved buffer in two places.
 
 ## Release and Install
 

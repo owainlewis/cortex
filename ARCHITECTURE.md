@@ -18,7 +18,7 @@ Rendering, syntax highlighting, safe file persistence, terminal cleanup, and upd
 
 Opinion [high]: the end state should remain one binary crate and one owner of mutable UI state.
 This changes if Cortex adds another executable, a public library API, or remote collaboration.
-The main rule is that buffers store text and file state, windows store point and viewport state, and rendering only reads those models to produce terminal cells.
+The main rule is that buffers store text and file state, views store point and viewport state, and rendering only reads those models to produce terminal cells.
 
 ## 2. System context
 
@@ -244,230 +244,83 @@ Those properties still require the manual smoke checks described in `CONTRIBUTIN
 ## 10. Known limitations of the current architecture
 
 - `app.rs` is both coordinator and owner of several editor behaviors, so the command dispatcher is not yet the single command seam described by the product spec.
-- Each buffer has exactly one `View`, which cannot represent two windows showing the same buffer with independent point and scroll state.
 - The directory picker runs a nested event loop and has its own renderer instance rather than being another state in one application loop.
 - Mark and the single cut slot live in global application state instead of view state and a real editor-level kill ring.
 - Prompt behavior is shared, but command discovery, completion, incremental search, and fuzzy buffer or file selection are not implemented.
 - External disk changes are polled only for the active buffer when another event causes a render.
 - Syntax parsing and all filesystem operations run synchronously on the main thread.
-- The retained screen is a single full-terminal frame and does not yet compose multiple window rectangles or terminal grids.
 - Undo and redo history, open-buffer count, and clean Rope baselines have no explicit memory budget.
 - The update response parser extracts one JSON field without a JSON parser, although its failure is isolated to the explicit update-check command.
 
-## 11. Proposed end-state architecture
+## 11. Target architecture for daily editing
 
-### 11.1 Target shape
+The target follows the one-view product direction in [docs/prd.md](docs/prd.md) and delivery issue [#160](https://github.com/owainlewis/cortex/issues/160).
+This section is proposed behavior until the corresponding task is merged.
+Internal splits, tabs, terminal emulation, and a configuration subsystem are outside this batch.
+External terminal panes own shells, coding agents, and process sessions.
 
-Opinion [high]: Cortex should evolve by separating ownership inside the existing binary crate, not by adding crates, frameworks, or service layers.
-This changes if a second executable or a stable external Rust API becomes a product requirement.
+Opinion [high]: preserve the current single binary and separate responsibilities only where new behavior needs a clear owner.
+This changes if the product needs shared unsaved views or an external editor API.
+The existing buffer/view pairing is adequate for one visible buffer and does not need a speculative window store.
 
 ```mermaid
 flowchart TD
-    Sources["Keyboard, resize, signals, disk checks, PTY output"] --> Loop["Single application event loop"]
-    Loop --> Dispatch["Command registry and dispatcher"]
-    Dispatch --> State["EditorState"]
-    Dispatch --> Effects["Explicit platform effects"]
-    State --> Buffers["BufferStore"]
-    State --> Tabs["Tabs and layout trees"]
-    State --> Mini["Minibuffer and transient UI"]
-    Tabs --> FileWindow["File window and ViewState"]
-    Tabs --> TerminalWindow["Terminal window and TerminalId"]
-    FileWindow --> Buffers
-    Effects --> Files["Filesystem adapter"]
-    Effects --> Pty["PTY controllers"]
-    Effects --> Disk["Disk-change service"]
-    PtyRead["PTY reader workers"] -->|"ordered output events"| Loop
-    Pty --> PtyRead
-    State --> Terminals["TerminalStore"]
-    State --> Compose["Frame composer"]
-    Buffers --> Compose
-    Terminals --> Compose
-    Compose --> Grid["Terminal cell grid"]
-    Grid --> Paint["Diff renderer"]
-    Paint --> Host["macOS terminal"]
+    Input["Keys, paste, resize, signals, disk timer"] --> Loop["Application loop"]
+    Loop --> Commands["Static command registry"]
+    Commands --> Editor["Buffer list and per-buffer View"]
+    Commands --> Prompt["Prompt, completion, search, kill ring"]
+    Commands --> Effects["File and explicit clipboard operations"]
+    Editor --> Syntax["Revision-aware syntax cache"]
+    Editor --> Frame["Frame composition"]
+    Prompt --> Frame
+    Syntax --> Frame
+    Frame --> Diff["Retained cell renderer"]
+    Diff --> Terminal["macOS terminal"]
 ```
 
-The target keeps all editor mutations on the main thread.
-Optional future file watchers and PTY readers may produce typed events, but they do not mutate buffers, windows, command state, or render state.
-The event loop applies one event at a time, runs explicit effects, and renders only when visible state is invalidated.
+### Ownership and interaction
 
-### 11.2 Target component responsibilities
+The application loop orders user input, disk checks, command outcomes, and redraws.
+Only that loop mutates editor state.
+Dedicated prompt/search state owns text, selection, match ranges, cancellation origins, and completion lifecycle.
+The command registry owns names and discovery metadata while command handlers perform the same operations reached through keybindings.
+The editor retains unique file buffers, an active buffer, and each buffer's view state.
+Closing a dirty buffer requires confirmation and never discards another buffer's text.
 
-| Component | Owns | Depends on | Does not own |
-| --- | --- | --- | --- |
-| Application event loop | Event ordering, dispatch, effect execution, redraw scheduling, startup, and shutdown | Platform event sources, command registry, editor state, and renderer | Buffer internals, layout policy, or terminal emulation |
-| `EditorState` | Buffer store, tabs, focused window, minibuffer session, kill ring, last-search state, and transient messages | Stable process-local IDs and component APIs | Filesystem syscalls, terminal output, or syntax parsing |
-| `BufferStore` | Unique `BufferId` allocation, normalized path identity, buffer lifetime, and lookup | Buffer and filesystem identity adapter | Point, scroll, window focus, or layout |
-| `Buffer` | Rope text, file path and baseline, dirty state, revisions, history, changed lines, save and reload policy | Text helpers and filesystem effect | Windows, prompts, commands, or render cells |
-| Tabs and layout | Ordered tabs, one binary split tree per tab, focus, split ratios, and leaf rectangles | `WindowId`, `BufferId`, `TerminalId`, and terminal size | Buffer text or terminal process I/O |
-| File window | `ViewState` for point, mark, scroll, and preferred column plus a `BufferId` | BufferStore queries | Buffer ownership or global clipboard history |
-| Terminal window | Terminal view options and a `TerminalId` | TerminalStore | Shell process ownership, terminal grid, or file buffers |
-| Command registry | Stable command names, metadata, handlers, and discovery | `CommandContext` and explicit effects | Key sequences, UI layout, or dynamic code loading |
-| Keymap | Chord trie from normalized keys to registered command names | Command registry validation | Command behavior or pending prompt content |
-| Minibuffer | Prompt text, completion provider, selection, validation, and submit or cancel lifecycle | Command, file, and buffer completion sources | Durable editor data or nested event loops |
-| Disk-change service | Scheduling disk-baseline checks and coalescing optional notices by `BufferId` | Current polling and an optional later macOS notification adapter | Reload decisions or buffer mutation |
-| `TerminalStore` | Main-thread terminal parsers, grids, scrollback, exit status, and `TerminalId` lookup | Ordered PTY events | Child process handles, editor layout, or host-terminal output |
-| PTY controller | Main-thread child handle, non-blocking input, resize, close, termination, process reaping, and reader cancellation | macOS PTY APIs and one reader worker | Terminal parsing, editor state, layout, or host-terminal escape output |
-| PTY reader worker | Ordered output reads and bounded event delivery for one pane | A duplicated read descriptor, cancellation, and the application event sender | Input, resize, child lifecycle, terminal parsing, or editor state |
-| Syntax service | Buffer-revision keyed highlight state and bounded visible-range queries | Buffer snapshots and Tree-sitter | Buffer ownership, theme, or terminal output |
-| Frame composer | Layout traversal, file and terminal surfaces, modelines, minibuffer, tab bar, dividers, cursor, and styles | Read-only editor state, syntax spans, and terminal-grid snapshots | Terminal I/O or retained previous frame |
-| Diff renderer | Last flushed host-terminal frame and minimal changed-cell output | Composed cell grid and terminal writer | Editor state, syntax policy, PTY parsing, or layout decisions |
-| Platform lifecycle | Raw mode, alternate screen, signal handling, host-terminal disconnect, and final cleanup | macOS and Crossterm | Product commands or editor state |
-| Config loader | One static typed configuration loaded at startup | TOML and registered command names | Scripting, plugins, live code, or network access |
+Buffer history gains explicit edit boundaries and grouped typing without losing save-baseline or changed-line metadata.
+The retained undo/redo text payload has a 16 MiB per-buffer budget with whole-group eviction; the newest group is retained even when it exceeds that budget.
+Paste, indentation, kills, yanks, and replacement remain deliberate edits.
+Clipboard access is isolated behind a small macOS adapter and occurs only on explicit commands.
+Project-file discovery respects ignores and does not follow directory symlinks; its work and candidate set are bounded and cancellable.
 
-The module layout may remain flat while these ownership boundaries are small.
-Files should split only when one module has more than one reason to change.
+Syntax state remains outside the text buffer and is keyed by stable buffer identity and revision.
+Incremental or scheduled parsing must preserve multiline context and reject obsolete results.
+A measured algorithm is chosen in #163; using plain text to conceal slow ordinary supported-language parsing does not satisfy that task.
+Frame composition reads text, syntax, selection, search, completion, and status state to produce one terminal cell grid.
+Diff painting remains independent of file and command semantics.
 
-### 11.3 Target identity and data model
+### Failure and lifecycle
 
-`BufferId`, `WindowId`, `TabId`, and `TerminalId` are opaque process-local identifiers allocated by their owning stores.
-They are never derived from vector positions and are never persisted.
-Removing one object cannot make a stale ID refer to another object.
+Invalid commands and prompt cancellation leave buffer text intact.
+Clipboard failures show an error without modifying text.
+Directory errors preserve the current editor and allow a new path or cancellation.
+Disk polling checks metadata while idle and indicates external changes; it never reloads unsaved text automatically.
+A stale completion or syntax result cannot change a different buffer or revision.
+Terminal paste mode joins raw mode, alternate screen, and cursor state in reverse-order cleanup, including partial startup.
 
-`BufferStore` continues to use normalized macOS path identity to avoid duplicate file buffers.
-The user-visible path and the stable save target remain distinct from that deduplication key.
-A file window stores a `BufferId` and its own `ViewState`, so zero, one, or many windows may show one buffer.
-Closing the last window does not silently discard a dirty buffer.
+The current atomic-save, Unicode, path-identity, retained-frame, and dirty-buffer invariants remain unchanged.
+No terminal child processes, layout tree, or background agent protocol are introduced.
+Any parsing or discovery worker must have bounded queues, cancellation, and shutdown handling defined in its task plan.
 
-A layout is a binary tree.
-Internal nodes own split direction and ratio.
-Leaves own a stable `WindowId` and one `WindowContent` value, either `File(BufferId)` or `Terminal(TerminalId)`.
-A tab owns one layout tree and one focused leaf.
+## 12. Delivery and acceptance
 
-The command registry uses stable kebab-case names such as `save-buffer` and `split-window-right`.
-Built-in commands register at startup.
-Configuration may bind keys only to registered names, and an unknown name makes an explicitly present config invalid.
-Missing config uses curated defaults, while invalid config reports its path and field instead of silently changing behavior.
+The ordered implementation tasks and acceptance criteria are maintained in [#160](https://github.com/owainlewis/cortex/issues/160) and [docs/roadmap.md](docs/roadmap.md).
+Keep current-implementation sections above accurate as each task lands.
+Final proof covers typing, literal paste, grouped undo, clipboard, kill ring, file and buffer navigation, incremental search, replacement, syntax, save/reload, and quit in one release-mode session.
+Repeat the session inside an isolated tmux instance and verify resize, truecolor, and shell restoration.
+The required formatting, Clippy, complete test, release-build, and performance checks must have recorded results.
 
-### 11.4 Target command and event flow
-
-1. The event multiplexer yields a normalized `AppEvent` from host input, resize, signal, disk-check result, optional file notice, PTY output, or child exit.
-2. The application loop applies PTY bytes to `TerminalStore`, applies disk results to buffer state, and resolves user input through the active context and keymap.
-3. Every user action becomes a registered command name before behavior executes.
-4. The dispatcher gives the handler a `CommandContext` containing only the editor state and explicit capabilities the command needs.
-5. A handler performs a bounded state transition and returns a result with status, requested effects, and redraw scope.
-6. The application executes effects such as save, reload, open, spawn PTY, write PTY input, or close pane.
-7. Effect results return as typed events and are applied by the same loop.
-8. If visible state changed, the frame composer lays out the active tab and writes every surface into one terminal-sized cell grid.
-9. The diff renderer compares that grid with the last flushed grid and emits only changed runs before placing the host cursor.
-
-Prompt input, incremental search, file finding, buffer switching, and `M-x` are minibuffer sessions within this loop.
-They do not create nested loops.
-An active minibuffer receives input first, apart from fixed cancel and shutdown handling.
-A focused file window resolves editor keymaps normally.
-A focused terminal window reserves exact global editor chords needed to move focus or manage panes, replays an unmatched pending prefix to the PTY in original order, and forwards all other keys directly.
-
-### 11.5 Target file and agent workflow
-
-The filesystem remains the only integration boundary between Cortex and a coding agent.
-There is no AI client, editor protocol, MCP server, or agent-specific state in the v1 architecture.
-
-1. A terminal command creates a terminal leaf and asks its PTY controller to spawn the configured shell in the relevant working directory.
-2. A reader worker sends ordered output chunks, and the main loop parses them into the pane's `TerminalStore` grid before rendering.
-3. PTY escape sequences are never forwarded directly to the host terminal.
-4. Bounded polling checks the disk baselines of open buffers, and an optional later watcher may request an immediate check for a matching `BufferId`.
-5. The main loop applies the current disk stamp and marks affected file windows with `[disk-changed]`.
-6. Manual reload remains the default reconciliation action.
-7. Reload never replaces dirty text without an explicit future conflict workflow.
-8. Resizing a terminal leaf resizes its grid and sends the corresponding PTY size change.
-9. Closing a terminal leaf cancels its reader, closes its output receiver and PTY descriptors, terminates the child after a bounded grace period, reaps it, joins the reader, and then removes the terminal model.
-10. Application shutdown stops new events, closes terminal panes, joins background workers, flushes the final host-terminal state, and then restores the shell.
-
-PTY output delivery must use a bounded queue.
-When the queue is full, only the reader worker blocks and lets the operating system PTY provide backpressure rather than dropping, merging, or reordering terminal bytes.
-Input, resize, cancellation, child termination, and reaping stay on the independent controller path.
-Shutdown closes the output receiver and PTY descriptors before joining the reader, which wakes blocked reads and sends without waiting for queue capacity.
-Optional file-change notices may be coalesced by `BufferId` because the consumer re-reads current filesystem state instead of replaying file contents.
-
-### 11.6 Target rendering model
-
-Frame composition and terminal painting become separate steps.
-The composer receives read-only state and produces a complete terminal-sized cell grid plus one host cursor position.
-Each surface paints only inside its assigned rectangle.
-The diff renderer knows nothing about buffers, panes, tabs, syntax, modelines, or prompts.
-
-File surfaces reuse the current grapheme-safe clipping, gutter, change markers, selection, syntax, and modeline behavior.
-Terminal surfaces copy already parsed cells from the terminal runtime into their rectangle.
-Dividers, a restrained tab bar, and the minibuffer are ordinary cell-grid regions.
-One retained host frame allows changes in any surface to be diffed together without a second rendering model.
-
-Syntax caches remain keyed by `BufferId` and text revision, not by window.
-Several windows can therefore request different visible ranges from one buffer without moving syntax state into the buffer.
-Theme selection maps semantic styles to colors during composition and never changes buffer or terminal content.
-
-### 11.7 Target invariants
-
-1. Exactly one main-thread event loop mutates editor, window, minibuffer, command, and render state.
-2. Buffers never own point, mark, scroll, focus, or window geometry.
-3. Windows never own file text or durable file identity.
-4. Many file windows may reference one buffer, and their views remain independent.
-5. Every keybinding and `M-x` action resolves to one registered command name.
-6. The minibuffer, picker, search, and command palette never start nested application loops.
-7. Background producers communicate through typed bounded channels and never hold mutable editor references.
-8. An unmatched global prefix in a terminal window reaches the PTY without loss or reordering.
-9. No queue, cache, retained grid, or terminal scrollback may grow without an explicit budget and deterministic limit behavior.
-10. File saves preserve the existing atomicity, disk-race checks, metadata rules, symlink rules, and recovery reporting.
-11. Automatic disk detection never overwrites dirty buffer text.
-12. File content cannot inject host-terminal control sequences.
-13. PTY control sequences affect only the pane terminal model and cannot bypass frame composition.
-14. Layout changes partition the available rectangle without allowing a leaf to draw outside its bounds.
-15. Renderer failure leaves the last flushed frame as the comparison baseline and still permits terminal cleanup.
-16. Shutdown either reaps each spawned child or reports a bounded failure before restoring the host terminal.
-17. Missing configuration means defaults, while invalid present configuration fails with a precise diagnostic.
-18. LSP, plugins, scripting, cross-platform shims, and AI protocols remain outside the v1 process.
-
-### 11.8 Target failure and resource policy
-
-File I/O failures remain visible command failures and do not exit the editor.
-Save races fail closed with the current recovery guarantees.
-Optional file-watcher loss marks watcher status unhealthy and falls back to bounded polling and manual reload.
-One failed terminal pane records an exit status in that leaf and does not stop other panes or file editing.
-
-The renderer retains a bounded host frame.
-Each terminal pane has bounded scrollback and bounded inter-thread queues.
-Syntax caches have bounded documents, checkpoints, line lengths, and visible windows.
-Command completion and file discovery process bounded result sets and support cancellation when their work moves off the main thread.
-Undo history must gain an explicit byte budget before the end state is complete, with eviction of the oldest complete edits rather than partial edit records.
-
-Opinion [medium]: synchronous local save and reload operations should remain on the main thread until measurement shows they harm interactive latency.
-This changes if large-file traces show user-visible stalls, at which point immutable snapshots and typed completion events should move only those effects off-thread.
-Speculative background work must not compete with key handling or painting.
-
-## 12. Evolution from current to target
-
-The target can be reached without a rewrite.
-Each stage creates a seam required by the next roadmap phase.
-
-1. Finish v0.3 by moving every built-in action into an introspectable command registry, replacing the single cut slot with an editor-level kill ring, and expressing incremental search as a minibuffer session.
-2. Replace the current `BufferEntry { buffer, view }` pairing with a `BufferStore` plus stable IDs, while preserving the existing single visible file window.
-3. Introduce `WindowId`, per-file-window `ViewState`, the binary layout tree, focus routing, and rectangle-based frame composition for v0.4 splits.
-4. Add tabs as owners of layout trees without changing buffers or render primitives.
-5. Convert the directory picker and all prompt flows to states in the main loop, removing the nested picker loop.
-6. Add typed background event delivery for asynchronous pane output without changing the current disk polling and manual reload policy.
-7. Add a terminal leaf, main-thread PTY controller, reader worker, bounded output delivery, resize, exit, and shutdown behavior for v0.5.
-8. Add optional filesystem notifications after v1 only if bounded polling is not responsive enough, using notices only to trigger the same disk-baseline checks.
-9. Add the static config loader only when the roadmap schedules configuration, using registered command names and curated defaults.
-10. Keep performance work continuous by measuring key-to-frame work, limiting caches and queues, and retaining the current large-file checks.
-
-No stage requires LSP, plugins, scripting, a server process, a second renderer, or an AI protocol.
-
-## 13. End-state acceptance criteria
-
-- Two windows can show the same buffer with different point and scroll state.
-- Closing or switching windows never duplicates, loses, or silently discards a buffer.
-- All default keybindings and `M-x` entries resolve through the same command registry.
-- File finding, buffer switching, command execution, and incremental search run as cancelable minibuffer sessions in the main event loop.
-- A split tree and tabs produce deterministic leaf rectangles at tiny, normal, and resized terminal dimensions.
-- File, terminal, divider, tab, modeline, and minibuffer cells compose into one retained frame.
-- Ordinary changes repaint only changed host-terminal cells.
-- A terminal pane can run an interactive shell, preserve unmatched input prefixes, handle resize, preserve ordered output under backpressure, report exit, and shut down without leaving a child process.
-- Agent-written file changes mark every matching open buffer without overwriting dirty text.
-- Atomic save, metadata preservation, symlink behavior, disk-race refusal, Unicode editing, syntax highlighting, and terminal cleanup retain their current guarantees.
-- Explicit budgets and deterministic limit behavior exist for retained frames, syntax caches, terminal scrollback, background queues, completion results, and undo history.
-- A valid empty configuration preserves curated defaults, and an invalid explicit configuration fails with a precise error.
-- CI and PTY integration tests cover each invariant that crosses the filesystem, process, or host-terminal boundary.
-
-## 14. Source map
+## 13. Source map
 
 The current entry point and orchestration are defined in [`src/main.rs`](src/main.rs), [`src/cli.rs`](src/cli.rs), and [`src/app.rs`](src/app.rs).
 Buffer ownership, file safety, history, disk baselines, and text revisions are defined in [`src/buffer.rs`](src/buffer.rs).
