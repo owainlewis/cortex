@@ -13,6 +13,7 @@ mod kill_ring;
 mod performance;
 mod picker;
 pub mod renderer;
+mod search;
 mod signals;
 mod terminal;
 mod text;

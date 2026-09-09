@@ -106,7 +106,7 @@ The picker can expand and collapse directories.
 The current editor supports multiple file buffers in the terminal alternate screen.
 It uses raw terminal mode while running and should restore the shell after exit.
 It shows file text, cursor position, dirty state, save errors, and short status messages in a modeline.
-It includes shared prompts for commands and buffer navigation, a directory picker, forward search, mark and cut/yank editing, undo and redo, visual polish, and syntax highlighting for supported file types.
+It includes shared prompts for commands and buffer navigation, a directory picker, incremental forward/reverse search, mark and cut/yank editing, undo and redo, visual polish, and syntax highlighting for supported file types.
 
 ## Editor Keybindings
 
@@ -126,7 +126,7 @@ It includes shared prompts for commands and buffer navigation, a directory picke
 | `M-<`, `M->` | Move to buffer start or end |
 | `C-v` / PageDown, `M-v` / PageUp | Move forward or backward by one page with overlap |
 | `M-d`, `M-Backspace` | Cut forward or backward by word |
-| `C-s` | Repeat the previous search |
+| `C-s`, `C-r` | Start or repeat forward/reverse incremental search |
 | `C-Space` | Set the mark |
 | `C-w` | Cut the active region |
 | `C-k` | Cut to the end of the line |
@@ -160,7 +160,7 @@ Shift-Tab without a region outdents the current line and preserves any remaining
 Terminal paste uses bracketed paste mode.
 Pasted text, including tabs and line endings, is inserted literally as one undo step and clears the active selection.
 Paste does not run keybindings or add automatic indentation.
-In command, file, and buffer prompts, line breaks and tabs become spaces; CRLF becomes one space and other control characters are removed.
+In command, file, buffer, and search prompts, line breaks and tabs become spaces; CRLF becomes one space and other control characters are removed.
 Pasting does not submit a prompt or confirm a dirty quit.
 Pasted text is ignored in the directory picker.
 
@@ -179,7 +179,8 @@ Escape cancels the prompt; unknown names and invalid arguments report an error w
 | `find-file` | Prompt for a file or directory relative to the active file | |
 | `switch-buffer` | Prompt for an open buffer | |
 | `open-file <path>` | Open a file relative to the working directory | `/open <path>` |
-| `search-forward <text>` | Search forward for literal text | `/search <text>` |
+| `search-forward [text]` | Start incremental search, or find supplied literal text | `/search [text]` |
+| `search-backward [text]` | Start reverse incremental search, or find supplied literal text | |
 | `repeat-search` | Repeat the previous search | `/next` |
 | `undo`, `redo` | Undo or redo an edit | `/undo`, `/redo` |
 | `quit` | Quit with the dirty-buffer guard | `/quit` |
@@ -213,6 +214,16 @@ Word movement skips separators and reaches the next word end or previous word be
 Word kills use the same boundaries.
 Pages overlap by two lines, move at least one line, and retain the preferred display column.
 `goto-line` rejects invalid numbers without moving point and clamps numbers beyond the file to its last line.
+
+C-s starts forward incremental search and C-r starts reverse search.
+Typing updates the query and highlights the current match without editing text.
+Repeat either key to advance in its direction; overlapping matches are included and wrapping is shown in the prompt.
+Backspace removes one query grapheme.
+Enter accepts the location; Escape or C-g restores the original point and scroll.
+A failed query shows `[no match]` and keeps the last useful point.
+Other editing or navigation keys accept the search and run their command.
+Repeating with an empty query recalls the previous accepted or named search, if one exists.
+`search-forward <text>` and `search-backward <text>` find supplied literal text immediately; `repeat-search` or `/next` repeats forward.
 
 ## Directory Picker Keybindings
 
@@ -266,8 +277,6 @@ See [docs/release.md](docs/release.md) for the release checklist.
 Redo is available through `M-x redo` and has no dedicated keybinding.
 Cortex shows one active buffer at a time.
 The switch-buffer prompt requires an exact path or a unique file name and does not offer completion yet.
-Search is forward-only through `search-forward <text>` or `/search <text>`, with `C-s` or `/next` repeating the last search.
-Incremental and reverse search are not implemented yet.
 The directory picker can expand directories, but it is still a minimal picker.
 The slash command `/open <path>` opens files only, not directories.
 Internal splits, tabs, and an embedded terminal are deferred in favour of external terminal panes.

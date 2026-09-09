@@ -14,6 +14,7 @@ pub enum Command {
     OpenCommandLine,
     OpenPath,
     Search,
+    SearchBackward,
     Help,
     ForceQuit,
     KillLine,
@@ -145,6 +146,7 @@ pub(crate) fn dispatch_at(
         | Command::KillRegion
         | Command::OpenPath
         | Command::Search
+        | Command::SearchBackward
         | Command::Help
         | Command::ForceQuit
         | Command::OpenCommandLine
