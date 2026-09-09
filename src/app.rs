@@ -8,6 +8,7 @@ use crate::{
     kill_ring::KillRing,
     picker::{DirectoryPicker, DirectoryPickerAction},
     renderer::{Renderer, StatusKind, TerminalSize},
+    search::{Direction, IncrementalSearch},
     signals::TerminationSignals,
     terminal::TerminalSession,
     text,
@@ -37,6 +38,7 @@ struct AppState {
     prompt_kind: Option<PromptKind>,
     keycast: Option<String>,
     last_search: Option<String>,
+    search: Option<IncrementalSearch>,
     mark: Option<usize>,
     kill_ring: KillRing,
     clipboard: Clipboard,
@@ -381,7 +383,17 @@ impl AppState {
             return self.handle_dirty_quit_key(key);
         }
 
-        if self.command_line.is_some() {
+        if self.search.is_some()
+            && matches!(
+                key,
+                crate::input::Key::Escape | crate::input::Key::Ctrl('g')
+            )
+        {
+            *keymap = Keymap::new();
+            return self.handle_search_key(key, keymap, buffer, view);
+        }
+
+        if self.command_line.is_some() || self.search.is_some() {
             if self.status_kind == Some(StatusKind::Error) {
                 self.clear_status();
             }
@@ -394,6 +406,9 @@ impl AppState {
                     return self.paste_clipboard(buffer, view);
                 }
                 return AppAction::Continue;
+            }
+            if self.search.is_some() {
+                return self.handle_search_key(key, keymap, buffer, view);
             }
             return self.handle_command_line_key(key, buffer, view);
         }
@@ -433,6 +448,14 @@ impl AppState {
             return;
         }
         if self.dirty_quit_prompt {
+            return;
+        }
+        if let Some(search) = self.search.as_mut() {
+            search
+                .query
+                .push_str(&crate::input::single_line_paste(text));
+            search.refresh(buffer, view);
+            self.clear_status();
             return;
         }
         if let Some(input) = self.command_line.as_mut() {
@@ -626,7 +649,7 @@ impl AppState {
         match self.clipboard.paste() {
             Ok(text) => {
                 self.handle_paste(&text, &mut Keymap::new(), buffer, view);
-                if self.command_line.is_none() {
+                if self.command_line.is_none() && self.search.is_none() {
                     self.set_status(
                         if text.is_empty() {
                             "Clipboard is empty"
@@ -779,7 +802,20 @@ impl AppState {
             Command::RepeatSearch => self.repeat_search(buffer, view),
             Command::OpenFile => self.start_find_file(),
             Command::SwitchBuffer => self.start_switch_buffer(),
-            Command::Search => self.run_search_command(argument, buffer, view),
+            Command::Search | Command::SearchBackward => {
+                let direction = if command == Command::Search {
+                    Direction::Forward
+                } else {
+                    Direction::Backward
+                };
+                if argument.is_empty() {
+                    self.search = Some(IncrementalSearch::new(direction, view));
+                    self.clear_status();
+                    AppAction::Continue
+                } else {
+                    self.run_search_command(argument, direction, buffer, view)
+                }
+            }
             Command::OpenPath => self.run_open_command(argument),
             Command::ForceQuit => AppAction::ForceQuit,
             Command::Help => {
@@ -793,14 +829,64 @@ impl AppState {
         }
     }
 
-    fn run_search_command(&mut self, query: &str, buffer: &Buffer, view: &mut View) -> AppAction {
-        if query.is_empty() {
-            self.set_status("Usage: /search <text>", StatusKind::Error);
-            return AppAction::Continue;
+    fn handle_search_key(
+        &mut self,
+        key: crate::input::Key,
+        keymap: &mut Keymap,
+        buffer: &mut Buffer,
+        view: &mut View,
+    ) -> AppAction {
+        use crate::input::Key;
+        let search = self.search.as_mut().expect("active search");
+        match key {
+            Key::Char(ch) => {
+                search.query.push(ch);
+                search.refresh(buffer, view);
+            }
+            Key::Backspace => {
+                text::pop_grapheme(&mut search.query);
+                search.refresh(buffer, view);
+            }
+            Key::Ctrl('s') | Key::Ctrl('r') => {
+                let direction = if key == Key::Ctrl('s') {
+                    Direction::Forward
+                } else {
+                    Direction::Backward
+                };
+                search.repeat(direction, self.last_search.as_deref(), buffer, view);
+            }
+            Key::Escape | Key::Ctrl('g') => {
+                *view = self.search.take().unwrap().original_view;
+                self.set_status("Search canceled", StatusKind::Info);
+                return AppAction::Continue;
+            }
+            Key::Enter => self.accept_search(),
+            _ => {
+                self.accept_search();
+                return self.handle_key(key, keymap, buffer, view);
+            }
         }
+        self.clear_status();
+        AppAction::Continue
+    }
 
+    fn accept_search(&mut self) {
+        if let Some(search) = self.search.take() {
+            if !search.query.is_empty() {
+                self.last_search = Some(search.query);
+            }
+        }
+    }
+
+    fn run_search_command(
+        &mut self,
+        query: &str,
+        direction: Direction,
+        buffer: &Buffer,
+        view: &mut View,
+    ) -> AppAction {
         self.last_search = Some(query.to_string());
-        self.find_search_match(buffer, view, query, view.point())
+        self.find_search_match(buffer, view, query, view.point(), direction)
     }
 
     fn repeat_search(&mut self, buffer: &Buffer, view: &mut View) -> AppAction {
@@ -810,7 +896,7 @@ impl AppState {
         };
 
         let start = buffer.next_grapheme_boundary(view.point());
-        self.find_search_match(buffer, view, &query, start)
+        self.find_search_match(buffer, view, &query, start, Direction::Forward)
     }
 
     fn find_search_match(
@@ -819,10 +905,11 @@ impl AppState {
         view: &mut View,
         query: &str,
         start: usize,
+        direction: Direction,
     ) -> AppAction {
-        match buffer.find_forward(query, start) {
-            Some(point) => {
-                view.set_point(point, buffer);
+        match buffer.find_literal(query, start, direction) {
+            Some(found) => {
+                view.set_point(found.range.start, buffer);
                 self.set_status(format!("Found: {query}"), StatusKind::Success);
             }
             None => {
@@ -925,11 +1012,15 @@ impl AppState {
     }
 
     fn prompt_text(&self) -> Option<String> {
-        let input = self.command_line.as_ref()?;
-        let prompt = match self.prompt_kind.unwrap_or(PromptKind::Command) {
-            PromptKind::Command => format!("M-x {input}"),
-            PromptKind::FindFile => format!("Find file: {input}"),
-            PromptKind::SwitchBuffer => format!("Switch buffer: {input}"),
+        let prompt = if let Some(search) = &self.search {
+            search.prompt()
+        } else {
+            let input = self.command_line.as_ref()?;
+            match self.prompt_kind.unwrap_or(PromptKind::Command) {
+                PromptKind::Command => format!("M-x {input}"),
+                PromptKind::FindFile => format!("Find file: {input}"),
+                PromptKind::SwitchBuffer => format!("Switch buffer: {input}"),
+            }
         };
         Some(if self.status_kind == Some(StatusKind::Error) {
             format!(
@@ -991,6 +1082,11 @@ fn render<W: io::Write>(
         app_state.active_region(buffer, view),
         prompt_text.as_deref(),
         app_state.keycast.as_deref(),
+        app_state
+            .search
+            .as_ref()
+            .and_then(|search| search.active_match.as_ref())
+            .map(|found| found.range.clone()),
     )
 }
 
@@ -2419,6 +2515,187 @@ mod tests {
     }
 
     #[test]
+    fn incremental_search_updates_repeats_reverses_and_recovers_without_editing() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("search.txt", "alpha beta alpha café");
+        let mut view = View::new();
+        view.set_point(6, &buffer);
+        let revision = buffer.revision();
+        app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.prompt_text().as_deref(), Some("I-search: "));
+        for ch in "alpha".chars() {
+            app.handle_key(Key::Char(ch), &mut keymap, &mut buffer, &mut view);
+        }
+        assert_eq!(view.point(), 11);
+        assert_eq!(
+            app.search
+                .as_ref()
+                .unwrap()
+                .active_match
+                .as_ref()
+                .unwrap()
+                .range,
+            11..16
+        );
+        app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(view.point(), 0);
+        assert_eq!(
+            app.prompt_text().as_deref(),
+            Some("I-search [wrapped]: alpha")
+        );
+        app.handle_key(Key::Ctrl('r'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(view.point(), 11);
+        assert_eq!(
+            app.prompt_text().as_deref(),
+            Some("I-search backward [wrapped]: alpha")
+        );
+        app.handle_key(Key::Char('z'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(view.point(), 11);
+        assert_eq!(
+            app.prompt_text().as_deref(),
+            Some("I-search backward [no match]: alphaz")
+        );
+        assert!(app.search.as_ref().unwrap().active_match.is_none());
+        app.handle_key(Key::Backspace, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(view.point(), 11);
+        assert!(app.search.as_ref().unwrap().active_match.is_some());
+        app.handle_key(Key::Enter, &mut keymap, &mut buffer, &mut view);
+        assert!(app.search.is_none());
+        assert_eq!(app.last_search.as_deref(), Some("alpha"));
+        assert_eq!(buffer.text(), "alpha beta alpha café");
+        assert_eq!(buffer.revision(), revision);
+        assert!(!buffer.is_dirty());
+        assert_eq!(buffer.undo(), None);
+    }
+
+    #[test]
+    fn incremental_search_cancel_restores_the_full_view_and_mark() {
+        let value = format!(
+            "needle\n{}",
+            format!("{} café\n", "x".repeat(200)).repeat(80)
+        );
+        for cancel in [Key::Escape, Key::Ctrl('g')] {
+            let mut app = AppState::default();
+            let mut keymap = Keymap::new();
+            let mut buffer = buffer_with_text("search.txt", &value);
+            let mut view = View::new();
+            view.set_point(buffer.line_start_char(50) + 180, &buffer);
+            view.ensure_point_visible(&buffer, 10, 30);
+            let original = view.clone();
+            assert!(view.scroll_line() > 0 && view.scroll_column() > 0);
+            app.mark = Some(view.point() - 3);
+            let mark = app.mark;
+            app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+            app.handle_paste("needle", &mut keymap, &mut buffer, &mut view);
+            view.ensure_point_visible(&buffer, 10, 30);
+            assert_eq!(view.point(), 0);
+            app.handle_key(cancel, &mut keymap, &mut buffer, &mut view);
+            assert_eq!(view, original);
+            assert_eq!(app.mark, mark);
+            assert!(app.last_search.is_none());
+            assert!(app.search.is_none());
+        }
+    }
+
+    #[test]
+    fn incremental_search_handles_overlaps_empty_queries_and_grapheme_backspace() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("search.txt", "aaaa e\u{301}👨‍💻");
+        let mut view = View::new();
+        app.handle_key(Key::Ctrl('r'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.prompt_text().as_deref(), Some("I-search backward: "));
+        app.handle_key(Key::Ctrl('r'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(view.point(), 0);
+        app.handle_paste("aa", &mut keymap, &mut buffer, &mut view);
+        for expected in [2, 1, 0] {
+            app.handle_key(Key::Ctrl('r'), &mut keymap, &mut buffer, &mut view);
+            assert_eq!(view.point(), expected);
+        }
+        app.handle_key(Key::Enter, &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.search.as_ref().unwrap().query, "aa");
+        for expected in [1, 2, 0] {
+            app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+            assert_eq!(view.point(), expected);
+        }
+        app.handle_key(Key::Escape, &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+        app.handle_paste("e\u{301}👨‍💻", &mut keymap, &mut buffer, &mut view);
+        assert_eq!(view.point(), 5);
+        app.handle_key(Key::Backspace, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.search.as_ref().unwrap().query, "e\u{301}");
+        app.handle_key(Key::Backspace, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.search.as_ref().unwrap().query, "");
+        assert_eq!(view.point(), 0);
+    }
+
+    #[test]
+    fn incremental_search_paste_and_command_exit_keep_edit_history_separate() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("search.txt", "foo bar next");
+        let mut view = View::new();
+        app.handle_key(Key::Char('X'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+        app.handle_paste("foo\r\nbar\x1b", &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.search.as_ref().unwrap().query, "foo bar");
+        assert_eq!(buffer.text(), "Xfoo bar next");
+        app.handle_key(Key::Meta('f'), &mut keymap, &mut buffer, &mut view);
+        assert!(app.search.is_none());
+        assert_eq!(view.point(), 4);
+        assert_eq!(app.last_search.as_deref(), Some("foo bar"));
+        assert_eq!(buffer.undo(), Some(0));
+        assert_eq!(buffer.text(), "foo bar next");
+        assert_eq!(buffer.undo(), None);
+    }
+
+    #[test]
+    fn incremental_search_cancel_clears_a_pending_clipboard_prefix() {
+        for cancel in [Key::Escape, Key::Ctrl('g')] {
+            let mut app = AppState::default();
+            let mut keymap = Keymap::new();
+            let mut buffer = buffer_with_text("search.txt", "before needle after");
+            let mut view = View::new();
+            view.move_to_line_end(&buffer);
+            view.ensure_point_visible(&buffer, 1, 5);
+            let original = view.clone();
+            app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+            app.handle_paste("needle", &mut keymap, &mut buffer, &mut view);
+            view.ensure_point_visible(&buffer, 1, 5);
+            app.handle_key(Key::Ctrl('c'), &mut keymap, &mut buffer, &mut view);
+            assert!(keymap.clipboard_prefix_pending());
+            app.handle_key(cancel, &mut keymap, &mut buffer, &mut view);
+            assert!(app.search.is_none());
+            assert_eq!(view, original);
+            assert!(!keymap.clipboard_prefix_pending());
+            app.handle_key(Key::Char('X'), &mut keymap, &mut buffer, &mut view);
+            assert_eq!(buffer.text(), "before needle afterX");
+        }
+    }
+
+    #[test]
+    fn incremental_search_accepts_clipboard_paste_without_submission() {
+        let dir = test_dir("search-clipboard");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("clipboard-data"), "café\r\ncode").unwrap();
+        let mut app = app_with_test_clipboard(&dir);
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("search.txt", "a café code b");
+        let mut view = View::new();
+        app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('c'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('v'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.prompt_text().as_deref(), Some("I-search: café code"));
+        assert_eq!(view.point(), 2);
+        assert_eq!(buffer.text(), "a café code b");
+        assert!(!buffer.is_dirty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn slash_search_moves_point_to_next_match_and_remembers_query() {
         let mut app = AppState::default();
         let mut keymap = Keymap::new();
@@ -2463,7 +2740,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_repeats_the_previous_search_and_wraps() {
+    fn named_repeat_search_repeats_the_previous_search_and_wraps() {
         let mut app = AppState::default();
         let mut keymap = Keymap::new();
         let mut buffer = buffer_with_text("notes.txt", "alpha beta alpha");
@@ -2478,13 +2755,25 @@ mod tests {
         );
         assert_eq!(view.point(), 0);
 
-        let action = app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+        let action = run_slash_command(
+            "repeat-search",
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+        );
 
         assert_eq!(action, AppAction::Continue);
         assert_eq!(view.point(), 11);
         assert_eq!(app.status_message.as_deref(), Some("Found: alpha"));
 
-        let action = app.handle_key(Key::Ctrl('s'), &mut keymap, &mut buffer, &mut view);
+        let action = run_slash_command(
+            "repeat-search",
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+        );
 
         assert_eq!(action, AppAction::Continue);
         assert_eq!(view.point(), 0);
@@ -2499,8 +2788,8 @@ mod tests {
         let mut view = View::new();
 
         run_slash_command("/search", &mut app, &mut keymap, &mut buffer, &mut view);
-        assert_eq!(app.status_message.as_deref(), Some("Usage: /search <text>"));
-        assert_eq!(app.status_kind, Some(StatusKind::Error));
+        assert_eq!(app.prompt_text().as_deref(), Some("I-search: "));
+        app.handle_key(Key::Escape, &mut keymap, &mut buffer, &mut view);
 
         run_slash_command(
             "/search missing",
@@ -2611,7 +2900,7 @@ mod tests {
         assert_eq!(buffer.text(), "\x18\x03\x18\x13old");
         assert_eq!(
             keymap.resolve(Key::Ctrl('s')),
-            crate::keymap::KeymapResult::Command(crate::commands::Command::RepeatSearch)
+            crate::keymap::KeymapResult::Command(crate::commands::Command::Search)
         );
         app.request_dirty_quit();
         let before = buffer.text();
@@ -2701,6 +2990,8 @@ mod tests {
             ("scroll-down", Key::PageUp),
             ("kill-word", Key::Meta('d')),
             ("backward-kill-word", Key::MetaBackspace),
+            ("search-forward", Key::Ctrl('s')),
+            ("search-backward", Key::Ctrl('r')),
             ("backward-char", Key::Ctrl('b')),
             ("next-line", Key::Ctrl('n')),
             ("previous-line", Key::Ctrl('p')),
@@ -2735,6 +3026,7 @@ mod tests {
             assert_eq!(named.2.text(), keyed.2.text(), "{name}");
             assert_eq!(named.3.point(), keyed.3.point(), "{name}");
             assert_eq!(named.0.mark, keyed.0.mark, "{name}");
+            assert_eq!(named.0.search, keyed.0.search, "{name}");
             assert_eq!(named.0.kill_ring, keyed.0.kill_ring, "{name}");
         }
     }

@@ -116,6 +116,7 @@ fn large_viewport_rendering() {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .expect("render large viewport");
             largest_frame = largest_frame.max(output.len());

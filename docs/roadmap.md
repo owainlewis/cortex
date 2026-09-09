@@ -143,7 +143,7 @@ Delivery order:
 - [closed] [#166 Group typing and deletion undo steps](https://github.com/owainlewis/cortex/issues/166)
 - [closed] [#47 Add kill ring and yank-pop](https://github.com/owainlewis/cortex/issues/47)
 - [closed] [#167 Add explicit macOS clipboard commands](https://github.com/owainlewis/cortex/issues/167)
-- [open] [#168 Add word, page, and line navigation](https://github.com/owainlewis/cortex/issues/168)
+- [closed] [#168 Add word, page, and line navigation](https://github.com/owainlewis/cortex/issues/168)
 - [open] [#29 Add incremental search](https://github.com/owainlewis/cortex/issues/29)
 - [open] [#169 Add fuzzy file and buffer navigation](https://github.com/owainlewis/cortex/issues/169)
 - [open] [#170 Add literal query-replace](https://github.com/owainlewis/cortex/issues/170)

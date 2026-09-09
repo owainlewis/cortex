@@ -90,9 +90,16 @@ pub const COMMANDS: &[CommandSpec] = &[
     ),
     command(
         "search-forward",
-        "Search forward for literal text",
+        "Search forward incrementally or for supplied literal text",
         &["search"],
         Command::Search,
+        Some("text"),
+    ),
+    command(
+        "search-backward",
+        "Search backward incrementally or for supplied literal text",
+        &[],
+        Command::SearchBackward,
         Some("text"),
     ),
     command(

@@ -93,6 +93,7 @@ There is no formal crate-level enforcement because all modules are in one binary
 | `app.rs` | Main event loop, transient UI state, nested picker flow, and coordination | Editor, commands, input, picker, renderer, terminal, and signals | Buffer text or retained terminal cells |
 | `editor.rs` | Buffer collection, active index, per-buffer view, and path deduplication | Buffer, View, filesystem path metadata, and macOS path rules | Editing operations or screen layout |
 | `buffer.rs` | Rope text, file identity and baseline, history, revisions, changed lines, save and reload rules | Ropey, Unicode helpers, filesystem, randomness, and macOS file APIs | Point, scrolling, prompt state, or screen cells |
+| `search.rs` | Streaming literal matching and incremental search state | Buffer queries and View movement | Text edits or terminal output |
 | `view.rs` | Point, scroll offsets, viewport height, and preferred display column | Buffer queries | Text, file identity, or rendering styles |
 | `commands.rs` | Core editing, movement, save, reload, undo, redo, and quit outcomes | Buffer and View | Prompt-driven commands and application-wide state |
 | `command_registry.rs` | Static names, aliases, descriptions, argument validation, and prefix completion | Command enum | Editor state or command execution |
@@ -240,7 +241,9 @@ Open-buffer count, clean baselines, and history metadata have no separate memory
 The kill ring retains at most 32 complete nonempty cuts; its text has no separate byte limit.
 Application yank state records buffer identity, revision, the exact inserted range, point, and ring index.
 Yank-pop validates that state before replacing text, and other completed commands invalidate it.
-Forward search currently materializes the complete Rope as one `String` for each search.
+Literal search streams Rope characters in either direction with a KMP matcher whose retained memory is proportional to query length.
+IncrementalSearch owns the query, direction, match range, search anchor, and original View for cancellation.
+AppState routes search input and the renderer paints its current match over complete graphemes with a distinct background.
 
 Disk-change checks only occur immediately before a render and only inspect the active buffer.
 An idle editor does not repaint merely because the one-second interval elapsed.
@@ -264,7 +267,7 @@ Those properties still require the manual smoke checks described in `CONTRIBUTIN
 - `app.rs` remains both the event-loop coordinator and owner of several editor behaviors.
 - The directory picker runs a nested event loop and has its own renderer instance rather than being another state in one application loop.
 - Mark and the kill ring live in application state; mark has not moved into View.
-- Command completion uses name prefixes; incremental search and fuzzy buffer or file selection are not implemented.
+- Command completion uses name prefixes; fuzzy buffer or file selection is not implemented.
 - External disk changes are polled only for the active buffer when another event causes a render.
 - Syntax parsing and all filesystem operations run synchronously on the main thread.
 - History text has a retention budget; per-edit metadata, open-buffer count, and clean Rope baselines have no separate memory budget.

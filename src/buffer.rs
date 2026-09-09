@@ -722,16 +722,17 @@ impl Buffer {
     }
 
     pub fn find_forward(&self, query: &str, start_char: usize) -> Option<usize> {
-        if query.is_empty() {
-            return None;
-        }
+        self.find_literal(query, start_char, crate::search::Direction::Forward)
+            .map(|found| found.range.start)
+    }
 
-        let text = self.text.to_string();
-        let start_byte = char_to_byte_idx(&text, start_char.min(self.len_chars()));
-
-        find_byte_from(&text, query, start_byte)
-            .or_else(|| find_byte_from(&text, query, 0))
-            .map(|byte_idx| text[..byte_idx].chars().count())
+    pub(crate) fn find_literal(
+        &self,
+        query: &str,
+        start: usize,
+        direction: crate::search::Direction,
+    ) -> Option<crate::search::SearchMatch> {
+        crate::search::find_literal(self.text.slice(..), query, start, direction)
     }
 
     pub fn text(&self) -> String {
@@ -1359,19 +1360,6 @@ fn line_content_len_chars(line: RopeSlice<'_>) -> usize {
     } else {
         len_chars - 1
     }
-}
-
-fn char_to_byte_idx(text: &str, char_idx: usize) -> usize {
-    text.char_indices()
-        .nth(char_idx)
-        .map(|(byte_idx, _)| byte_idx)
-        .unwrap_or(text.len())
-}
-
-fn find_byte_from(text: &str, query: &str, start_byte: usize) -> Option<usize> {
-    text.get(start_byte..)
-        .and_then(|suffix| suffix.find(query))
-        .map(|offset| start_byte + offset)
 }
 
 /// Writes `text` without ever truncating the existing file in place.

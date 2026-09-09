@@ -73,7 +73,8 @@ impl Keymap {
             Key::Up | Key::Ctrl('p') => KeymapResult::Command(Command::MovePreviousLine),
             Key::Ctrl('a') => KeymapResult::Command(Command::MoveToLineStart),
             Key::Ctrl('e') => KeymapResult::Command(Command::MoveToLineEnd),
-            Key::Ctrl('s') => KeymapResult::Command(Command::RepeatSearch),
+            Key::Ctrl('s') => KeymapResult::Command(Command::Search),
+            Key::Ctrl('r') => KeymapResult::Command(Command::SearchBackward),
             Key::Ctrl(' ') => KeymapResult::Command(Command::SetMark),
             Key::Meta('x') => KeymapResult::Command(Command::OpenCommandLine),
             Key::Command('z') => KeymapResult::Command(Command::Undo),
@@ -234,7 +235,7 @@ mod tests {
         );
         assert_eq!(
             keymap.resolve(Key::Ctrl('s')),
-            KeymapResult::Command(Command::RepeatSearch)
+            KeymapResult::Command(Command::Search)
         );
         assert_eq!(
             keymap.resolve(Key::Ctrl(' ')),

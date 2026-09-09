@@ -107,6 +107,11 @@ const THEME: Theme = Theme {
         g: 50,
         b: 68,
     },
+    search_bg: Color::Rgb {
+        r: 87,
+        g: 76,
+        b: 48,
+    },
     selection_bg: Color::Rgb {
         r: 69,
         g: 71,
@@ -335,6 +340,7 @@ struct StyledSegment {
     text: String,
     highlight: Option<HighlightKind>,
     selected: bool,
+    searched: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,6 +385,7 @@ struct Theme {
     command_fg: Color,
     command_bg: Color,
     selection_bg: Color,
+    search_bg: Color,
     picker_fg: Color,
     picker_selected_fg: Color,
     picker_selected_bg: Color,
@@ -446,6 +453,7 @@ impl Renderer {
         selection_range: Option<Range<usize>>,
         command_line: Option<&str>,
         keycast: Option<&str>,
+        search_range: Option<Range<usize>>,
     ) -> io::Result<()> {
         let cells = retained_cell_buffer(size)?;
         let viewport_height = self.viewport_height(size);
@@ -464,6 +472,7 @@ impl Renderer {
             command_line,
             keycast,
             &highlighted_lines,
+            search_range,
         );
 
         self.paint(writer, paint_editor_frame(frame, size, cells))
@@ -588,6 +597,7 @@ fn build_frame_with_selection(
         command_line,
         None,
         &[],
+        None,
     )
 }
 
@@ -610,6 +620,7 @@ fn build_frame_with_keycast(
         None,
         keycast,
         &[],
+        None,
     )
 }
 
@@ -624,6 +635,7 @@ fn build_frame_with_highlights(
     command_line: Option<&str>,
     keycast: Option<&str>,
     highlighted_lines: &[Vec<HighlightSpan>],
+    search_range: Option<Range<usize>>,
 ) -> Frame {
     let width = size.cols as usize;
     let viewport_height = size.rows.saturating_sub(1) as usize;
@@ -645,7 +657,7 @@ fn build_frame_with_highlights(
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
             let mut segments = Vec::new();
-            push_segment(&mut segments, &" ".repeat(left_padding), None, false);
+            push_segment(&mut segments, &" ".repeat(left_padding), None, false, false);
             for segment in fit_line_segments(
                 &window.text,
                 spans,
@@ -654,12 +666,14 @@ fn build_frame_with_highlights(
                 window.start_byte,
                 window.start_column,
                 selection_range.as_ref(),
+                search_range.as_ref(),
             ) {
                 push_segment(
                     &mut segments,
                     &segment.text,
                     segment.highlight,
                     segment.selected,
+                    segment.searched,
                 );
             }
             let text = segments_text(&segments);
@@ -682,6 +696,7 @@ fn build_frame_with_highlights(
                     text: text.clone(),
                     highlight: None,
                     selected: false,
+                    searched: false,
                 }],
                 text,
                 kind: ScreenLineKind::EmptySpace,
@@ -1079,7 +1094,9 @@ fn paint_editor_frame(frame: Frame, size: TerminalSize, mut cells: Vec<Cell>) ->
             let mut style = segment
                 .highlight
                 .map_or_else(|| plain_style(foreground), highlight_style);
-            if segment.selected {
+            if segment.searched {
+                style.background = Some(THEME.search_bg);
+            } else if segment.selected {
                 style.background = Some(THEME.selection_bg);
             }
             let remaining = width.saturating_sub(cells.len() - row_start);
@@ -1339,6 +1356,7 @@ fn picker_modeline_text(picker: &DirectoryPicker) -> String {
     text
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fit_line_segments(
     line: &str,
     highlight_spans: &[HighlightSpan],
@@ -1347,6 +1365,7 @@ fn fit_line_segments(
     line_byte_start: usize,
     initial_column: usize,
     selection_range: Option<&Range<usize>>,
+    search_range: Option<&Range<usize>>,
 ) -> Vec<StyledSegment> {
     let mut segments = Vec::new();
     let mut cells = 0;
@@ -1361,9 +1380,18 @@ fn fit_line_segments(
         let highlight =
             highlight_for_byte(highlight_spans, line_byte_start.saturating_add(byte_idx));
         let selected = selection_range.is_some_and(|range| range.contains(&char_idx));
+        let end_char = char_idx + grapheme.chars().count();
+        let searched =
+            search_range.is_some_and(|range| range.start < end_char && range.end > char_idx);
         if grapheme == "\t" {
             let spaces = tab_spaces(initial_column.saturating_add(cells)).min(width - cells);
-            push_segment(&mut segments, &" ".repeat(spaces), highlight, selected);
+            push_segment(
+                &mut segments,
+                &" ".repeat(spaces),
+                highlight,
+                selected,
+                searched,
+            );
             cells += spaces;
             line_char_idx += 1;
             continue;
@@ -1379,6 +1407,7 @@ fn fit_line_segments(
             &display_grapheme(grapheme),
             highlight,
             selected,
+            searched,
         );
         cells += grapheme_width;
         line_char_idx += grapheme.chars().count();
@@ -1392,15 +1421,17 @@ fn push_segment(
     text: &str,
     highlight: Option<HighlightKind>,
     selected: bool,
+    searched: bool,
 ) {
     if text.is_empty() {
         return;
     }
 
-    if let Some(segment) = segments
-        .last_mut()
-        .filter(|segment| segment.highlight == highlight && segment.selected == selected)
-    {
+    if let Some(segment) = segments.last_mut().filter(|segment| {
+        segment.highlight == highlight
+            && segment.selected == selected
+            && segment.searched == searched
+    }) {
         segment.text.push_str(text);
         return;
     }
@@ -1409,6 +1440,7 @@ fn push_segment(
         text: text.to_string(),
         highlight,
         selected,
+        searched,
     });
 }
 
@@ -2102,6 +2134,73 @@ mod tests {
     }
 
     #[test]
+    fn search_overlay_styles_complete_graphemes_and_takes_priority_over_selection() {
+        let buffer = buffer_with_text("search.txt", "a e\u{301}👨‍💻z\nend");
+        let size = TerminalSize { cols: 40, rows: 3 };
+        let frame = super::build_frame_with_highlights(
+            &buffer,
+            &View::new(),
+            size,
+            None,
+            None,
+            Some(2..7),
+            None,
+            None,
+            &[],
+            Some(3..6),
+        );
+        let searched: String = frame.lines[0]
+            .segments
+            .iter()
+            .filter(|segment| segment.searched)
+            .map(|segment| segment.text.as_str())
+            .collect();
+        assert_eq!(searched, "e\u{301}👨‍💻");
+        let painted =
+            super::paint_editor_frame(frame, size, super::retained_cell_buffer(size).unwrap());
+        let searched_cells = painted
+            .cells
+            .iter()
+            .filter(|cell| cell.style.background == Some(super::THEME.search_bg))
+            .count();
+        assert_eq!(searched_cells, 3);
+        assert_ne!(super::THEME.search_bg, super::THEME.selection_bg);
+    }
+
+    #[test]
+    fn search_overlay_keeps_its_range_when_horizontally_scrolled_and_resized() {
+        let buffer = buffer_with_text("search.txt", "abcdefghij café code");
+        let mut view = View::new();
+        view.set_point(11, &buffer);
+        for cols in [8, 40, 14] {
+            let size = TerminalSize { cols, rows: 2 };
+            let renderer = super::Renderer::new();
+            view.ensure_point_visible(&buffer, 1, renderer.viewport_width(&buffer, size));
+            let frame = super::build_frame_with_highlights(
+                &buffer,
+                &view,
+                size,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+                Some(11..15),
+            );
+            let searched: String = frame.lines[0]
+                .segments
+                .iter()
+                .filter(|segment| segment.searched)
+                .map(|segment| segment.text.as_str())
+                .collect();
+            assert!(!searched.is_empty());
+            assert!("café".starts_with(&searched), "{searched}");
+            assert!(!searched.contains(' '));
+        }
+    }
+
+    #[test]
     fn frame_marks_active_selection_segments() {
         let buffer = buffer_with_text("notes.txt", "alpha\nbeta\n");
 
@@ -2320,6 +2419,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
@@ -2345,6 +2445,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
@@ -2364,6 +2465,7 @@ mod tests {
                 &buffer,
                 &View::new(),
                 size,
+                None,
                 None,
                 None,
                 None,
@@ -2399,6 +2501,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
@@ -2424,6 +2527,7 @@ mod tests {
                 None,
                 None,
                 Some("C-x"),
+                None,
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
@@ -2496,6 +2600,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap_err();
 
@@ -2546,6 +2651,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap_err();
 
@@ -2573,6 +2679,7 @@ mod tests {
                     &buffer,
                     &View::new(),
                     at_limit,
+                    None,
                     None,
                     None,
                     None,
@@ -2622,6 +2729,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         output.clear();
@@ -2635,6 +2743,7 @@ mod tests {
                     cols: u16::MAX,
                     rows: u16::MAX,
                 },
+                None,
                 None,
                 None,
                 None,
@@ -2656,6 +2765,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         let unchanged_output = String::from_utf8_lossy(&output);
@@ -2669,6 +2779,7 @@ mod tests {
                 &buffer,
                 &view,
                 TerminalSize { cols: 3, rows: 2 },
+                None,
                 None,
                 None,
                 None,
@@ -2800,6 +2911,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         output.clear();
@@ -2810,6 +2922,7 @@ mod tests {
                 &buffer,
                 &view,
                 size,
+                None,
                 None,
                 None,
                 None,
