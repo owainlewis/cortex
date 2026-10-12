@@ -1,0 +1,845 @@
+<title>Slime Frog</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Fredoka:wght@400;600&display=swap">
+<style>
+  /* Layout: one 3:4 pond canvas centered in the viewport, HUD and menus layered on top. */
+  :root {
+    --pond-deep: #071a1c;
+    --pond: #0f2c2d;
+    --ink: #eaf6e3;
+    --muted: #9cc2b2;
+    --slime: #a4ec4c;
+    --slime-dark: #4f8f1f;
+    --hot: #ff8a5c;
+    --display: "Lilita One", "Arial Rounded MT Bold", "Trebuchet MS", sans-serif;
+    --body: "Fredoka", ui-rounded, "Segoe UI", system-ui, sans-serif;
+    color-scheme: dark;
+  }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--pond-deep);
+    color: var(--ink);
+    font-family: var(--body);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-inline: 16px;
+    padding-block: 12px;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+  #stage {
+    position: relative;
+    width: min(100%, calc((100dvh - 24px) * 0.75));
+    aspect-ratio: 3 / 4;
+    max-width: 100%;
+    border-radius: 18px;
+    overflow: hidden;
+    box-shadow: 0 0 0 2px #1d4a3e, 0 24px 60px rgba(0, 0, 0, 0.5);
+  }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  .hud {
+    position: absolute;
+    inset: 0 0 auto 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    font-family: var(--display);
+    font-size: clamp(14px, 3.4vmin, 20px);
+    letter-spacing: 0.04em;
+    pointer-events: none;
+    text-shadow: 0 2px 0 rgba(0, 0, 0, 0.45);
+    font-variant-numeric: tabular-nums;
+  }
+  .hud b { color: var(--slime); font-weight: 400; }
+  .lives { display: flex; gap: 5px; align-items: center; }
+  .lives i { width: 12px; height: 12px; border-radius: 50%; background: var(--slime); box-shadow: inset 0 -3px 0 var(--slime-dark); }
+  .lives i.gone { background: rgba(255, 255, 255, 0.12); box-shadow: none; }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(7, 26, 28, 0.62);
+    backdrop-filter: blur(3px);
+  }
+  .card { max-width: 340px; display: flex; flex-direction: column; gap: 14px; text-align: center; }
+  .card h1 {
+    margin: 0;
+    font-family: var(--display);
+    font-weight: 400;
+    font-size: clamp(44px, 11vmin, 68px);
+    line-height: 0.9;
+    color: var(--slime);
+    text-shadow: 0 4px 0 var(--slime-dark), 0 10px 24px rgba(0, 0, 0, 0.5);
+    text-wrap: balance;
+  }
+  .card p { margin: 0; color: var(--ink); line-height: 1.45; }
+  .keys { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; color: var(--muted); font-size: 14px; }
+  kbd {
+    display: inline-block;
+    min-width: 1.6em;
+    padding: 1px 6px;
+    margin-inline: 1px;
+    border-radius: 6px;
+    background: #183d3a;
+    color: var(--ink);
+    font: 600 12px var(--body);
+    box-shadow: inset 0 -2px 0 #0a2523;
+  }
+  .menu {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .menu div { display: flex; flex-direction: column; gap: 2px; }
+  .menu strong { color: var(--hot); font: 400 16px var(--display); letter-spacing: 0.02em; text-transform: none; }
+  button {
+    align-self: center;
+    font: 400 22px var(--display);
+    letter-spacing: 0.04em;
+    color: #11300b;
+    background: var(--slime);
+    border: 0;
+    border-radius: 999px;
+    padding: 12px 34px;
+    cursor: pointer;
+    box-shadow: 0 5px 0 var(--slime-dark);
+    transition: transform 80ms ease, box-shadow 80ms ease;
+  }
+  button:active { transform: translateY(4px); box-shadow: 0 1px 0 var(--slime-dark); }
+  button:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
+  .best { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+</style>
+
+<div id="stage">
+  <canvas id="game" aria-label="Slime Frog game area"></canvas>
+  <div class="hud">
+    <span>Score <b id="score">0</b></span>
+    <span>Wave <b id="wave">1</b></span>
+    <span class="lives" id="lives" aria-label="Lives"></span>
+  </div>
+  <div class="overlay" id="overlay">
+    <div class="card">
+      <h1 id="title">Slime Frog</h1>
+      <p id="msg">The snacks have turned on the pond. Spit slime at them before they reach the water's edge.</p>
+      <div class="menu" id="menu">
+        <div><strong>Donut</strong>2 hits</div>
+        <div><strong>Burger</strong>5 hits</div>
+        <div><strong>Pizza</strong>fast, spits</div>
+      </div>
+      <ul class="keys" id="keys">
+        <li><kbd>A</kbd><kbd>D</kbd> or <kbd>&larr;</kbd><kbd>&rarr;</kbd> to hop</li>
+        <li>Mouse aims. Click or hold <kbd>Space</kbd> to spit</li>
+        <li>Touch: drag to move, hold to spit</li>
+        <li>Slime a fly for triple shot. <kbd>P</kbd> pauses, <kbd>M</kbd> mutes</li>
+      </ul>
+      <button id="go" type="button">Start</button>
+      <p class="best">Best <span id="best">0</span></p>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const W = 600, H = 800, EDGE = H - 46;
+  const cv = document.getElementById("game");
+  const ctx = cv.getContext("2d");
+  const $ = (id) => document.getElementById(id);
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const TAU = Math.PI * 2;
+
+  let scale = 1;
+  function resize() {
+    const r = cv.getBoundingClientRect();
+    const d = Math.min(window.devicePixelRatio || 1, 2);
+    cv.width = Math.max(1, Math.round(r.width * d));
+    cv.height = Math.max(1, Math.round(r.height * d));
+    scale = cv.width / W;
+  }
+  new ResizeObserver(resize).observe(cv);
+  resize();
+
+  let best = 0;
+  try { best = Number(localStorage.getItem("slimefrog.best")) || 0; } catch (e) {}
+  $("best").textContent = best;
+
+  // ---------- audio ----------
+  let ac = null, muted = false;
+  const SFX = {
+    shoot: [540, 170, 0.09, "sine", 0.07],
+    hit: [240, 90, 0.08, "square", 0.035],
+    pop: [280, 980, 0.13, "triangle", 0.09],
+    hurt: [170, 45, 0.4, "sawtooth", 0.09],
+    power: [420, 1400, 0.35, "sine", 0.09],
+    wave: [330, 660, 0.25, "triangle", 0.06],
+  };
+  function sfx(name) {
+    if (muted) return;
+    try {
+      if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+      const [f0, f1, dur, type, vol] = SFX[name];
+      const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(f0, t);
+      o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(ac.destination);
+      o.start(t);
+      o.stop(t + dur + 0.02);
+    } catch (e) {}
+  }
+
+  // ---------- state ----------
+  const S = { mode: "title" };
+  const frogIdle = () => ({ x: W / 2, y: H - 74, vx: 0, aim: -Math.PI / 2, cd: 0, inv: 0, squash: 0, triple: 0 });
+  S.frog = frogIdle();
+  S.shots = []; S.enemies = []; S.bombs = []; S.parts = []; S.splats = []; S.texts = [];
+
+  function newGame() {
+    Object.assign(S, {
+      mode: "play", score: 0, lives: 3, wave: 0, frog: frogIdle(),
+      shots: [], enemies: [], bombs: [], parts: [], splats: [], texts: [],
+      queue: [], spawnT: 0, banner: 0, combo: 0, comboT: 0, shake: 0,
+    });
+    $("overlay").hidden = true;
+    nextWave();
+  }
+
+  function nextWave() {
+    S.wave++;
+    S.banner = 2;
+    S.queue = [];
+    const n = S.wave;
+    if (n % 5 === 0) {
+      S.queue.push("cake");
+      for (let i = 0; i < 2 + n / 5; i++) S.queue.push("donut");
+    } else {
+      const count = 5 + n * 2;
+      for (let i = 0; i < count; i++) {
+        const r = Math.random();
+        if (n >= 2 && r < 0.18 + n * 0.01) S.queue.push("burger");
+        else if (r < 0.55) S.queue.push("pizza");
+        else S.queue.push("donut");
+      }
+    }
+    if (n >= 2) S.queue.splice(Math.floor(rand(1, S.queue.length)), 0, "fly");
+    S.spawnInterval = Math.max(0.38, 1.25 - n * 0.07);
+    sfx("wave");
+  }
+
+  function spawn(type) {
+    const m = 1 + (S.wave - 1) * 0.06;
+    const e = { type, x: rand(50, W - 50), y: -40, t: rand(0, 6), slow: 0, hit: 0, fire: rand(1.2, 3), seed: Math.random() * 1000 };
+    if (type === "donut") Object.assign(e, { r: 26, hp: 2, sp: 52 * m, val: 100 });
+    if (type === "burger") Object.assign(e, { r: 34, hp: 5, sp: 30 * m, val: 250 });
+    if (type === "pizza") Object.assign(e, { r: 25, hp: 1, sp: 92 * m, val: 150 });
+    if (type === "fly") {
+      const dir = Math.random() < 0.5 ? 1 : -1;
+      Object.assign(e, { r: 13, hp: 1, sp: 170, val: 50, dir, x: dir > 0 ? -20 : W + 20, y: rand(140, 380) });
+    }
+    if (type === "cake") Object.assign(e, { r: 72, hp: 26 + S.wave * 5, sp: 50, val: 2500, x: W / 2, y: -100 });
+    e.maxhp = e.hp;
+    S.enemies.push(e);
+  }
+
+  // ---------- input ----------
+  const keys = {};
+  const ptr = { x: W / 2, y: H / 2, down: false, touch: false, seen: false };
+  addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if ([" ", "arrowleft", "arrowright", "arrowup", "arrowdown"].includes(k)) e.preventDefault();
+    if (k === "p" || k === "escape") togglePause();
+    else if (k === "m") muted = !muted;
+    else if (k === "enter" && S.mode !== "play" && S.mode !== "paused") start();
+    keys[k] = true;
+  });
+  addEventListener("keyup", (e) => { keys[e.key.toLowerCase()] = false; });
+  addEventListener("blur", () => { for (const k in keys) keys[k] = false; ptr.down = false; });
+  document.addEventListener("visibilitychange", () => { if (document.hidden && S.mode === "play") togglePause(); });
+
+  function toWorld(e) {
+    const r = cv.getBoundingClientRect();
+    ptr.x = ((e.clientX - r.left) / r.width) * W;
+    ptr.y = ((e.clientY - r.top) / r.height) * H;
+    ptr.touch = e.pointerType !== "mouse";
+    ptr.seen = true;
+  }
+  cv.addEventListener("pointermove", toWorld);
+  cv.addEventListener("pointerdown", (e) => { toWorld(e); ptr.down = true; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener("pointerup", () => { ptr.down = false; });
+  cv.addEventListener("pointercancel", () => { ptr.down = false; });
+  cv.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  function start() { sfx("wave"); newGame(); }
+  $("go").addEventListener("click", () => {
+    if (S.mode === "paused") togglePause();
+    else start();
+  });
+
+  function togglePause() {
+    if (S.mode === "play") {
+      S.mode = "paused";
+      showOverlay("Paused", "The snacks are waiting.", "Resume", false);
+    } else if (S.mode === "paused") {
+      S.mode = "play";
+      $("overlay").hidden = true;
+      last = performance.now();
+    }
+  }
+
+  function showOverlay(title, msg, btn, withHelp) {
+    $("title").textContent = title;
+    $("msg").textContent = msg;
+    $("go").textContent = btn;
+    $("menu").hidden = !withHelp;
+    $("keys").hidden = !withHelp;
+    $("best").textContent = best;
+    $("overlay").hidden = false;
+    $("go").focus({ preventScroll: true });
+  }
+
+  // ---------- effects ----------
+  function burst(x, y, n, colors, speed = 220, size = 5) {
+    for (let i = 0; i < n; i++) {
+      const a = rand(0, TAU), s = rand(speed * 0.3, speed);
+      S.parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 60, r: rand(size * 0.5, size), life: rand(0.4, 0.9), max: 0.9, c: colors[i % colors.length] });
+    }
+  }
+  function float(x, y, text, c = "#eaf6e3") { S.texts.push({ x, y, text, c, life: 1 }); }
+  function shake(n) { if (!reduceMotion) S.shake = Math.max(S.shake, n); }
+
+  const FOOD_COLORS = {
+    donut: ["#ff8fb8", "#d99a5b", "#ffe066", "#7ad7f0"],
+    burger: ["#e0a24f", "#6b3a22", "#6cc04a", "#ffd23f"],
+    pizza: ["#ffcf4a", "#c8402c", "#d79b4e"],
+    fly: ["#ffe066", "#ffffff"],
+    cake: ["#ffb3cf", "#fff3e0", "#ff5f8f", "#ffe066"],
+  };
+
+  function hurt() {
+    if (S.frog.inv > 0 || S.mode !== "play") return;
+    S.lives--;
+    S.frog.inv = 1.6;
+    S.combo = 0;
+    shake(14);
+    sfx("hurt");
+    burst(S.frog.x, S.frog.y, 18, ["#a4ec4c", "#4caf50"], 260, 6);
+    if (S.lives <= 0) gameOver();
+  }
+
+  function gameOver() {
+    S.mode = "over";
+    const isBest = S.score > best;
+    if (isBest) {
+      best = S.score;
+      try { localStorage.setItem("slimefrog.best", String(best)); } catch (e) {}
+    }
+    showOverlay("Pond lost", `You held out to wave ${S.wave} with ${S.score.toLocaleString()} points.${isBest ? " New best." : ""}`, "Play again", false);
+  }
+
+  function kill(e) {
+    e.dead = true;
+    S.combo = S.comboT > 0 ? S.combo + 1 : 1;
+    S.comboT = 1.3;
+    const mult = 1 + Math.floor(S.combo / 4);
+    const pts = e.val * mult;
+    S.score += pts;
+    float(e.x, e.y - e.r, mult > 1 ? `+${pts} x${mult}` : `+${pts}`, mult > 1 ? "#ffe066" : "#eaf6e3");
+    burst(e.x, e.y, e.type === "cake" ? 70 : 16, FOOD_COLORS[e.type], e.type === "cake" ? 420 : 240, e.type === "cake" ? 9 : 6);
+    burst(e.x, e.y, 8, ["#a4ec4c", "#7fd12f"], 160, 5);
+    S.splats.push({ x: e.x, y: e.y, r: e.r * 1.3, life: 5, seed: Math.random() * 100 });
+    sfx(e.type === "fly" ? "power" : "pop");
+    if (e.type === "fly") {
+      S.frog.triple = 9;
+      float(e.x, e.y + 24, "Triple slime", "#a4ec4c");
+    }
+    if (e.type === "cake") shake(18);
+  }
+
+  // ---------- update ----------
+  function fire() {
+    const f = S.frog;
+    const speed = 640;
+    const spread = f.triple > 0 ? [-0.18, 0, 0.18] : [0];
+    const mx = f.x + Math.cos(f.aim) * 30, my = f.y - 6 + Math.sin(f.aim) * 30;
+    for (const d of spread) {
+      const a = f.aim + d;
+      S.shots.push({ x: mx, y: my, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, r: 9, t: 0 });
+    }
+    f.cd = 0.17;
+    f.squash = 1;
+    sfx("shoot");
+  }
+
+  function update(dt) {
+    const f = S.frog;
+    const playing = S.mode === "play";
+
+    // aim
+    if (ptr.seen) {
+      let ax = ptr.x, ay = ptr.y;
+      if (ptr.touch && ptr.y > f.y - 90) { ax = f.x; ay = f.y - 200; }
+      f.aim = clamp(Math.atan2(ay - (f.y - 6), ax - f.x), -Math.PI + 0.3, -0.3);
+    }
+    if (keys["arrowup"] || keys["w"]) f.aim = -Math.PI / 2;
+
+    if (playing) {
+      // movement
+      let dir = (keys["arrowright"] || keys["d"] ? 1 : 0) - (keys["arrowleft"] || keys["a"] ? 1 : 0);
+      if (ptr.touch && ptr.down) dir = clamp((ptr.x - f.x) / 40, -1, 1);
+      f.vx += (dir * 380 - f.vx) * Math.min(1, dt * 12);
+      f.x = clamp(f.x + f.vx * dt, 40, W - 40);
+
+      f.cd -= dt;
+      if ((keys[" "] || ptr.down) && f.cd <= 0) fire();
+      f.inv = Math.max(0, f.inv - dt);
+      f.triple = Math.max(0, f.triple - dt);
+
+      // waves and spawning
+      S.banner -= dt;
+      if (S.banner <= 0 && S.queue.length) {
+        S.spawnT -= dt;
+        if (S.spawnT <= 0) { spawn(S.queue.shift()); S.spawnT = S.spawnInterval * rand(0.6, 1.3); }
+      }
+      if (!S.queue.length && S.banner <= 0 && !S.enemies.some((e) => e.type !== "fly")) nextWave();
+      S.comboT -= dt;
+    }
+    f.squash = Math.max(0, f.squash - dt * 6);
+
+    // shots
+    for (const s of S.shots) {
+      s.t += dt;
+      s.vy += 300 * dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      if (Math.random() < 0.5) S.parts.push({ x: s.x, y: s.y, vx: rand(-20, 20), vy: rand(10, 50), r: rand(2, 4), life: 0.35, max: 0.35, c: "#7fd12f" });
+      if (s.x < -20 || s.x > W + 20 || s.y < -30 || s.y > H + 20) s.dead = true;
+    }
+
+    // enemies
+    for (const e of S.enemies) {
+      const k = e.slow > 0 ? 0.45 : 1;
+      e.slow -= dt;
+      e.hit -= dt;
+      e.t += dt;
+      if (e.type === "donut") { e.y += e.sp * k * dt; e.x += Math.cos(e.t * 2.2) * 80 * k * dt; }
+      else if (e.type === "burger") { e.y += e.sp * k * dt; }
+      else if (e.type === "pizza") {
+        e.y += e.sp * k * dt;
+        e.x += (f.x - e.x) * 0.3 * k * dt;
+        if (S.wave >= 3 && e.y > 40 && e.y < EDGE - 220) {
+          e.fire -= dt * k;
+          if (e.fire <= 0) {
+            e.fire = rand(2, 3.5);
+            const a = Math.atan2(f.y - e.y, f.x - e.x);
+            S.bombs.push({ x: e.x, y: e.y + 16, vx: Math.cos(a) * 210, vy: Math.sin(a) * 210, r: 8, spin: 0 });
+          }
+        }
+      } else if (e.type === "fly") {
+        e.x += e.dir * e.sp * dt;
+        e.y += Math.sin(e.t * 9) * 70 * dt;
+        if (e.x < -40 || e.x > W + 40) e.dead = true;
+      } else if (e.type === "cake") {
+        if (e.y < 170) e.y += e.sp * dt;
+        else e.x = W / 2 + Math.sin(e.t * 0.7) * (W / 2 - 100);
+        e.fire -= dt * k;
+        if (e.y >= 170 && e.fire <= 0) {
+          e.fire = Math.max(0.8, 1.6 - S.wave * 0.04);
+          for (let i = -2; i <= 2; i++) {
+            const a = Math.PI / 2 + i * 0.28;
+            S.bombs.push({ x: e.x, y: e.y + 50, vx: Math.cos(a) * 190, vy: Math.sin(a) * 190, r: 7, spin: 0, sprinkle: true, c: ["#ff5f8f", "#ffe066", "#7ad7f0", "#a98bff"][(i + 2) % 4] });
+          }
+        }
+      }
+      if (e.type !== "fly") e.x = clamp(e.x, e.r, W - e.r);
+
+      if (!playing) continue;
+      if (e.type !== "fly" && e.type !== "cake" && e.y > EDGE) {
+        e.dead = true;
+        burst(e.x, EDGE, 14, ["#5fb3a8", "#9fe0d6"], 200, 5);
+        float(e.x, EDGE - 30, "Splash!", "#ff8a5c");
+        if (S.frog.inv > 0) { S.lives--; shake(10); sfx("hurt"); if (S.lives <= 0) gameOver(); }
+        else hurt();
+        continue;
+      }
+      if (e.type !== "fly" && Math.hypot(e.x - f.x, e.y - f.y) < e.r + 28) {
+        if (e.type !== "cake") e.dead = true;
+        hurt();
+      }
+    }
+
+    // slime vs food
+    for (const s of S.shots) {
+      if (s.dead) continue;
+      for (const e of S.enemies) {
+        if (e.dead || Math.hypot(s.x - e.x, s.y - e.y) > e.r + s.r) continue;
+        s.dead = true;
+        e.hp--;
+        e.hit = 0.08;
+        e.slow = 1.8;
+        burst(s.x, s.y, 6, ["#a4ec4c", "#7fd12f"], 150, 4);
+        if (e.hp <= 0) kill(e);
+        else sfx("hit");
+        break;
+      }
+    }
+
+    // food projectiles
+    for (const b of S.bombs) {
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      b.spin += dt * 8;
+      if (b.y > H + 20 || b.x < -20 || b.x > W + 20) b.dead = true;
+      if (playing && Math.hypot(b.x - f.x, b.y - f.y) < b.r + 24) { b.dead = true; hurt(); }
+    }
+
+    for (const p of S.parts) { p.life -= dt; p.vy += 420 * dt; p.x += p.vx * dt; p.y += p.vy * dt; }
+    for (const t of S.texts) { t.life -= dt; t.y -= 40 * dt; }
+    for (const s of S.splats) s.life -= dt;
+    S.shake = Math.max(0, S.shake - dt * 40);
+
+    S.shots = S.shots.filter((x) => !x.dead);
+    S.enemies = S.enemies.filter((x) => !x.dead);
+    S.bombs = S.bombs.filter((x) => !x.dead);
+    S.parts = S.parts.filter((x) => x.life > 0);
+    S.texts = S.texts.filter((x) => x.life > 0);
+    S.splats = S.splats.filter((x) => x.life > 0);
+  }
+
+  // ---------- drawing helpers ----------
+  function circle(x, y, r) { ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
+  function ellipse(x, y, rx, ry, rot = 0) { ctx.beginPath(); ctx.ellipse(x, y, rx, ry, rot, 0, TAU); ctx.fill(); }
+  function seeded(seed) { let s = seed; return () => { s = (s * 9301 + 49297) % 233280; return s / 233280; }; }
+
+  function angryFace(r, oy, e) {
+    const ex = r * 0.3, ey = oy, er = r * 0.17;
+    const f = S.frog;
+    const a = Math.atan2(f.y - e.y, f.x - e.x);
+    const lx = Math.cos(a) * er * 0.45, ly = Math.sin(a) * er * 0.45;
+    ctx.fillStyle = "#fff";
+    circle(-ex, ey, er); circle(ex, ey, er);
+    ctx.fillStyle = "#1b1410";
+    circle(-ex + lx, ey + ly, er * 0.5); circle(ex + lx, ey + ly, er * 0.5);
+    ctx.strokeStyle = "#2a1a12";
+    ctx.lineWidth = Math.max(2, r * 0.08);
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(-ex - er * 1.1, ey - er * 1.5); ctx.lineTo(-ex + er * 0.7, ey - er * 0.8);
+    ctx.moveTo(ex + er * 1.1, ey - er * 1.5); ctx.lineTo(ex - er * 0.7, ey - er * 0.8);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, ey + er * 2.4, er * 0.9, Math.PI * 1.15, Math.PI * 1.85);
+    ctx.stroke();
+  }
+
+  function drawDonut(e) {
+    const r = e.r, rnd = seeded(e.seed);
+    ctx.fillStyle = "#c98a4b"; circle(0, 0, r);
+    ctx.fillStyle = "#ff8fb8";
+    ctx.beginPath();
+    for (let i = 0; i <= 40; i++) {
+      const a = (i / 40) * TAU, rr = r * (0.82 + Math.sin(a * 7 + e.seed) * 0.06);
+      ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+    }
+    ctx.fill();
+    const sprinkle = ["#ffe066", "#7ad7f0", "#ffffff", "#a98bff"];
+    for (let i = 0; i < 9; i++) {
+      const a = rnd() * TAU, d = r * (0.45 + rnd() * 0.3);
+      ctx.save();
+      ctx.translate(Math.cos(a) * d, Math.sin(a) * d);
+      ctx.rotate(rnd() * TAU);
+      ctx.fillStyle = sprinkle[i % 4];
+      ctx.fillRect(-3, -1, 6, 2.4);
+      ctx.restore();
+    }
+    ctx.fillStyle = "#0f2c2d"; circle(0, r * 0.12, r * 0.24);
+    angryFace(r * 0.8, -r * 0.42, e);
+  }
+
+  function drawBurger(e) {
+    const r = e.r;
+    ctx.fillStyle = "#d58f3e";
+    ctx.beginPath(); ctx.roundRect(-r, r * 0.38, r * 2, r * 0.42, [4, 4, r * 0.3, r * 0.3]); ctx.fill();
+    ctx.fillStyle = "#5c321d";
+    ctx.beginPath(); ctx.roundRect(-r * 1.02, r * 0.06, r * 2.04, r * 0.36, 8); ctx.fill();
+    ctx.fillStyle = "#ffd23f";
+    ctx.beginPath(); ctx.moveTo(-r * 0.9, r * 0.06); ctx.lineTo(r * 0.9, r * 0.06); ctx.lineTo(r * 0.5, r * 0.3); ctx.lineTo(r * 0.2, r * 0.08); ctx.lineTo(-r * 0.3, r * 0.32); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#6cc04a";
+    ctx.beginPath(); ctx.moveTo(-r * 1.05, -r * 0.02);
+    for (let i = 0; i <= 10; i++) ctx.lineTo(-r * 1.05 + (i / 10) * r * 2.1, i % 2 ? r * 0.16 : -r * 0.02);
+    ctx.lineTo(r * 1.05, -r * 0.08); ctx.lineTo(-r * 1.05, -r * 0.08); ctx.fill();
+    ctx.fillStyle = "#e0a24f";
+    ctx.beginPath(); ctx.ellipse(0, -r * 0.05, r, r * 0.85, 0, Math.PI, TAU); ctx.fill();
+    ctx.fillStyle = "#fff3d6";
+    const rnd = seeded(e.seed);
+    for (let i = 0; i < 7; i++) ellipse(-r * 0.7 + rnd() * r * 1.4, -r * 0.55 - rnd() * r * 0.2, 3, 1.6, rnd());
+    angryFace(r, -r * 0.3, e);
+  }
+
+  function drawPizza(e) {
+    const r = e.r;
+    ctx.fillStyle = "#ffcf4a";
+    ctx.beginPath(); ctx.moveTo(-r, -r * 0.7); ctx.lineTo(r, -r * 0.7); ctx.lineTo(0, r * 1.2); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#d79b4e";
+    ctx.beginPath(); ctx.roundRect(-r * 1.08, -r * 0.98, r * 2.16, r * 0.36, 8); ctx.fill();
+    ctx.fillStyle = "#c8402c";
+    circle(-r * 0.45, r * 0.38, r * 0.15); circle(r * 0.4, r * 0.3, r * 0.13); circle(0, r * 0.75, r * 0.12);
+    angryFace(r * 0.85, -r * 0.2, e);
+  }
+
+  function drawFly(e) {
+    ctx.fillStyle = "rgba(255, 224, 102, 0.22)"; circle(0, 0, e.r * 1.9);
+    ctx.fillStyle = "rgba(230, 245, 255, 0.75)";
+    const flap = Math.sin(e.t * 50) * 0.6;
+    ellipse(-6, -8, 9, 5, -0.6 + flap); ellipse(6, -8, 9, 5, 0.6 - flap);
+    ctx.fillStyle = "#24262b"; ellipse(0, 0, 11, 8);
+    ctx.fillStyle = "#c0392b"; circle(e.dir * 8, -2, 3.4);
+  }
+
+  function drawCake(e) {
+    const r = e.r, w = r * 1.7, h = r * 1.2;
+    ctx.fillStyle = "#f6c6d6"; ctx.beginPath(); ctx.roundRect(-w / 2, -h / 2, w, h, 10); ctx.fill();
+    ctx.fillStyle = "#fff3e0"; ctx.fillRect(-w / 2, -h * 0.05, w, h * 0.14);
+    ctx.fillStyle = "#ff5f8f";
+    ctx.beginPath(); ctx.moveTo(-w / 2, -h / 2);
+    for (let i = 0; i <= 8; i++) {
+      const x = -w / 2 + (i / 8) * w;
+      ctx.lineTo(x, -h / 2 + (i % 2 ? h * 0.32 : h * 0.12));
+    }
+    ctx.lineTo(w / 2, -h / 2); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#7ad7f0"; ctx.fillRect(-5, -h / 2 - 30, 10, 30);
+    ctx.fillStyle = "#ffb43b"; ellipse(0, -h / 2 - 40 + Math.sin(e.t * 12), 6, 10);
+    angryFace(r * 0.9, h * 0.22, e);
+    // health bar
+    const bw = w;
+    ctx.fillStyle = "rgba(0, 0, 0, 0.45)"; ctx.fillRect(-bw / 2, h / 2 + 12, bw, 8);
+    ctx.fillStyle = "#ff5f8f"; ctx.fillRect(-bw / 2, h / 2 + 12, bw * (e.hp / e.maxhp), 8);
+  }
+
+  const DRAW = { donut: drawDonut, burger: drawBurger, pizza: drawPizza, fly: drawFly, cake: drawCake };
+
+  function drawEnemy(e) {
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    if (e.type !== "fly") ctx.rotate(Math.sin(e.t * 3) * 0.08);
+    DRAW[e.type](e);
+    if (e.slow > 0 && e.type !== "fly") {
+      ctx.globalAlpha = Math.min(1, e.slow) * 0.85;
+      ctx.fillStyle = "#a4ec4c";
+      const rnd = seeded(e.seed + 7);
+      for (let i = 0; i < 4; i++) {
+        const x = (rnd() - 0.5) * e.r * 1.4, len = e.r * (0.3 + rnd() * 0.5) * (1 + (1.8 - e.slow) * 0.4);
+        ellipse(x, -e.r * 0.2 + len * 0.5, 4, len * 0.5);
+        circle(x, -e.r * 0.2 + len, 5);
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (e.hit > 0) {
+      ctx.globalAlpha = 0.55; ctx.fillStyle = "#ffffff"; circle(0, 0, e.r); ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+  }
+
+  function drawFrog(f, now) {
+    if (f.inv > 0 && Math.floor(f.inv * 12) % 2) return;
+    ctx.save();
+    ctx.translate(f.x, f.y);
+    // lily pad
+    ctx.fillStyle = "#2f6e3a";
+    ctx.beginPath(); ctx.ellipse(0, 26, 56, 18, 0, 0.2, TAU - 0.2); ctx.lineTo(0, 26); ctx.fill();
+    ctx.fillStyle = "#3d8a49"; ellipse(0, 24, 46, 13);
+    const sq = f.squash * 0.14, bob = Math.sin(now * 0.004) * 1.5;
+    ctx.translate(0, bob);
+    ctx.scale(1 + sq, 1 - sq);
+    // legs
+    ctx.fillStyle = "#2f7d3a";
+    ellipse(-30, 14, 18, 10, 0.2); ellipse(30, 14, 18, 10, -0.2);
+    // body
+    ctx.fillStyle = "#4caf50"; ellipse(0, 0, 38, 30);
+    ctx.fillStyle = "#c9e89a"; ellipse(0, 10, 24, 15);
+    // eyes
+    const lx = Math.cos(f.aim) * 4, ly = Math.sin(f.aim) * 4;
+    for (const s of [-1, 1]) {
+      ctx.fillStyle = "#4caf50"; circle(s * 18, -24, 14);
+      ctx.fillStyle = "#fffbe8"; circle(s * 18, -25, 10);
+      ctx.fillStyle = "#14200f"; circle(s * 18 + lx, -25 + ly, 5);
+      ctx.fillStyle = "#fff"; circle(s * 18 + lx - 1.5, -27 + ly, 1.6);
+    }
+    // cheeks
+    ctx.fillStyle = "rgba(255, 140, 140, 0.45)"; ellipse(-24, -2, 6, 4); ellipse(24, -2, 6, 4);
+    // mouth
+    ctx.strokeStyle = "#1d4d23"; ctx.lineWidth = 2.5; ctx.lineCap = "round";
+    ctx.beginPath();
+    if (f.squash > 0.4) { ctx.fillStyle = "#1d4d23"; ellipse(0, -4, 9, 6); ctx.fillStyle = "#a4ec4c"; ellipse(0, -5, 6, 3.5); }
+    else { ctx.arc(0, -10, 14, 0.25 * Math.PI, 0.75 * Math.PI); ctx.stroke(); }
+    // triple shot crown of slime
+    if (f.triple > 0) {
+      ctx.fillStyle = "#a4ec4c";
+      for (let i = -1; i <= 1; i++) circle(i * 9, -42 - Math.abs(i) * -3 + Math.sin(now * 0.01 + i) * 1.5, 4);
+    }
+    ctx.restore();
+
+    // aim guide
+    ctx.save();
+    ctx.strokeStyle = "rgba(164, 236, 76, 0.28)";
+    ctx.setLineDash([4, 8]);
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(f.x + Math.cos(f.aim) * 40, f.y - 6 + Math.sin(f.aim) * 40);
+    ctx.lineTo(f.x + Math.cos(f.aim) * 110, f.y - 6 + Math.sin(f.aim) * 110);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  const RIPPLES = Array.from({ length: 16 }, () => ({ x: rand(0, W), y: rand(60, EDGE - 40), p: rand(0, 1), s: rand(0.12, 0.25) }));
+  const PADS = Array.from({ length: 7 }, (_, i) => ({ x: (i + 0.5) * (W / 7) + rand(-12, 12), r: rand(24, 34), rot: rand(-0.25, 0.25) }));
+
+  function drawPond(now) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#123637");
+    g.addColorStop(0.7, "#0e2d2c");
+    g.addColorStop(1, "#0a2221");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+    // moonlight streak
+    ctx.fillStyle = "rgba(220, 245, 230, 0.035)";
+    for (let i = 0; i < 6; i++) ctx.fillRect(W * 0.62 + Math.sin(now * 0.001 + i) * 10 - i * 4, 80 + i * 70, 60 - i * 6, 6);
+    ctx.lineWidth = 1.5;
+    for (const r of RIPPLES) {
+      const k = (r.p + now * 0.001 * r.s) % 1;
+      ctx.strokeStyle = `rgba(160, 220, 200, ${0.18 * (1 - k)})`;
+      ctx.beginPath(); ctx.ellipse(r.x, r.y, 6 + k * 40, (6 + k * 40) * 0.35, 0, 0, TAU); ctx.stroke();
+    }
+    for (const s of S.splats) {
+      ctx.globalAlpha = Math.min(1, s.life / 2) * 0.45;
+      ctx.fillStyle = "#7fd12f";
+      const rnd = seeded(s.seed * 1000);
+      ctx.beginPath();
+      for (let i = 0; i <= 14; i++) {
+        const a = (i / 14) * TAU, rr = s.r * (0.6 + rnd() * 0.5);
+        ctx.lineTo(s.x + Math.cos(a) * rr, s.y + Math.sin(a) * rr * 0.6);
+      }
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // pond edge
+    ctx.fillStyle = "rgba(255, 138, 92, 0.12)";
+    ctx.fillRect(0, EDGE, W, 2);
+    for (const p of PADS) {
+      ctx.save();
+      ctx.translate(p.x, EDGE + 26);
+      ctx.rotate(p.rot);
+      ctx.fillStyle = "#1f5230";
+      ctx.beginPath(); ctx.ellipse(0, 0, p.r, p.r * 0.45, 0, 0.25, TAU - 0.25); ctx.lineTo(0, 0); ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function render(now) {
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    const sk = S.shake;
+    if (sk > 0) ctx.translate(rand(-sk, sk) * 0.5, rand(-sk, sk) * 0.5);
+    drawPond(now);
+
+    for (const e of S.enemies) drawEnemy(e);
+
+    for (const b of S.bombs) {
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.rotate(b.spin);
+      if (b.sprinkle) { ctx.fillStyle = b.c; ctx.beginPath(); ctx.roundRect(-9, -3, 18, 6, 3); ctx.fill(); }
+      else {
+        ctx.fillStyle = "#c8402c"; circle(0, 0, b.r);
+        ctx.fillStyle = "#8f2a1c"; circle(-2, -2, 1.6); circle(3, 1, 1.4); circle(-1, 3, 1.2);
+      }
+      ctx.restore();
+    }
+
+    for (const s of S.shots) {
+      const st = 1 + Math.sin(s.t * 30) * 0.12;
+      ctx.fillStyle = "#7fd12f"; ellipse(s.x, s.y, s.r * st, s.r / st, Math.atan2(s.vy, s.vx));
+      ctx.fillStyle = "#c8ff7a"; circle(s.x - 2.5, s.y - 2.5, s.r * 0.35);
+    }
+
+    drawFrog(S.frog, now);
+
+    for (const p of S.parts) {
+      ctx.globalAlpha = clamp(p.life / p.max, 0, 1);
+      ctx.fillStyle = p.c;
+      circle(p.x, p.y, p.r);
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (const t of S.texts) {
+      ctx.globalAlpha = clamp(t.life, 0, 1);
+      ctx.font = '22px "Lilita One", sans-serif';
+      ctx.fillStyle = "rgba(0, 0, 0, 0.4)"; ctx.fillText(t.text, t.x + 1, t.y + 2);
+      ctx.fillStyle = t.c; ctx.fillText(t.text, t.x, t.y);
+    }
+    ctx.globalAlpha = 1;
+
+    if (S.mode === "play" && S.banner > 0) {
+      const a = clamp(Math.min(S.banner, 2 - S.banner) * 3, 0, 1);
+      ctx.globalAlpha = a;
+      const boss = S.wave % 5 === 0;
+      ctx.font = '64px "Lilita One", sans-serif';
+      ctx.fillStyle = "#4f8f1f"; ctx.fillText(`Wave ${S.wave}`, W / 2, H * 0.4 + 5);
+      ctx.fillStyle = "#a4ec4c"; ctx.fillText(`Wave ${S.wave}`, W / 2, H * 0.4);
+      ctx.font = '22px "Fredoka", sans-serif';
+      ctx.fillStyle = boss ? "#ff8a5c" : "#eaf6e3";
+      ctx.fillText(boss ? "The Mega Cake approaches" : "Incoming snacks", W / 2, H * 0.4 + 52);
+      ctx.globalAlpha = 1;
+    }
+
+    if (S.mode === "play" && S.combo >= 4 && S.comboT > 0) {
+      ctx.font = '20px "Lilita One", sans-serif';
+      ctx.fillStyle = "#ffe066";
+      ctx.fillText(`Combo ${S.combo}`, W / 2, 70);
+    }
+  }
+
+  // ---------- HUD ----------
+  const hud = { score: -1, wave: -1, lives: -1 };
+  function drawHud() {
+    if (S.mode === "title") return;
+    if (hud.score !== S.score) { hud.score = S.score; $("score").textContent = S.score.toLocaleString(); }
+    if (hud.wave !== S.wave) { hud.wave = S.wave; $("wave").textContent = S.wave; }
+    if (hud.lives !== S.lives) {
+      hud.lives = S.lives;
+      $("lives").innerHTML = [0, 1, 2].map((i) => `<i class="${i < S.lives ? "" : "gone"}"></i>`).join("");
+      $("lives").setAttribute("aria-label", `${Math.max(0, S.lives)} lives`);
+    }
+  }
+  $("lives").innerHTML = "<i></i><i></i><i></i>";
+
+  // ---------- loop ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    if (S.mode !== "paused") update(dt);
+    render(now);
+    drawHud();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
