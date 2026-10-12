@@ -13,6 +13,8 @@
     --slime: #a4ec4c;
     --slime-dark: #4f8f1f;
     --hot: #ff8a5c;
+    --gold: #ffd23f;
+    --panel: #12332f;
     --display: "Lilita One", "Arial Rounded MT Bold", "Trebuchet MS", sans-serif;
     --body: "Fredoka", ui-rounded, "Segoe UI", system-ui, sans-serif;
     color-scheme: dark;
@@ -47,7 +49,7 @@
     inset: 0 0 auto 0;
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
     gap: 12px;
     padding: 12px 16px;
     font-family: var(--display);
@@ -58,6 +60,8 @@
     font-variant-numeric: tabular-nums;
   }
   .hud b { color: var(--slime); font-weight: 400; }
+  .hud .stack { display: flex; flex-direction: column; gap: 2px; }
+  .hud .seeds b { color: var(--gold); }
   .lives { display: flex; gap: 5px; align-items: center; }
   .lives i { width: 12px; height: 12px; border-radius: 50%; background: var(--slime); box-shadow: inset 0 -3px 0 var(--slime-dark); }
   .lives i.gone { background: rgba(255, 255, 255, 0.12); box-shadow: none; }
@@ -122,17 +126,42 @@
   button:active { transform: translateY(4px); box-shadow: 0 1px 0 var(--slime-dark); }
   button:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
   .best { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  button.ghost { background: transparent; color: var(--gold); box-shadow: inset 0 0 0 2px var(--gold); }
+  button.ghost:active { transform: translateY(2px); box-shadow: inset 0 0 0 2px var(--gold); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  .barn { max-width: 380px; width: 100%; max-height: 100%; overflow-y: auto; }
+  .barn h2 { margin: 0; font: 400 40px var(--display); color: var(--gold); text-shadow: 0 3px 0 #8a6a10; }
+  .barn-sub { color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+  .barn-sub b { color: var(--gold); font-weight: 600; }
+  .barn-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; text-align: left; }
+  .barn-list li {
+    display: grid;
+    grid-template-columns: 48px 1fr auto;
+    gap: 10px;
+    align-items: center;
+    padding: 8px 10px;
+    border-radius: 12px;
+    background: var(--panel);
+  }
+  .barn-list canvas { width: 48px; height: 48px; cursor: default; }
+  .barn-list .info { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .barn-list .name { font: 400 18px var(--display); letter-spacing: 0.02em; }
+  .barn-list .rate { color: var(--gold); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .barn-list .desc { color: var(--muted); font-size: 12px; line-height: 1.3; }
+  .barn-list button { font-size: 15px; padding: 8px 14px; box-shadow: 0 3px 0 var(--slime-dark); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .barn-list li.owned button { background: transparent; color: var(--muted); box-shadow: none; opacity: 1; }
 </style>
 
 <div id="stage">
   <canvas id="game" aria-label="Slime Frog game area"></canvas>
   <div class="hud">
-    <span>Score <b id="score">0</b></span>
+    <span class="stack"><span>Score <b id="score">0</b></span><span class="seeds">Seeds <b id="seeds">0</b></span></span>
     <span>Wave <b id="wave">1</b></span>
     <span class="lives" id="lives" aria-label="Lives"></span>
   </div>
   <div class="overlay" id="overlay">
-    <div class="card">
+    <div class="card" id="main">
       <h1 id="title">Slime Frog</h1>
       <p id="msg">The snacks have turned on the pond. Spit slime at them before they reach the water's edge.</p>
       <div class="menu" id="menu">
@@ -145,9 +174,19 @@
         <li>Mouse aims. Click or hold <kbd>Space</kbd> to spit</li>
         <li>Touch: drag to move, hold to spit</li>
         <li>Slime a fly for triple shot. <kbd>P</kbd> pauses, <kbd>M</kbd> mutes</li>
+        <li>Your animals earn gold seeds. Spend them in the <kbd>B</kbd> Barn</li>
       </ul>
-      <button id="go" type="button">Start</button>
+      <div class="actions">
+        <button id="go" type="button">Start</button>
+        <button id="barnBtn" class="ghost" type="button">Barn</button>
+      </div>
       <p class="best">Best <span id="best">0</span></p>
+    </div>
+    <div class="card barn" id="barn" hidden>
+      <h2>Barn</h2>
+      <p class="barn-sub"><b id="barnSeeds">0</b> gold seeds. Earning <b id="barnRate">10</b> per second.</p>
+      <ul class="barn-list" id="barnList"></ul>
+      <button id="barnBack" type="button">Back</button>
     </div>
   </div>
 </div>
@@ -177,6 +216,128 @@
   let best = 0;
   try { best = Number(localStorage.getItem("slimefrog.best")) || 0; } catch (e) {}
   $("best").textContent = best;
+
+  // ---------- farm ----------
+  const ANIMALS = [
+    { id: "chick", name: "Chick", cost: 0, rate: 10, cd: 1.2, desc: "Pecks seeds at the nearest snack", shot: { speed: 560, dmg: 1, r: 5, c: "#e8c27a" } },
+    { id: "duck", name: "Duck", cost: 500, rate: 40, cd: 0.9, desc: "Squirts water fast", shot: { speed: 600, dmg: 1, r: 7, c: "#7ad7f0" } },
+    { id: "pig", name: "Pig", cost: 2500, rate: 150, cd: 1.5, desc: "Lobs mud that slows snacks for longer", shot: { speed: 460, dmg: 2, r: 10, c: "#8a5530", slow: 4 } },
+    { id: "goat", name: "Goat", cost: 10000, rate: 500, cd: 1.6, desc: "Horn bolts pierce three snacks", shot: { speed: 720, dmg: 2, r: 7, c: "#efe8d4", pierce: 3 } },
+    { id: "cow", name: "Cow", cost: 40000, rate: 2000, cd: 2.2, desc: "Sprays a fan of five milk drops", shot: { speed: 520, dmg: 1, r: 7, c: "#ffffff", spread: 5 } },
+    { id: "goose", name: "Golden Goose", cost: 150000, rate: 8000, cd: 2.6, desc: "Golden eggs hit for 8", shot: { speed: 480, dmg: 8, r: 11, c: "#ffd23f" } },
+  ];
+  const slotX = (i) => 50 + i * 100;
+  const farm = { seeds: 0, owned: ["chick"] };
+  try {
+    const f = JSON.parse(localStorage.getItem("slimefrog.farm"));
+    if (f && Array.isArray(f.owned)) {
+      farm.seeds = Number(f.seeds) || 0;
+      farm.owned = f.owned.filter((id) => ANIMALS.some((a) => a.id === id));
+      if (!farm.owned.includes("chick")) farm.owned.unshift("chick");
+    }
+  } catch (e) {}
+  function saveFarm() { try { localStorage.setItem("slimefrog.farm", JSON.stringify(farm)); } catch (e) {} }
+  const owns = (id) => farm.owned.includes(id);
+  const seedRate = () => ANIMALS.reduce((n, a) => n + (owns(a.id) ? a.rate : 0), 0);
+  const fmt = (n) => Math.floor(n).toLocaleString();
+  const helperCd = {}, helperHop = {};
+
+  function drawAnimal(g, id, t) {
+    const E = (x, y, rx, ry, c, rot = 0) => { g.fillStyle = c; g.beginPath(); g.ellipse(x, y, rx, ry, rot, 0, TAU); g.fill(); };
+    const eyes = (y, dx) => { E(-dx, y, 2.2, 2.4, "#1b1410"); E(dx, y, 2.2, 2.4, "#1b1410"); };
+    if (id === "chick") {
+      E(0, -13, 2, 4, "#ffd93b", 0.3);
+      E(-12, 4, 5, 7, "#f2c200", 0.5); E(12, 4, 5, 7, "#f2c200", -0.5);
+      E(0, 2, 15, 13, "#ffd93b");
+      eyes(-2, 5);
+      g.fillStyle = "#ff9a1f"; g.beginPath(); g.moveTo(-3.5, 2); g.lineTo(3.5, 2); g.lineTo(0, 7); g.fill();
+    } else if (id === "duck") {
+      E(-13, 4, 5, 8, "#d8d8cc", 0.5); E(13, 4, 5, 8, "#d8d8cc", -0.5);
+      E(0, 2, 16, 13, "#f4f4ee");
+      eyes(-3, 5);
+      E(0, 4, 7, 3.2, "#ff9a1f");
+    } else if (id === "pig") {
+      g.fillStyle = "#f38aa8";
+      g.beginPath(); g.moveTo(-14, -6); g.lineTo(-11, -16); g.lineTo(-5, -10); g.fill();
+      g.beginPath(); g.moveTo(14, -6); g.lineTo(11, -16); g.lineTo(5, -10); g.fill();
+      E(0, 2, 16, 14, "#ffb3c7");
+      E(0, 5, 6.5, 4.5, "#f38aa8");
+      E(-2.2, 5, 1.3, 1.6, "#a8456a"); E(2.2, 5, 1.3, 1.6, "#a8456a");
+      eyes(-3, 6);
+    } else if (id === "goat") {
+      g.strokeStyle = "#9a8f78"; g.lineWidth = 3.5; g.lineCap = "round";
+      g.beginPath(); g.moveTo(-6, -10); g.quadraticCurveTo(-10, -22, -16, -18); g.moveTo(6, -10); g.quadraticCurveTo(10, -22, 16, -18); g.stroke();
+      E(-15, -2, 7, 3, "#d4ccb8", 0.35); E(15, -2, 7, 3, "#d4ccb8", -0.35);
+      E(0, 2, 13, 15, "#e9e3d3");
+      g.fillStyle = "#cfc6af"; g.beginPath(); g.moveTo(-4, 13); g.lineTo(4, 13); g.lineTo(0, 22); g.fill();
+      eyes(-1, 5);
+      E(0, 8, 4, 2, "#b8ad94");
+    } else if (id === "cow") {
+      E(-6, -13, 2.5, 4, "#e8dcc0", -0.4); E(6, -13, 2.5, 4, "#e8dcc0", 0.4);
+      E(-16, -3, 7, 3.4, "#fafafa", 0.3); E(16, -3, 7, 3.4, "#fafafa", -0.3);
+      E(0, 2, 16, 14, "#fafafa");
+      E(-7, -5, 5, 4, "#26272b", 0.4); E(9, -1, 4, 5, "#26272b");
+      E(0, 8, 9, 5.5, "#ffb3c7");
+      E(-3, 8, 1.3, 1.6, "#a8456a"); E(3, 8, 1.3, 1.6, "#a8456a");
+      eyes(-2, 6);
+    } else if (id === "goose") {
+      E(0, 0, 22, 22, `rgba(255, 210, 63, ${0.18 + Math.sin(t * 0.004) * 0.08})`);
+      E(-12, 6, 6, 8, "#e5b520", 0.5); E(12, 6, 6, 8, "#e5b520", -0.5);
+      E(0, 5, 15, 12, "#ffd23f");
+      E(0, -8, 8, 8, "#ffe27a");
+      eyes(-10, 3.5);
+      E(0, -5, 4.5, 2.6, "#ff9a1f");
+    }
+  }
+
+  function buildBarn() {
+    const list = $("barnList");
+    const d = Math.min(window.devicePixelRatio || 1, 2);
+    for (const a of ANIMALS) {
+      const li = document.createElement("li");
+      li.id = `row-${a.id}`;
+      li.innerHTML = `<canvas width="${48 * d}" height="${48 * d}" aria-hidden="true"></canvas>
+        <div class="info"><span class="name">${a.name}</span><span class="rate">+${fmt(a.rate)} seeds/s</span><span class="desc">${a.desc}</span></div>
+        <button type="button" id="buy-${a.id}"></button>`;
+      list.appendChild(li);
+      const g = li.querySelector("canvas").getContext("2d");
+      g.setTransform(d * 1.15, 0, 0, d * 1.15, 24 * d, 26 * d);
+      drawAnimal(g, a.id, 0);
+      li.querySelector("button").addEventListener("click", () => buy(a));
+    }
+  }
+  function updateBarn() {
+    $("barnSeeds").textContent = fmt(farm.seeds);
+    $("barnRate").textContent = fmt(seedRate());
+    for (const a of ANIMALS) {
+      const b = $(`buy-${a.id}`), own = owns(a.id);
+      $(`row-${a.id}`).classList.toggle("owned", own);
+      const label = own ? "Owned" : `Buy ${fmt(a.cost)}`;
+      if (b.textContent !== label) b.textContent = label;
+      b.disabled = own || farm.seeds < a.cost;
+    }
+  }
+  function buy(a) {
+    if (owns(a.id) || farm.seeds < a.cost) return;
+    farm.seeds -= a.cost;
+    farm.owned.push(a.id);
+    saveFarm();
+    sfx("power");
+    updateBarn();
+  }
+  function openBarn() {
+    if (S.mode === "play") togglePause();
+    $("overlay").hidden = false;
+    $("main").hidden = true;
+    $("barn").hidden = false;
+    updateBarn();
+    $("barnBack").focus({ preventScroll: true });
+  }
+  function closeBarn() {
+    $("barn").hidden = true;
+    $("main").hidden = false;
+    $("go").focus({ preventScroll: true });
+  }
 
   // ---------- audio ----------
   let ac = null, muted = false;
@@ -264,7 +425,8 @@
   addEventListener("keydown", (e) => {
     const k = e.key.toLowerCase();
     if ([" ", "arrowleft", "arrowright", "arrowup", "arrowdown"].includes(k)) e.preventDefault();
-    if (k === "p" || k === "escape") togglePause();
+    if (k === "b") { if (!$("barn").hidden) closeBarn(); else openBarn(); }
+    else if (k === "p" || k === "escape") togglePause();
     else if (k === "m") muted = !muted;
     else if (k === "enter" && S.mode !== "play" && S.mode !== "paused") start();
     keys[k] = true;
@@ -291,6 +453,8 @@
     if (S.mode === "paused") togglePause();
     else start();
   });
+  $("barnBtn").addEventListener("click", openBarn);
+  $("barnBack").addEventListener("click", closeBarn);
 
   function togglePause() {
     if (S.mode === "play") {
@@ -310,6 +474,8 @@
     $("menu").hidden = !withHelp;
     $("keys").hidden = !withHelp;
     $("best").textContent = best;
+    $("barn").hidden = true;
+    $("main").hidden = false;
     $("overlay").hidden = false;
     $("go").focus({ preventScroll: true });
   }
@@ -387,6 +553,31 @@
     sfx("shoot");
   }
 
+  function helpers(dt) {
+    const targets = S.enemies.filter((e) => e.type !== "fly" && e.y > 0);
+    ANIMALS.forEach((a, i) => {
+      if (!owns(a.id)) return;
+      helperHop[a.id] = Math.max(0, (helperHop[a.id] || 0) - dt * 4);
+      helperCd[a.id] = (helperCd[a.id] ?? rand(0, a.cd)) - dt;
+      if (helperCd[a.id] > 0 || !targets.length) return;
+      helperCd[a.id] = a.cd;
+      const hx = slotX(i), hy = H - 36;
+      let t = targets[0];
+      for (const e of targets) if (Math.hypot(e.x - hx, e.y - hy) < Math.hypot(t.x - hx, t.y - hy)) t = e;
+      const ang = Math.atan2(t.y - hy, t.x - hx);
+      const n = a.shot.spread || 1;
+      for (let k = 0; k < n; k++) {
+        const d = (k - (n - 1) / 2) * 0.16;
+        S.shots.push({
+          x: hx, y: hy, vx: Math.cos(ang + d) * a.shot.speed, vy: Math.sin(ang + d) * a.shot.speed,
+          r: a.shot.r, t: 0, g: 0, dmg: a.shot.dmg, c: a.shot.c, slowT: a.shot.slow, pierce: a.shot.pierce,
+          hits: a.shot.pierce ? new Set() : null, kind: a.id,
+        });
+      }
+      helperHop[a.id] = 1;
+    });
+  }
+
   function update(dt) {
     const f = S.frog;
     const playing = S.mode === "play";
@@ -410,6 +601,7 @@
       if ((keys[" "] || ptr.down) && f.cd <= 0) fire();
       f.inv = Math.max(0, f.inv - dt);
       f.triple = Math.max(0, f.triple - dt);
+      helpers(dt);
 
       // waves and spawning
       S.banner -= dt;
@@ -425,10 +617,10 @@
     // shots
     for (const s of S.shots) {
       s.t += dt;
-      s.vy += 300 * dt;
+      s.vy += (s.g ?? 300) * dt;
       s.x += s.vx * dt;
       s.y += s.vy * dt;
-      if (Math.random() < 0.5) S.parts.push({ x: s.x, y: s.y, vx: rand(-20, 20), vy: rand(10, 50), r: rand(2, 4), life: 0.35, max: 0.35, c: "#7fd12f" });
+      if (!s.kind && Math.random() < 0.5) S.parts.push({ x: s.x, y: s.y, vx: rand(-20, 20), vy: rand(10, 50), r: rand(2, 4), life: 0.35, max: 0.35, c: "#7fd12f" });
       if (s.x < -20 || s.x > W + 20 || s.y < -30 || s.y > H + 20) s.dead = true;
     }
 
@@ -488,15 +680,16 @@
     for (const s of S.shots) {
       if (s.dead) continue;
       for (const e of S.enemies) {
-        if (e.dead || Math.hypot(s.x - e.x, s.y - e.y) > e.r + s.r) continue;
-        s.dead = true;
-        e.hp--;
+        if (e.dead || (s.hits && s.hits.has(e)) || Math.hypot(s.x - e.x, s.y - e.y) > e.r + s.r) continue;
+        if (s.hits) { s.hits.add(e); if (s.hits.size >= s.pierce) s.dead = true; }
+        else s.dead = true;
+        e.hp -= s.dmg || 1;
         e.hit = 0.08;
-        e.slow = 1.8;
-        burst(s.x, s.y, 6, ["#a4ec4c", "#7fd12f"], 150, 4);
+        e.slow = Math.max(e.slow, s.slowT || 1.8);
+        burst(s.x, s.y, 6, s.kind ? [s.c] : ["#a4ec4c", "#7fd12f"], 150, 4);
         if (e.hp <= 0) kill(e);
         else sfx("hit");
-        break;
+        if (s.dead) break;
       }
     }
 
@@ -708,7 +901,7 @@
   }
 
   const RIPPLES = Array.from({ length: 16 }, () => ({ x: rand(0, W), y: rand(60, EDGE - 40), p: rand(0, 1), s: rand(0.12, 0.25) }));
-  const PADS = Array.from({ length: 7 }, (_, i) => ({ x: (i + 0.5) * (W / 7) + rand(-12, 12), r: rand(24, 34), rot: rand(-0.25, 0.25) }));
+  const PADS = Array.from({ length: 6 }, (_, i) => ({ x: slotX(i), r: rand(28, 32), rot: rand(-0.2, 0.2) }));
 
   function drawPond(now) {
     const g = ctx.createLinearGradient(0, 0, 0, H);
@@ -771,7 +964,21 @@
       ctx.restore();
     }
 
+    ANIMALS.forEach((a, i) => {
+      if (!owns(a.id)) return;
+      ctx.save();
+      ctx.translate(slotX(i), H - 24 - Math.sin((helperHop[a.id] || 0) * Math.PI) * 6);
+      drawAnimal(ctx, a.id, now);
+      ctx.restore();
+    });
+
     for (const s of S.shots) {
+      if (s.kind) {
+        ctx.fillStyle = s.c;
+        ellipse(s.x, s.y, s.r * 1.3, s.r * 0.85, Math.atan2(s.vy, s.vx));
+        ctx.fillStyle = "rgba(255, 255, 255, 0.55)"; circle(s.x - s.r * 0.3, s.y - s.r * 0.3, s.r * 0.3);
+        continue;
+      }
       const st = 1 + Math.sin(s.t * 30) * 0.12;
       ctx.fillStyle = "#7fd12f"; ellipse(s.x, s.y, s.r * st, s.r / st, Math.atan2(s.vy, s.vx));
       ctx.fillStyle = "#c8ff7a"; circle(s.x - 2.5, s.y - 2.5, s.r * 0.35);
@@ -817,8 +1024,14 @@
   }
 
   // ---------- HUD ----------
-  const hud = { score: -1, wave: -1, lives: -1 };
+  const hud = { score: -1, wave: -1, lives: -1, seeds: -1 };
   function drawHud() {
+    const sd = Math.floor(farm.seeds);
+    if (hud.seeds !== sd) {
+      hud.seeds = sd;
+      $("seeds").textContent = fmt(sd);
+      if (!$("barn").hidden && !$("overlay").hidden) updateBarn();
+    }
     if (S.mode === "title") return;
     if (hud.score !== S.score) { hud.score = S.score; $("score").textContent = S.score.toLocaleString(); }
     if (hud.wave !== S.wave) { hud.wave = S.wave; $("wave").textContent = S.wave; }
@@ -831,15 +1044,22 @@
   $("lives").innerHTML = "<i></i><i></i><i></i>";
 
   // ---------- loop ----------
-  let last = performance.now();
+  let last = performance.now(), lastSeed = last, saveT = 0;
   function frame(now) {
     const dt = Math.min(0.033, (now - last) / 1000);
     last = now;
+    const real = Math.max(0, (now - lastSeed) / 1000);
+    lastSeed = now;
+    farm.seeds += seedRate() * real;
+    saveT += real;
+    if (saveT > 2) { saveT = 0; saveFarm(); }
     if (S.mode !== "paused") update(dt);
     render(now);
     drawHud();
     requestAnimationFrame(frame);
   }
+  buildBarn();
+  addEventListener("pagehide", saveFarm);
   requestAnimationFrame(frame);
 })();
 </script>
