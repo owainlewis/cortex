@@ -163,18 +163,18 @@
   <div class="overlay" id="overlay">
     <div class="card" id="main">
       <h1 id="title">Slime Frog</h1>
-      <p id="msg">The snacks have turned on the pond. Spit slime at them before they reach the water's edge.</p>
+      <p id="msg">The snacks have turned on the pond. You start as a chick. Shoot them before they reach the water's edge.</p>
       <div class="menu" id="menu">
-        <div><strong>Donut</strong>2 hits</div>
-        <div><strong>Burger</strong>5 hits</div>
-        <div><strong>Pizza</strong>fast, spits</div>
+        <div><strong>Donut</strong>3 hits</div>
+        <div><strong>Burger</strong>7 hits</div>
+        <div><strong>Pizza</strong>fast, shoots</div>
       </div>
       <ul class="keys" id="keys">
         <li><kbd>A</kbd><kbd>D</kbd> or <kbd>&larr;</kbd><kbd>&rarr;</kbd> to hop</li>
-        <li>Mouse aims. Click or hold <kbd>Space</kbd> to spit</li>
-        <li>Touch: drag to move, hold to spit</li>
-        <li>Slime a fly for triple shot. <kbd>P</kbd> pauses, <kbd>M</kbd> mutes</li>
-        <li>Your animals earn gold seeds. Spend them in the <kbd>B</kbd> Barn</li>
+        <li>Mouse aims. Click or hold <kbd>Space</kbd> to shoot</li>
+        <li>Touch: drag to move, hold to shoot</li>
+        <li>Hit a fly for extra shots. <kbd>P</kbd> pauses, <kbd>M</kbd> mutes</li>
+        <li>Animals earn gold seeds. Buy more and pick who you play in the <kbd>B</kbd> Barn</li>
       </ul>
       <div class="actions">
         <button id="go" type="button">Start</button>
@@ -219,21 +219,30 @@
 
   // ---------- farm ----------
   const ANIMALS = [
-    { id: "chick", name: "Chick", cost: 0, rate: 10, cd: 1.2, desc: "Pecks seeds at the nearest snack", shot: { speed: 560, dmg: 1, r: 5, c: "#e8c27a" } },
-    { id: "duck", name: "Duck", cost: 500, rate: 40, cd: 0.9, desc: "Squirts water fast", shot: { speed: 600, dmg: 1, r: 7, c: "#7ad7f0" } },
-    { id: "pig", name: "Pig", cost: 2500, rate: 150, cd: 1.5, desc: "Lobs mud that slows snacks for longer", shot: { speed: 460, dmg: 2, r: 10, c: "#8a5530", slow: 4 } },
-    { id: "goat", name: "Goat", cost: 10000, rate: 500, cd: 1.6, desc: "Horn bolts pierce three snacks", shot: { speed: 720, dmg: 2, r: 7, c: "#efe8d4", pierce: 3 } },
-    { id: "cow", name: "Cow", cost: 40000, rate: 2000, cd: 2.2, desc: "Sprays a fan of five milk drops", shot: { speed: 520, dmg: 1, r: 7, c: "#ffffff", spread: 5 } },
-    { id: "goose", name: "Golden Goose", cost: 150000, rate: 8000, cd: 2.6, desc: "Golden eggs hit for 8", shot: { speed: 480, dmg: 8, r: 11, c: "#ffd23f" } },
+    { id: "chick", name: "Chick", cost: 0, rate: 10, cd: 1.2, desc: "Pecks small seeds", shot: { speed: 560, dmg: 1, r: 5, c: "#e8c27a" },
+      play: { cd: 0.32, speed: 620, dmg: 1, r: 5, c: "#e8c27a", g: 0 } },
+    { id: "frog", name: "Frog", cost: 1000, rate: 60, cd: 1.0, desc: "Spits arcing slime fast", shot: { speed: 560, dmg: 1, r: 8, c: "#a4ec4c", g: 300 },
+      play: { cd: 0.17, speed: 640, dmg: 1, r: 9, g: 300, slime: true } },
+    { id: "duck", name: "Duck", cost: 4000, rate: 200, cd: 0.9, desc: "Squirts water very fast", shot: { speed: 600, dmg: 1, r: 7, c: "#7ad7f0" },
+      play: { cd: 0.13, speed: 700, dmg: 1, r: 6, c: "#7ad7f0", g: 0 } },
+    { id: "pig", name: "Pig", cost: 15000, rate: 700, cd: 1.5, desc: "Lobs mud that slows snacks for longer", shot: { speed: 460, dmg: 2, r: 10, c: "#8a5530", slow: 4 },
+      play: { cd: 0.3, speed: 540, dmg: 2, r: 10, c: "#8a5530", g: 200, slow: 4 } },
+    { id: "goat", name: "Goat", cost: 50000, rate: 2500, cd: 1.6, desc: "Horn bolts pierce three snacks", shot: { speed: 720, dmg: 2, r: 7, c: "#efe8d4", pierce: 3 },
+      play: { cd: 0.28, speed: 780, dmg: 2, r: 7, c: "#efe8d4", g: 0, pierce: 3 } },
+    { id: "cow", name: "Cow", cost: 200000, rate: 9000, cd: 2.2, desc: "Sprays a fan of milk", shot: { speed: 520, dmg: 1, r: 7, c: "#ffffff", spread: 5 },
+      play: { cd: 0.32, speed: 580, dmg: 1, r: 7, c: "#ffffff", g: 0, spread: 3 } },
+    { id: "goose", name: "Golden Goose", cost: 750000, rate: 30000, cd: 2.6, desc: "Golden eggs that hit hard", shot: { speed: 480, dmg: 8, r: 11, c: "#ffd23f" },
+      play: { cd: 0.36, speed: 540, dmg: 5, r: 11, c: "#ffd23f", g: 120 } },
   ];
   const slotX = (i) => 50 + i * 100;
-  const farm = { seeds: 0, owned: ["chick"] };
+  const farm = { seeds: 0, owned: ["chick"], active: "chick" };
   try {
     const f = JSON.parse(localStorage.getItem("slimefrog.farm"));
     if (f && Array.isArray(f.owned)) {
       farm.seeds = Number(f.seeds) || 0;
       farm.owned = f.owned.filter((id) => ANIMALS.some((a) => a.id === id));
       if (!farm.owned.includes("chick")) farm.owned.unshift("chick");
+      if (farm.owned.includes(f.active)) farm.active = f.active;
     }
   } catch (e) {}
   function saveFarm() { try { localStorage.setItem("slimefrog.farm", JSON.stringify(farm)); } catch (e) {} }
@@ -241,6 +250,8 @@
   const seedRate = () => ANIMALS.reduce((n, a) => n + (owns(a.id) ? a.rate : 0), 0);
   const fmt = (n) => Math.floor(n).toLocaleString();
   const helperCd = {}, helperHop = {};
+  const player = () => ANIMALS.find((a) => a.id === farm.active);
+  const helperList = () => ANIMALS.filter((a) => owns(a.id) && a.id !== farm.active);
 
   function drawAnimal(g, id, t) {
     const E = (x, y, rx, ry, c, rot = 0) => { g.fillStyle = c; g.beginPath(); g.ellipse(x, y, rx, ry, rot, 0, TAU); g.fill(); };
@@ -251,6 +262,14 @@
       E(0, 2, 15, 13, "#ffd93b");
       eyes(-2, 5);
       g.fillStyle = "#ff9a1f"; g.beginPath(); g.moveTo(-3.5, 2); g.lineTo(3.5, 2); g.lineTo(0, 7); g.fill();
+    } else if (id === "frog") {
+      E(-8, -9, 6, 6, "#4caf50"); E(8, -9, 6, 6, "#4caf50");
+      E(0, 2, 16, 12, "#4caf50");
+      E(0, 6, 10, 6, "#c9e89a");
+      E(-8, -10, 4, 4, "#fffbe8"); E(8, -10, 4, 4, "#fffbe8");
+      E(-8, -10, 2, 2.2, "#14200f"); E(8, -10, 2, 2.2, "#14200f");
+      g.strokeStyle = "#1d4d23"; g.lineWidth = 1.5;
+      g.beginPath(); g.arc(0, -2, 6, 0.25 * Math.PI, 0.75 * Math.PI); g.stroke();
     } else if (id === "duck") {
       E(-13, 4, 5, 8, "#d8d8cc", 0.5); E(13, 4, 5, 8, "#d8d8cc", -0.5);
       E(0, 2, 16, 13, "#f4f4ee");
@@ -303,7 +322,10 @@
       const g = li.querySelector("canvas").getContext("2d");
       g.setTransform(d * 1.15, 0, 0, d * 1.15, 24 * d, 26 * d);
       drawAnimal(g, a.id, 0);
-      li.querySelector("button").addEventListener("click", () => buy(a));
+      li.querySelector("button").addEventListener("click", () => {
+        if (!owns(a.id)) buy(a);
+        else { farm.active = a.id; saveFarm(); updateBarn(); }
+      });
     }
   }
   function updateBarn() {
@@ -311,10 +333,11 @@
     $("barnRate").textContent = fmt(seedRate());
     for (const a of ANIMALS) {
       const b = $(`buy-${a.id}`), own = owns(a.id);
-      $(`row-${a.id}`).classList.toggle("owned", own);
-      const label = own ? "Owned" : `Buy ${fmt(a.cost)}`;
+      const playing = farm.active === a.id;
+      $(`row-${a.id}`).classList.toggle("owned", playing);
+      const label = playing ? "Playing" : own ? "Play as" : `Buy ${fmt(a.cost)}`;
       if (b.textContent !== label) b.textContent = label;
-      b.disabled = own || farm.seeds < a.cost;
+      b.disabled = playing || (!own && farm.seeds < a.cost);
     }
   }
   function buy(a) {
@@ -389,32 +412,32 @@
     const n = S.wave;
     if (n % 5 === 0) {
       S.queue.push("cake");
-      for (let i = 0; i < 2 + n / 5; i++) S.queue.push("donut");
+      for (let i = 0; i < 4 + n / 2; i++) S.queue.push(i % 3 ? "donut" : "pizza");
     } else {
-      const count = 5 + n * 2;
+      const count = 8 + n * 3;
       for (let i = 0; i < count; i++) {
         const r = Math.random();
-        if (n >= 2 && r < 0.18 + n * 0.01) S.queue.push("burger");
+        if (n >= 2 && r < 0.2 + n * 0.015) S.queue.push("burger");
         else if (r < 0.55) S.queue.push("pizza");
         else S.queue.push("donut");
       }
     }
     if (n >= 2) S.queue.splice(Math.floor(rand(1, S.queue.length)), 0, "fly");
-    S.spawnInterval = Math.max(0.38, 1.25 - n * 0.07);
+    S.spawnInterval = Math.max(0.24, 0.95 - n * 0.07);
     sfx("wave");
   }
 
   function spawn(type) {
-    const m = 1 + (S.wave - 1) * 0.06;
+    const m = 1.2 + (S.wave - 1) * 0.1;
     const e = { type, x: rand(50, W - 50), y: -40, t: rand(0, 6), slow: 0, hit: 0, fire: rand(1.2, 3), seed: Math.random() * 1000 };
-    if (type === "donut") Object.assign(e, { r: 26, hp: 2, sp: 52 * m, val: 100 });
-    if (type === "burger") Object.assign(e, { r: 34, hp: 5, sp: 30 * m, val: 250 });
-    if (type === "pizza") Object.assign(e, { r: 25, hp: 1, sp: 92 * m, val: 150 });
+    if (type === "donut") Object.assign(e, { r: 26, hp: 3, sp: 52 * m, val: 100 });
+    if (type === "burger") Object.assign(e, { r: 34, hp: 7, sp: 30 * m, val: 250 });
+    if (type === "pizza") Object.assign(e, { r: 25, hp: 2, sp: 92 * m, val: 150 });
     if (type === "fly") {
       const dir = Math.random() < 0.5 ? 1 : -1;
       Object.assign(e, { r: 13, hp: 1, sp: 170, val: 50, dir, x: dir > 0 ? -20 : W + 20, y: rand(140, 380) });
     }
-    if (type === "cake") Object.assign(e, { r: 72, hp: 26 + S.wave * 5, sp: 50, val: 2500, x: W / 2, y: -100 });
+    if (type === "cake") Object.assign(e, { r: 72, hp: 50 + S.wave * 10, sp: 50, val: 2500, x: W / 2, y: -100 });
     e.maxhp = e.hp;
     S.enemies.push(e);
   }
@@ -533,30 +556,31 @@
     sfx(e.type === "fly" ? "power" : "pop");
     if (e.type === "fly") {
       S.frog.triple = 9;
-      float(e.x, e.y + 24, "Triple slime", "#a4ec4c");
+      float(e.x, e.y + 24, "Triple shot", "#a4ec4c");
     }
     if (e.type === "cake") shake(18);
   }
 
   // ---------- update ----------
   function fire() {
-    const f = S.frog;
-    const speed = 640;
-    const spread = f.triple > 0 ? [-0.18, 0, 0.18] : [0];
+    const f = S.frog, p = player().play;
+    const n = (p.spread || 1) + (f.triple > 0 ? 2 : 0);
     const mx = f.x + Math.cos(f.aim) * 30, my = f.y - 6 + Math.sin(f.aim) * 30;
-    for (const d of spread) {
-      const a = f.aim + d;
-      S.shots.push({ x: mx, y: my, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, r: 9, t: 0 });
+    for (let k = 0; k < n; k++) {
+      const a = f.aim + (k - (n - 1) / 2) * 0.16;
+      S.shots.push({
+        x: mx, y: my, vx: Math.cos(a) * p.speed, vy: Math.sin(a) * p.speed, r: p.r, t: 0, g: p.g, dmg: p.dmg,
+        c: p.c, slowT: p.slow, pierce: p.pierce, hits: p.pierce ? new Set() : null, kind: p.slime ? undefined : farm.active,
+      });
     }
-    f.cd = 0.17;
+    f.cd = p.cd;
     f.squash = 1;
     sfx("shoot");
   }
 
   function helpers(dt) {
     const targets = S.enemies.filter((e) => e.type !== "fly" && e.y > 0);
-    ANIMALS.forEach((a, i) => {
-      if (!owns(a.id)) return;
+    helperList().forEach((a, i) => {
       helperHop[a.id] = Math.max(0, (helperHop[a.id] || 0) - dt * 4);
       helperCd[a.id] = (helperCd[a.id] ?? rand(0, a.cd)) - dt;
       if (helperCd[a.id] > 0 || !targets.length) return;
@@ -570,7 +594,7 @@
         const d = (k - (n - 1) / 2) * 0.16;
         S.shots.push({
           x: hx, y: hy, vx: Math.cos(ang + d) * a.shot.speed, vy: Math.sin(ang + d) * a.shot.speed,
-          r: a.shot.r, t: 0, g: 0, dmg: a.shot.dmg, c: a.shot.c, slowT: a.shot.slow, pierce: a.shot.pierce,
+          r: a.shot.r, t: 0, g: a.shot.g || 0, dmg: a.shot.dmg, c: a.shot.c, slowT: a.shot.slow, pierce: a.shot.pierce,
           hits: a.shot.pierce ? new Set() : null, kind: a.id,
         });
       }
@@ -635,12 +659,12 @@
       else if (e.type === "pizza") {
         e.y += e.sp * k * dt;
         e.x += (f.x - e.x) * 0.3 * k * dt;
-        if (S.wave >= 3 && e.y > 40 && e.y < EDGE - 220) {
+        if (S.wave >= 2 && e.y > 40 && e.y < EDGE - 220) {
           e.fire -= dt * k;
           if (e.fire <= 0) {
-            e.fire = rand(2, 3.5);
+            e.fire = rand(1.4, 2.6);
             const a = Math.atan2(f.y - e.y, f.x - e.x);
-            S.bombs.push({ x: e.x, y: e.y + 16, vx: Math.cos(a) * 210, vy: Math.sin(a) * 210, r: 8, spin: 0 });
+            S.bombs.push({ x: e.x, y: e.y + 16, vx: Math.cos(a) * 260, vy: Math.sin(a) * 260, r: 8, spin: 0 });
           }
         }
       } else if (e.type === "fly") {
@@ -652,7 +676,7 @@
         else e.x = W / 2 + Math.sin(e.t * 0.7) * (W / 2 - 100);
         e.fire -= dt * k;
         if (e.y >= 170 && e.fire <= 0) {
-          e.fire = Math.max(0.8, 1.6 - S.wave * 0.04);
+          e.fire = Math.max(0.6, 1.3 - S.wave * 0.05);
           for (let i = -2; i <= 2; i++) {
             const a = Math.PI / 2 + i * 0.28;
             S.bombs.push({ x: e.x, y: e.y + 50, vx: Math.cos(a) * 190, vy: Math.sin(a) * 190, r: 7, spin: 0, sprinkle: true, c: ["#ff5f8f", "#ffe066", "#7ad7f0", "#a98bff"][(i + 2) % 4] });
@@ -860,6 +884,20 @@
     const sq = f.squash * 0.14, bob = Math.sin(now * 0.004) * 1.5;
     ctx.translate(0, bob);
     ctx.scale(1 + sq, 1 - sq);
+    if (farm.active !== "frog") {
+      ctx.save();
+      ctx.translate(0, -4);
+      ctx.scale(1.9, 1.9);
+      drawAnimal(ctx, farm.active, now);
+      ctx.restore();
+      if (f.triple > 0) {
+        ctx.fillStyle = "#a4ec4c";
+        for (let i = -1; i <= 1; i++) circle(i * 9, -48 + Math.sin(now * 0.01 + i) * 1.5, 4);
+      }
+      ctx.restore();
+      drawAim(f);
+      return;
+    }
     // legs
     ctx.fillStyle = "#2f7d3a";
     ellipse(-30, 14, 18, 10, 0.2); ellipse(30, 14, 18, 10, -0.2);
@@ -887,8 +925,10 @@
       for (let i = -1; i <= 1; i++) circle(i * 9, -42 - Math.abs(i) * -3 + Math.sin(now * 0.01 + i) * 1.5, 4);
     }
     ctx.restore();
+    drawAim(f);
+  }
 
-    // aim guide
+  function drawAim(f) {
     ctx.save();
     ctx.strokeStyle = "rgba(164, 236, 76, 0.28)";
     ctx.setLineDash([4, 8]);
@@ -964,8 +1004,7 @@
       ctx.restore();
     }
 
-    ANIMALS.forEach((a, i) => {
-      if (!owns(a.id)) return;
+    helperList().forEach((a, i) => {
       ctx.save();
       ctx.translate(slotX(i), H - 24 - Math.sin((helperHop[a.id] || 0) * Math.PI) * 6);
       drawAnimal(ctx, a.id, now);
