@@ -1,0 +1,893 @@
+<title>Coop Defense</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Fredoka:wght@400;600&display=swap">
+<style>
+  /* Layout: one portrait farm canvas centered in the viewport, menus layered on top. Single bright daytime look. */
+  :root {
+    --hedge: #1f4a1c;
+    --grass: #4fae3a;
+    --wood: #8a5a2b;
+    --wood-dark: #5e3a17;
+    --cream: #fff6dc;
+    --ink: #3a2410;
+    --gold: #ffc929;
+    --leaf: #7fd34e;
+    --display: "Lilita One", "Arial Rounded MT Bold", "Trebuchet MS", sans-serif;
+    --body: "Fredoka", ui-rounded, "Segoe UI", system-ui, sans-serif;
+    color-scheme: light;
+  }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--hedge);
+    color: var(--ink);
+    font-family: var(--body);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-inline: 16px;
+    padding-block: 12px;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+  #stage {
+    position: relative;
+    width: min(100%, calc((100dvh - 24px) * 600 / 780));
+    aspect-ratio: 600 / 780;
+    max-width: 100%;
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 0 0 3px var(--wood-dark), 0 20px 50px rgba(0, 0, 0, 0.45);
+  }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(20, 50, 18, 0.55);
+  }
+  .card {
+    max-width: 360px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    text-align: center;
+    background: var(--cream);
+    border: 4px solid var(--wood);
+    border-radius: 18px;
+    padding: 22px 20px;
+    box-shadow: 0 6px 0 var(--wood-dark), 0 18px 40px rgba(0, 0, 0, 0.35);
+  }
+  .card h1 {
+    margin: 0;
+    font: 400 clamp(40px, 10vmin, 58px) / 0.95 var(--display);
+    color: var(--gold);
+    -webkit-text-stroke: 2px var(--wood-dark);
+    text-shadow: 0 4px 0 var(--wood-dark);
+    text-wrap: balance;
+  }
+  .card p { margin: 0; line-height: 1.45; }
+  .tips { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 14px; color: #6a4a28; text-align: left; }
+  .tips li { padding-left: 18px; position: relative; }
+  .tips li::before { content: ""; position: absolute; left: 2px; top: 7px; width: 8px; height: 8px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 0 1px var(--wood); }
+  button {
+    align-self: center;
+    font: 400 22px var(--display);
+    letter-spacing: 0.04em;
+    color: #fff;
+    background: #4caf2f;
+    border: 0;
+    border-radius: 999px;
+    padding: 12px 36px;
+    cursor: pointer;
+    box-shadow: 0 5px 0 #2d7a19;
+    text-shadow: 0 2px 0 #2d7a19;
+    transition: transform 80ms ease, box-shadow 80ms ease;
+  }
+  button:active { transform: translateY(4px); box-shadow: 0 1px 0 #2d7a19; }
+  button:focus-visible { outline: 3px solid var(--wood-dark); outline-offset: 3px; }
+  .best { color: #6a4a28; font-size: 13px; font-variant-numeric: tabular-nums; }
+  @media (prefers-reduced-motion: reduce) { button { transition: none; } }
+</style>
+
+<div id="stage">
+  <canvas id="game" aria-label="Coop Defense game board"></canvas>
+  <div class="overlay" id="overlay">
+    <div class="card">
+      <h1 id="title">Coop Defense</h1>
+      <p id="msg">Robots are marching on the coop. Put birds on the grass to stop them before they reach the eggs.</p>
+      <ul class="tips" id="tips">
+        <li>Tap a bird card, then tap a square to place it.</li>
+        <li>Chicks lay golden seeds. Tap seeds to collect them. You also get a harvest every 10 seconds.</li>
+        <li>Each lane has one guard chick. It charges once if a robot gets through.</li>
+        <li>Clear a wave to unlock a new bird. Recall removes a bird.</li>
+        <li>Keys: <b>1-7</b> pick a bird, <b>R</b> recall, <b>P</b> pause.</li>
+      </ul>
+      <button id="go" type="button">Start</button>
+      <p class="best">Best wave <span id="best">0</span></p>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const W = 600, H = 780;
+  const GX = 56, GY = 150, CW = 76, CH = 98, COLS = 7, ROWS = 5;
+  const BAR_Y = 14, CARD_X = 90, CARD_W = 58, CARD_GAP = 5, CARD_H = 82;
+  const RECALL = { x: 534, y: BAR_Y + 6, w: 54, h: CARD_H };
+  const PAUSE = { x: 548, y: 716, r: 22 };
+  const TAU = Math.PI * 2;
+  const cv = document.getElementById("game");
+  const ctx = cv.getContext("2d");
+  const $ = (id) => document.getElementById(id);
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const fmt = (n) => Math.floor(n).toLocaleString();
+
+  let scale = 1;
+  function resize() {
+    const r = cv.getBoundingClientRect();
+    const d = Math.min(window.devicePixelRatio || 1, 2);
+    cv.width = Math.max(1, Math.round(r.width * d));
+    cv.height = Math.max(1, Math.round(r.height * d));
+    scale = cv.width / W;
+  }
+  new ResizeObserver(resize).observe(cv);
+  resize();
+
+  let best = 0;
+  try { best = Number(localStorage.getItem("coopdefense.best")) || 0; } catch (e) {}
+  $("best").textContent = best;
+
+  // ---------- audio ----------
+  let ac = null, muted = false;
+  const SFX = {
+    shoot: [700, 300, 0.06, "triangle", 0.04],
+    place: [300, 600, 0.1, "sine", 0.08],
+    seed: [880, 1500, 0.12, "sine", 0.07],
+    hit: [200, 120, 0.05, "square", 0.025],
+    clank: [140, 60, 0.18, "square", 0.06],
+    boom: [120, 30, 0.5, "sawtooth", 0.12],
+    lose: [300, 60, 0.8, "sawtooth", 0.1],
+    wave: [400, 800, 0.3, "triangle", 0.07],
+    nope: [180, 150, 0.12, "square", 0.04],
+  };
+  function sfx(name) {
+    if (muted) return;
+    try {
+      if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+      const [f0, f1, dur, type, vol] = SFX[name];
+      const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(f0, t);
+      o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(ac.destination);
+      o.start(t);
+      o.stop(t + dur + 0.02);
+    } catch (e) {}
+  }
+
+  // ---------- data ----------
+  const BIRDS = {
+    chick: { name: "Chick", cost: 50, cd: 5, hp: 120 },
+    pecker: { name: "Pecker", cost: 100, cd: 5, hp: 150, fire: 1.4, dmg: 20, shot: "seed" },
+    owl: { name: "Owl", cost: 75, cd: 20, hp: 1100 },
+    penguin: { name: "Penguin", cost: 175, cd: 7, hp: 150, fire: 1.5, dmg: 20, shot: "snow", slow: 3 },
+    eagle: { name: "Eagle", cost: 225, cd: 7, hp: 170, fire: 1.4, dmg: 20, shot: "feather", double: true },
+    rooster: { name: "Rooster", cost: 150, cd: 25, hp: 99999, bomb: true },
+    pelican: { name: "Pelican", cost: 300, cd: 9, hp: 220, fire: 2.4, dmg: 75, shot: "fish" },
+  };
+  const ORDER = Object.keys(BIRDS);
+  const UNLOCK_NOTE = {
+    owl: "Owls are tough walls that soak up damage.",
+    penguin: "Penguins throw snowballs that slow robots.",
+    eagle: "Eagles shoot two feathers at a time.",
+    rooster: "Roosters explode and wreck robots in a 3 by 3 area.",
+    pelican: "Pelicans hurl heavy fish.",
+  };
+  const ROBOTS = {
+    scout: { hp: 190, sp: 15, dps: 40, val: 50 },
+    helmet: { hp: 520, sp: 15, dps: 40, val: 100 },
+    runner: { hp: 150, sp: 30, dps: 40, val: 80 },
+    tank: { hp: 1400, sp: 8, dps: 90, val: 250 },
+    boss: { hp: 4500, sp: 6, dps: 300, val: 1500 },
+  };
+
+  // ---------- state ----------
+  const S = { mode: "title" };
+  function reset() {
+    Object.assign(S, {
+      mode: "play", seeds: 150, score: 0, wave: 0, unlocked: 2,
+      grid: new Array(ROWS * COLS).fill(null), robots: [], shots: [], pickups: [], parts: [], texts: [], runners: [],
+      guards: new Array(ROWS).fill(true), cool: {}, sel: null, recall: false, hover: null,
+      harvestT: 10, queue: [], spawnT: 0, spawnGap: 8, total: 0, spawned: 0, waveDone: true, nextWaveT: 0.5,
+      banner: 0, bannerText: "", bannerSub: "", shake: 0, seedPulse: 0,
+    });
+    $("overlay").hidden = true;
+  }
+  reset();
+  S.mode = "title";
+  $("overlay").hidden = false;
+
+  const rowY = (row) => GY + row * CH + CH / 2;
+  const colX = (col) => GX + col * CW + CW / 2;
+  const birds = () => S.grid.filter(Boolean);
+
+  function startWave() {
+    S.wave++;
+    S.waveDone = false;
+    const n = S.wave;
+    const q = [];
+    const count = 3 + n * 2;
+    for (let i = 0; i < count; i++) {
+      const r = Math.random();
+      if (n >= 5 && r < 0.12 + n * 0.01) q.push("tank");
+      else if (n >= 3 && r < 0.3) q.push("runner");
+      else if (n >= 2 && r < 0.5 + n * 0.02) q.push("helmet");
+      else q.push("scout");
+    }
+    if (n % 6 === 0) q.push("boss");
+    S.queue = q;
+    S.total = q.length;
+    S.spawned = 0;
+    S.spawnGap = Math.max(2.2, 8 - n * 0.55);
+    S.spawnT = n === 1 ? 14 : 4;
+    S.banner = 2.4;
+    S.bannerText = `Wave ${n}`;
+    S.bannerSub = n % 6 === 0 ? "A giant robot is coming" : n === 1 ? "Plant chicks for seeds, then peckers to fight" : "Here they come";
+    sfx("wave");
+  }
+
+  function spawnRobot(type) {
+    const d = ROBOTS[type], m = 1 + (S.wave - 1) * 0.08;
+    const row = Math.floor(Math.random() * ROWS);
+    S.robots.push({ type, row, x: W + 30, y: rowY(row), hp: d.hp * m, max: d.hp * m, sp: d.sp * rand(0.9, 1.1), dps: d.dps, val: d.val, t: rand(0, 6), slow: 0, flash: 0, eating: false });
+    S.spawned++;
+  }
+
+  // ---------- input ----------
+  function toWorld(e) {
+    const r = cv.getBoundingClientRect();
+    return { x: ((e.clientX - r.left) / r.width) * W, y: ((e.clientY - r.top) / r.height) * H };
+  }
+  const cardRect = (i) => ({ x: CARD_X + i * (CARD_W + CARD_GAP), y: BAR_Y + 6, w: CARD_W, h: CARD_H });
+  const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+  function cellAt(p) {
+    const col = Math.floor((p.x - GX) / CW), row = Math.floor((p.y - GY) / CH);
+    if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return null;
+    return { col, row, i: row * COLS + col };
+  }
+
+  function selectCard(id) {
+    if (!id || ORDER.indexOf(id) >= S.unlocked) return;
+    const b = BIRDS[id];
+    if ((S.cool[id] || 0) > 0) { sfx("nope"); return; }
+    if (S.seeds < b.cost) { sfx("nope"); float(150, 128, `Need ${b.cost} seeds`, "#fff"); return; }
+    S.sel = S.sel === id ? null : id;
+    S.recall = false;
+  }
+
+  cv.addEventListener("pointermove", (e) => { S.hover = toWorld(e); });
+  cv.addEventListener("pointerleave", () => { S.hover = null; });
+  cv.addEventListener("contextmenu", (e) => e.preventDefault());
+  cv.addEventListener("pointerdown", (e) => {
+    if (S.mode !== "play") return;
+    const p = toWorld(e);
+    S.hover = p;
+    if (Math.hypot(p.x - PAUSE.x, p.y - PAUSE.y) < PAUSE.r + 6) { togglePause(); return; }
+    for (const pk of S.pickups) {
+      if (Math.hypot(p.x - pk.x, p.y - pk.y) < 34) { collect(pk); return; }
+    }
+    if (p.y < BAR_Y + CARD_H + 10) {
+      for (let i = 0; i < S.unlocked; i++) if (inRect(p, cardRect(i))) { selectCard(ORDER[i]); return; }
+      if (inRect(p, RECALL)) { S.recall = !S.recall; S.sel = null; }
+      return;
+    }
+    const c = cellAt(p);
+    if (!c) return;
+    if (S.recall) {
+      if (S.grid[c.i]) { feathers(S.grid[c.i]); S.grid[c.i] = null; sfx("place"); }
+      S.recall = false;
+      return;
+    }
+    if (S.sel && !S.grid[c.i]) place(S.sel, c);
+  });
+
+  addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if (k === "p") togglePause();
+    else if (k === "escape") { if (S.sel || S.recall) { S.sel = null; S.recall = false; } else togglePause(); }
+    else if (k === "m") muted = !muted;
+    else if (k === "enter" && (S.mode === "title" || S.mode === "over")) start();
+    else if (S.mode === "play" && k >= "1" && k <= "7") selectCard(ORDER[Number(k) - 1]);
+    else if (S.mode === "play" && k === "r") { S.recall = !S.recall; S.sel = null; }
+  });
+  document.addEventListener("visibilitychange", () => { if (document.hidden && S.mode === "play") togglePause(); });
+
+  function start() { reset(); sfx("wave"); }
+  $("go").addEventListener("click", () => { if (S.mode === "paused") togglePause(); else start(); });
+
+  function togglePause() {
+    if (S.mode === "play") { S.mode = "paused"; showOverlay("Paused", "The robots will wait.", "Resume", false); }
+    else if (S.mode === "paused") { S.mode = "play"; $("overlay").hidden = true; last = performance.now(); }
+  }
+  function showOverlay(title, msg, btn, tips) {
+    $("title").textContent = title;
+    $("msg").textContent = msg;
+    $("go").textContent = btn;
+    $("tips").hidden = !tips;
+    $("best").textContent = best;
+    $("overlay").hidden = false;
+    $("go").focus({ preventScroll: true });
+  }
+
+  // ---------- actions ----------
+  function float(x, y, text, c = "#fff", size = 20) { S.texts.push({ x, y, text, c, size, life: 1.2 }); }
+  function burst(x, y, n, colors, speed = 200, size = 5, grav = 400) {
+    for (let i = 0; i < n; i++) {
+      const a = rand(0, TAU), s = rand(speed * 0.3, speed);
+      S.parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 80, r: rand(size * 0.5, size), life: rand(0.4, 0.9), max: 0.9, c: colors[i % colors.length], g: grav, sq: Math.random() < 0.5 });
+    }
+  }
+  function feathers(b) { burst(b.x, b.y, 12, ["#ffffff", "#ffe27a", "#f2c200"], 160, 5, 120); }
+
+  function place(id, c) {
+    const d = BIRDS[id];
+    if (S.seeds < d.cost || (S.cool[id] || 0) > 0) { S.sel = null; return; }
+    S.seeds -= d.cost;
+    S.cool[id] = d.cd;
+    S.grid[c.i] = { type: id, row: c.row, col: c.col, x: colX(c.col), y: rowY(c.row), hp: d.hp, max: d.hp, t: 0.6, lay: 5, flash: 0, kick: 0, fuse: 1, second: 0, age: 0 };
+    S.sel = null;
+    burst(colX(c.col), rowY(c.row) + 28, 8, ["#8fd65a", "#5ea83a"], 120, 4);
+    sfx("place");
+  }
+
+  function collect(pk) {
+    pk.dead = true;
+    S.seeds += pk.val;
+    S.seedPulse = 1;
+    float(pk.x, pk.y - 20, `+${pk.val}`, "#ffe27a");
+    sfx("seed");
+  }
+
+  function shoot(b) {
+    const d = BIRDS[b.type];
+    S.shots.push({ x: b.x + 22, y: b.y - 6, row: b.row, dmg: d.dmg, kind: d.shot, slow: d.slow || 0, t: 0 });
+    b.kick = 1;
+    sfx("shoot");
+  }
+
+  function explode(b) {
+    S.grid[b.row * COLS + b.col] = null;
+    for (const r of S.robots) {
+      if (Math.abs(r.row - b.row) <= 1 && Math.abs(r.x - b.x) < CW * 1.6) { r.hp -= 1800; r.flash = 0.2; }
+    }
+    burst(b.x, b.y, 40, ["#ff7a1a", "#ffd23f", "#ff3b1f", "#5a4a40"], 380, 9, 300);
+    S.shake = 12;
+    sfx("boom");
+  }
+
+  function killRobot(r) {
+    r.dead = true;
+    S.score += r.val;
+    float(r.x, r.y - 40, `+${r.val}`);
+    burst(r.x, r.y, r.type === "boss" ? 50 : 16, ["#9aa5b1", "#5b6570", "#ffcc33", "#ff3b3b"], r.type === "boss" ? 360 : 220, 6);
+    sfx("clank");
+  }
+
+  function gameOver() {
+    S.mode = "over";
+    S.shake = 16;
+    sfx("lose");
+    const reached = S.wave;
+    const isBest = reached > best;
+    if (isBest) { best = reached; try { localStorage.setItem("coopdefense.best", String(best)); } catch (e) {} }
+    showOverlay("The eggs are gone", `The robots broke through on wave ${reached}. Score ${fmt(S.score)}.${isBest ? " New best wave." : ""}`, "Play again", false);
+  }
+
+  // ---------- update ----------
+  function update(dt) {
+    if (S.mode !== "play") return;
+    S.shake = Math.max(0, S.shake - dt * 30);
+    S.seedPulse = Math.max(0, S.seedPulse - dt * 3);
+    S.banner -= dt;
+    for (const id in S.cool) S.cool[id] = Math.max(0, S.cool[id] - dt);
+
+    S.harvestT -= dt;
+    if (S.harvestT <= 0) {
+      S.harvestT = 10;
+      S.seeds += 25;
+      S.seedPulse = 1;
+      float(48, 128, "+25 harvest", "#ffe27a", 16);
+      sfx("seed");
+    }
+
+    // waves
+    if (S.queue.length) {
+      S.spawnT -= dt;
+      if (S.spawnT <= 0) { spawnRobot(S.queue.shift()); S.spawnT = S.spawnGap * rand(0.6, 1.3); }
+    } else if (!S.waveDone && !S.robots.length) {
+      S.waveDone = true;
+      S.nextWaveT = 7;
+      S.seeds += 50 + S.wave * 10;
+      if (S.unlocked < ORDER.length) {
+        const id = ORDER[S.unlocked];
+        S.unlocked++;
+        S.banner = 3.2;
+        S.bannerText = `New bird: ${BIRDS[id].name}`;
+        S.bannerSub = UNLOCK_NOTE[id] || "";
+      } else {
+        S.banner = 2.4;
+        S.bannerText = `Wave ${S.wave} cleared`;
+        S.bannerSub = `+${50 + S.wave * 10} bonus seeds`;
+      }
+      sfx("wave");
+    }
+    if (S.waveDone) { S.nextWaveT -= dt; if (S.nextWaveT <= 0) startWave(); }
+
+    // birds
+    for (const b of birds()) {
+      const d = BIRDS[b.type];
+      b.age += dt;
+      b.flash -= dt;
+      b.kick = Math.max(0, b.kick - dt * 5);
+      if (b.type === "chick") {
+        b.lay -= dt;
+        if (b.lay <= 0) {
+          b.lay = rand(8, 10);
+          S.pickups.push({ x: b.x + rand(-14, 14), y: b.y - 10, vy: -170, floor: b.y + 22, life: 8, val: 25, bob: rand(0, 6) });
+          b.kick = 1;
+        }
+      }
+      if (d.fire) {
+        b.t -= dt;
+        const ahead = S.robots.some((r) => r.row === b.row && r.x > b.x - 10 && r.x < W + 10);
+        if (b.t <= 0 && ahead) {
+          b.t = d.fire;
+          shoot(b);
+          if (d.double) b.second = 0.18;
+        }
+        if (b.second > 0) { b.second -= dt; if (b.second <= 0) shoot(b); }
+      }
+      if (d.bomb) { b.fuse -= dt; if (b.fuse <= 0) explode(b); }
+    }
+
+    // shots
+    for (const s of S.shots) {
+      s.t += dt;
+      s.x += 380 * dt;
+      if (s.x > W + 20) { s.dead = true; continue; }
+      let hit = null;
+      for (const r of S.robots) {
+        if (r.dead || r.row !== s.row || Math.abs(r.x - s.x) > 22) continue;
+        if (!hit || r.x < hit.x) hit = r;
+      }
+      if (hit) {
+        s.dead = true;
+        hit.hp -= s.dmg;
+        hit.flash = 0.07;
+        if (s.slow) hit.slow = s.slow;
+        burst(s.x, s.y, 4, s.kind === "snow" ? ["#e8f7ff", "#9fd8ff"] : ["#ffd27a", "#c98a4b"], 120, 3);
+        sfx("hit");
+      }
+    }
+
+    // robots
+    for (const r of S.robots) {
+      if (r.dead) continue;
+      if (r.hp <= 0) { killRobot(r); continue; }
+      r.t += dt;
+      r.flash -= dt;
+      r.slow = Math.max(0, r.slow - dt);
+      const k = r.slow > 0 ? 0.5 : 1;
+      const col = Math.floor((r.x - 26 - GX) / CW);
+      const target = col >= 0 && col < COLS ? S.grid[r.row * COLS + col] : null;
+      if (target && r.x - 26 < target.x + CW * 0.35) {
+        r.eating = true;
+        target.hp -= r.dps * k * dt;
+        target.flash = 0.06;
+        if (target.hp <= 0) { feathers(target); S.grid[r.row * COLS + col] = null; sfx("clank"); }
+      } else {
+        r.eating = false;
+        r.x -= r.sp * k * dt;
+      }
+      if (r.x < GX - 4) {
+        if (S.guards[r.row]) {
+          S.guards[r.row] = false;
+          S.runners.push({ row: r.row, x: 20, y: rowY(r.row) + 20 });
+          float(60, rowY(r.row) - 30, "Charge!", "#ffe27a");
+          sfx("wave");
+        } else if (r.x < 16 && !S.runners.some((u) => u.row === r.row)) {
+          gameOver();
+          return;
+        }
+      }
+    }
+
+    for (const u of S.runners) {
+      u.x += 460 * dt;
+      for (const r of S.robots) if (!r.dead && r.row === u.row && Math.abs(r.x - u.x) < 34) { r.hp = 0; killRobot(r); }
+      if (Math.random() < 0.6) S.parts.push({ x: u.x - 16, y: u.y + 14, vx: rand(-60, -20), vy: rand(-60, -20), r: rand(2, 4), life: 0.4, max: 0.4, c: "#c9b48a", g: 200 });
+      if (u.x > W + 40) u.dead = true;
+    }
+
+    for (const pk of S.pickups) {
+      pk.life -= dt;
+      if (pk.vy !== 0 || pk.y < pk.floor) {
+        pk.vy += 520 * dt;
+        pk.y += pk.vy * dt;
+        if (pk.y >= pk.floor) { pk.y = pk.floor; pk.vy = 0; }
+      }
+      if (pk.life <= 0) collect(pk);
+    }
+
+    for (const p of S.parts) { p.life -= dt; p.vy += p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt; }
+    for (const t of S.texts) { t.life -= dt; t.y -= 30 * dt; }
+
+    S.shots = S.shots.filter((x) => !x.dead);
+    S.robots = S.robots.filter((x) => !x.dead);
+    S.runners = S.runners.filter((x) => !x.dead);
+    S.pickups = S.pickups.filter((x) => !x.dead);
+    S.parts = S.parts.filter((x) => x.life > 0);
+    S.texts = S.texts.filter((x) => x.life > 0);
+  }
+
+  // ---------- drawing ----------
+  function E(g, x, y, rx, ry, c, rot = 0) { g.fillStyle = c; g.beginPath(); g.ellipse(x, y, rx, ry, rot, 0, TAU); g.fill(); }
+  function P(g, pts, c) { g.fillStyle = c; g.beginPath(); pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.closePath(); g.fill(); }
+  function R(g, x, y, w, h, c, r = 4) { g.fillStyle = c; g.beginPath(); g.roundRect(x, y, w, h, r); g.fill(); }
+  function eye(g, x, y, r = 3.6) { E(g, x, y, r * 1.35, r * 1.45, "#fff"); E(g, x + r * 0.35, y, r * 0.8, r, "#1b1410"); E(g, x + r * 0.05, y - r * 0.4, r * 0.3, r * 0.3, "#fff"); }
+  function feet(g, c = "#ff9a1f") {
+    g.strokeStyle = c; g.lineWidth = 3; g.lineCap = "round";
+    g.beginPath(); g.moveTo(-6, 22); g.lineTo(-6, 28); g.moveTo(6, 22); g.lineTo(6, 28); g.stroke();
+  }
+
+  function drawBird(g, type, t) {
+    if (type === "chick") {
+      feet(g);
+      E(g, 0, -17, 3, 6, "#ffd93b", 0.3);
+      E(g, 0, 4, 22, 20, "#ffd93b");
+      E(g, 4, 10, 13, 10, "#fff3b0");
+      E(g, -8, 6, 10, 8, "#f2c200", -0.3);
+      eye(g, 8, -4);
+      P(g, [[17, -1], [27, 2], [17, 6]], "#ff9a1f");
+      E(g, 4, 2, 4, 2.5, "rgba(255, 120, 120, 0.5)");
+    } else if (type === "pecker") {
+      feet(g, "#555");
+      P(g, [[-16, 6], [-32, -4], [-28, 14]], "#6e4420");
+      E(g, 0, 6, 20, 18, "#8b5a2b");
+      E(g, 6, 11, 11, 10, "#f1d9b5");
+      E(g, 4, -10, 13, 10, "#d33a2c");
+      P(g, [[2, -20], [-6, -26], [8, -18]], "#d33a2c");
+      eye(g, 9, -8, 3.2);
+      P(g, [[15, -8], [34, -4], [15, -1]], "#5d5d5d");
+    } else if (type === "owl") {
+      P(g, [[-20, -14], [-14, -32], [-6, -18]], "#7a4f2a");
+      P(g, [[20, -14], [14, -32], [6, -18]], "#7a4f2a");
+      E(g, 0, 2, 26, 27, "#9a6a3c");
+      E(g, 0, 12, 17, 15, "#e9d3b0");
+      for (let i = 0; i < 3; i++) P(g, [[-8 + i * 8, 8], [-4 + i * 8, 12], [i * 8, 8]], "#c4a57c");
+      E(g, -9, -6, 10, 10, "#f7c948"); E(g, 9, -6, 10, 10, "#f7c948");
+      E(g, -9, -6, 6, 6.5, "#1b1410"); E(g, 9, -6, 6, 6.5, "#1b1410");
+      E(g, -7, -8, 2, 2, "#fff"); E(g, 11, -8, 2, 2, "#fff");
+      P(g, [[-3, 2], [3, 2], [0, 8]], "#ff9a1f");
+      feet(g);
+    } else if (type === "penguin") {
+      feet(g);
+      E(g, 0, 4, 20, 25, "#22262e");
+      E(g, 4, 8, 13, 18, "#f8f8f8");
+      R(g, -16, -8, 32, 6, "#3fa9f5", 3);
+      P(g, [[-12, -6], [-20, 8], [-12, 8]], "#3fa9f5");
+      eye(g, 8, -14, 3.2);
+      P(g, [[15, -13], [25, -10], [15, -7]], "#ff9a1f");
+      E(g, -16, 8, 6, 12, "#1a1d24", 0.3);
+    } else if (type === "eagle") {
+      feet(g, "#f2c200");
+      P(g, [[-16, 10], [-32, 4], [-28, 20]], "#4a2a14");
+      E(g, 0, 8, 21, 19, "#6b3f1f");
+      E(g, -6, 10, 12, 10, "#55301a", -0.3);
+      E(g, 6, -10, 14, 12, "#fafafa");
+      eye(g, 10, -12, 3);
+      g.strokeStyle = "#3a2410"; g.lineWidth = 2.5; g.beginPath(); g.moveTo(5, -19); g.lineTo(15, -15); g.stroke();
+      P(g, [[17, -11], [29, -9], [27, -2], [21, -5], [17, -4]], "#f2c200");
+    } else if (type === "rooster") {
+      feet(g);
+      P(g, [[-16, 0], [-34, -16], [-30, -2], [-36, 6], [-18, 10]], "#2e7d4f");
+      E(g, 0, 6, 21, 19, "#e0552b");
+      E(g, 5, 11, 12, 10, "#ffb37a");
+      E(g, 4, -13, 11, 10, "#e0552b");
+      E(g, 0, -24, 4, 5, "#e31b23"); E(g, 6, -25, 4, 5, "#e31b23"); E(g, 11, -22, 3.5, 4.5, "#e31b23");
+      E(g, 15, -2, 3, 5, "#e31b23");
+      eye(g, 8, -14, 3);
+      P(g, [[14, -12], [23, -9], [14, -6]], "#ffcc33");
+    } else if (type === "pelican") {
+      feet(g);
+      E(g, -2, 8, 21, 18, "#f4f4ee");
+      E(g, -8, 10, 12, 9, "#d8d8cc", -0.3);
+      E(g, 6, -12, 11, 10, "#f4f4ee");
+      P(g, [[12, -14], [40, -10], [36, -6], [26, 6], [14, -2]], "#ff9a1f");
+      P(g, [[14, -6], [36, -6], [26, 6]], "#f07a12");
+      eye(g, 8, -15, 3);
+    }
+  }
+
+  function drawRobot(g, r, now) {
+    const walk = r.eating ? 0 : Math.sin(r.t * 7);
+    const chew = r.eating ? Math.sin(now * 0.02) : 0;
+    g.save();
+    g.translate(r.x, r.y + 8);
+    if (r.type === "boss") g.scale(1.7, 1.7), g.translate(0, -14);
+    if (r.type === "runner") g.scale(0.85, 0.85);
+    const body = r.type === "runner" ? "#ff8a3d" : r.type === "boss" ? "#7b6cff" : "#c9d1d8";
+    const dark = r.type === "runner" ? "#c25a16" : r.type === "boss" ? "#4b3fbf" : "#8a96a3";
+    E(g, 0, 36, 22, 5, "rgba(0, 0, 0, 0.22)");
+    if (r.type === "tank") {
+      R(g, -30, 18, 60, 16, "#3a3f45", 8);
+      for (let i = -24; i <= 24; i += 12) E(g, i + ((r.t * 20) % 12) - 6, 26, 4, 4, "#6c737b");
+      R(g, -28, -10, 56, 30, "#6f7b86", 8);
+      R(g, -24, -4, 20, 12, "#55606b", 3);
+      R(g, -16, -32, 30, 24, "#8a96a3", 6);
+      R(g, -14, -26, 16, 7, "#ff3b3b", 3);
+      R(g, -40, -24, 26, 6, "#4a525a", 3);
+    } else {
+      if (r.type === "runner") {
+        E(g, 0, 26, 11, 11, "#3a3f45"); E(g, 0, 26, 4, 4, "#9aa5b1");
+      } else {
+        R(g, -12 + walk * 4, 14, 8, 20, dark, 3); R(g, 4 - walk * 4, 14, 8, 20, dark, 3);
+        R(g, -14 + walk * 4, 30, 12, 5, "#3a3f45", 2); R(g, 2 - walk * 4, 30, 12, 5, "#3a3f45", 2);
+      }
+      R(g, -18, -14, 36, 32, body, 8);
+      R(g, -10, -6, 20, 14, dark, 4);
+      E(g, -4, 1, 3, 3, "#ffcc33"); E(g, 4, 1, 3, 3, "#ff3b3b");
+      R(g, -32 - chew * 4, -2 + chew * 2, 18, 7, dark, 3);
+      E(g, -33 - chew * 4, 1 + chew * 2, 5, 5, "#3a3f45");
+      R(g, -16, -40, 32, 26, body, 7);
+      R(g, -17, -33, 20, 9, "#2a2f36", 4);
+      R(g, -15, -31, 16, 5, "#ff3b3b", 2);
+      E(g, -11, -29, 3, 2, "#ffd0d0");
+      g.strokeStyle = dark; g.lineWidth = 2; g.beginPath(); g.moveTo(4, -40); g.lineTo(4, -50); g.stroke();
+      E(g, 4, -52, 3.5, 3.5, Math.sin(now * 0.008 + r.x) > 0 ? "#ff3b3b" : "#7a1b1b");
+      if (r.type === "helmet") {
+        g.fillStyle = "#ffcc33";
+        g.beginPath(); g.ellipse(0, -40, 20, 13, 0, Math.PI, TAU); g.fill();
+        R(g, -22, -42, 44, 5, "#e0a800", 2);
+        g.fillStyle = "#2a2f36";
+        for (let i = -12; i <= 8; i += 10) { g.beginPath(); g.moveTo(i, -42); g.lineTo(i + 4, -42); g.lineTo(i + 8, -50); g.lineTo(i + 4, -50); g.fill(); }
+      }
+      if (r.type === "boss") {
+        P(g, [[-14, -40], [-10, -54], [-6, -40]], "#ffcc33");
+        P(g, [[-4, -40], [0, -58], [4, -40]], "#ffcc33");
+        P(g, [[6, -40], [10, -54], [14, -40]], "#ffcc33");
+      }
+    }
+    if (r.slow > 0) { g.globalAlpha = 0.35; E(g, 0, -6, 26, 40, "#7cc8ff"); g.globalAlpha = 1; }
+    if (r.flash > 0) { g.globalAlpha = 0.6; E(g, 0, -6, 24, 38, "#ffffff"); g.globalAlpha = 1; }
+    g.restore();
+    if (r.hp < r.max) {
+      const w = r.type === "boss" ? 70 : 36, y = r.type === "boss" ? r.y - 92 : r.y - 54;
+      R(g, r.x - w / 2, y, w, 5, "rgba(0, 0, 0, 0.45)", 2);
+      R(g, r.x - w / 2, y, w * clamp(r.hp / r.max, 0, 1), 5, "#ff4d3d", 2);
+    }
+  }
+
+  function drawSeed(g, x, y, s = 1) {
+    g.save(); g.translate(x, y); g.scale(s, s);
+    E(g, 0, 0, 13, 13, "rgba(255, 215, 80, 0.35)");
+    E(g, 0, 0, 7, 10, "#f5b82e", 0.5);
+    E(g, -1.5, -2, 3, 6, "#ffe08a", 0.5);
+    g.restore();
+  }
+
+  function drawBackground(now) {
+    const sky = ctx.createLinearGradient(0, 0, 0, GY);
+    sky.addColorStop(0, "#8fdcff");
+    sky.addColorStop(1, "#c9f0a8");
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, GY);
+    E(ctx, 100, GY + 10, 180, 50, "#6cc04a"); E(ctx, 460, GY + 14, 220, 60, "#5fb43f");
+    // fence
+    ctx.fillStyle = "#a8743f";
+    for (let x = 12; x < W; x += 44) R(ctx, x, GY - 34, 10, 34, "#a8743f", 3);
+    R(ctx, 0, GY - 26, W, 6, "#8a5a2b", 2);
+    // grid
+    ctx.fillStyle = "#3f9a2e"; ctx.fillRect(0, GY, W, ROWS * CH);
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+      ctx.fillStyle = (r + c) % 2 ? "#4fae3a" : "#5bbd44";
+      ctx.fillRect(GX + c * CW, GY + r * CH, CW, CH);
+    }
+    ctx.fillStyle = "#3a8a2a"; ctx.fillRect(0, GY, GX, ROWS * CH);
+    // tufts
+    ctx.fillStyle = "rgba(255, 255, 255, 0.12)";
+    for (let i = 0; i < 40; i++) { const x = GX + ((i * 137) % (COLS * CW)), y = GY + ((i * 251) % (ROWS * CH)); E(ctx, x, y, 3, 1.5, "rgba(30, 90, 20, 0.35)"); }
+    // eggs and guards
+    for (let r = 0; r < ROWS; r++) {
+      const y = rowY(r);
+      E(ctx, 22, y + 6, 16, 22, "#ff8fb0");
+      E(ctx, 16, y, 3, 4, "#fff"); E(ctx, 27, y + 12, 3.5, 3, "#fff"); E(ctx, 20, y + 20, 2.5, 2.5, "#fff");
+      if (S.guards && S.guards[r]) {
+        ctx.save(); ctx.translate(36, y + 14); ctx.scale(0.6, 0.6); drawBird(ctx, "chick", now); ctx.restore();
+      }
+    }
+    // hedge and ground
+    const by = GY + ROWS * CH;
+    ctx.fillStyle = "#6b4a2b"; ctx.fillRect(0, by, W, H - by);
+    for (let x = -10; x < W + 20; x += 40) E(ctx, x, by + 10, 30, 22, x % 80 ? "#2f7d2a" : "#3a9033");
+  }
+
+  function drawBar(now) {
+    R(ctx, 6, BAR_Y, W - 12, CARD_H + 12, "#5e3a17", 12);
+    R(ctx, 9, BAR_Y + 3, W - 18, CARD_H + 6, "#8a5a2b", 10);
+    // seed box
+    R(ctx, 14, BAR_Y + 6, 70, CARD_H, "#5e3a17", 10);
+    R(ctx, 17, BAR_Y + 9, 64, CARD_H - 6, "#3b2410", 8);
+    drawSeed(ctx, 49, BAR_Y + 34, 1.5 + S.seedPulse * 0.3);
+    R(ctx, 20, BAR_Y + 58, 58, 24, "#fff6dc", 6);
+    ctx.fillStyle = "#3a2410"; ctx.font = '20px "Lilita One", sans-serif'; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(fmt(S.seeds || 0), 49, BAR_Y + 71);
+    // cards
+    for (let i = 0; i < ORDER.length; i++) {
+      const id = ORDER[i], d = BIRDS[id], c = cardRect(i);
+      const locked = i >= (S.unlocked || 2);
+      R(ctx, c.x, c.y, c.w, c.h, S.sel === id ? "#ffe066" : "#e8c27a", 8);
+      R(ctx, c.x + 3, c.y + 3, c.w - 6, c.h - 26, locked ? "#3a5a35" : "#5fb43f", 6);
+      if (!locked) {
+        ctx.save(); ctx.beginPath(); ctx.rect(c.x + 3, c.y + 3, c.w - 6, c.h - 26); ctx.clip();
+        ctx.translate(c.x + c.w / 2 - 2, c.y + 34); ctx.scale(0.82, 0.82); drawBird(ctx, id, now); ctx.restore();
+        R(ctx, c.x + 3, c.y + c.h - 21, c.w - 6, 18, "#fff6dc", 4);
+        ctx.fillStyle = "#3a2410"; ctx.font = '15px "Lilita One", sans-serif';
+        ctx.fillText(d.cost, c.x + c.w / 2 - 6, c.y + c.h - 11);
+        drawSeed(ctx, c.x + c.w - 12, c.y + c.h - 12, 0.6);
+        const cool = (S.cool && S.cool[id]) || 0;
+        if (cool > 0) { ctx.fillStyle = "rgba(0, 0, 0, 0.5)"; ctx.fillRect(c.x, c.y, c.w, c.h * (cool / d.cd)); }
+        if ((S.seeds || 0) < d.cost) { ctx.fillStyle = "rgba(40, 20, 0, 0.42)"; ctx.beginPath(); ctx.roundRect(c.x, c.y, c.w, c.h, 8); ctx.fill(); }
+        ctx.fillStyle = "rgba(255, 255, 255, 0.85)"; ctx.font = '11px "Fredoka", sans-serif'; ctx.fillText(i + 1, c.x + 9, c.y + 11);
+      } else {
+        ctx.fillStyle = "#c9e3b0"; ctx.font = '26px "Lilita One", sans-serif'; ctx.fillText("?", c.x + c.w / 2, c.y + 32);
+        R(ctx, c.x + 3, c.y + c.h - 21, c.w - 6, 18, "#d9c39a", 4);
+        ctx.fillStyle = "#7a5a32"; ctx.font = '11px "Fredoka", sans-serif'; ctx.fillText("locked", c.x + c.w / 2, c.y + c.h - 11);
+      }
+    }
+    // recall
+    const rc = RECALL;
+    R(ctx, rc.x, rc.y, rc.w, rc.h, S.recall ? "#ffe066" : "#c9853f", 8);
+    R(ctx, rc.x + 3, rc.y + 3, rc.w - 6, rc.h - 6, "#7a4a1f", 6);
+    ctx.save(); ctx.translate(rc.x + rc.w / 2, rc.y + 32); ctx.rotate(-0.6);
+    R(ctx, -3, -18, 6, 26, "#d9b27a", 2); P(ctx, [[-9, 6], [9, 6], [6, 20], [-6, 20]], "#b8c2cc");
+    ctx.restore();
+    ctx.fillStyle = "#ffe066"; ctx.font = '13px "Lilita One", sans-serif'; ctx.fillText("Recall", rc.x + rc.w / 2, rc.y + rc.h - 13);
+    // harvest bar
+    const hy = BAR_Y + CARD_H + 18;
+    R(ctx, 14, hy - 4, 572, 18, "rgba(94, 58, 23, 0.85)", 9);
+    R(ctx, 22, hy + 1, 400, 8, "rgba(0, 0, 0, 0.35)", 4);
+    R(ctx, 22, hy + 1, 400 * (1 - (S.harvestT || 10) / 10), 8, "#3fc0e0", 4);
+    ctx.textAlign = "right"; ctx.fillStyle = "#fff6dc"; ctx.font = '13px "Fredoka", sans-serif';
+    ctx.fillText(`Next harvest in ${Math.ceil(S.harvestT || 10)}`, 578, hy + 5);
+    drawSeed(ctx, 438, hy + 5, 0.55);
+    ctx.textAlign = "center";
+  }
+
+  function drawBottom() {
+    const y = 700;
+    R(ctx, 10, y, W - 20, 56, "#5e3a17", 14);
+    R(ctx, 13, y + 3, W - 26, 50, "#8a5a2b", 12);
+    ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.fillStyle = "#fff6dc"; ctx.font = '20px "Lilita One", sans-serif';
+    ctx.fillText(`Score ${fmt(S.score || 0)}`, 28, y + 28);
+    // wave progress
+    const px = 210, pw = 290;
+    ctx.fillStyle = "#fff6dc"; ctx.font = '13px "Fredoka", sans-serif';
+    ctx.fillText(`Wave ${Math.max(1, S.wave || 1)}`, px, y + 15);
+    R(ctx, px, y + 28, pw, 12, "#3b2410", 6);
+    const prog = S.total ? S.spawned / S.total : 0;
+    R(ctx, px, y + 28, pw * clamp(prog, 0, 1), 12, "#ff6b4a", 6);
+    // pause
+    E(ctx, PAUSE.x, PAUSE.y, PAUSE.r, PAUSE.r, "#ff9a1f");
+    R(ctx, PAUSE.x - 8, PAUSE.y - 9, 6, 18, "#fff", 2);
+    R(ctx, PAUSE.x + 2, PAUSE.y - 9, 6, 18, "#fff", 2);
+    ctx.textAlign = "center";
+  }
+
+  function render(now) {
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    if (S.shake > 0) ctx.translate(rand(-S.shake, S.shake) * 0.4, rand(-S.shake, S.shake) * 0.4);
+    drawBackground(now);
+
+    // placement highlight
+    if (S.mode === "play" && S.hover && (S.sel || S.recall)) {
+      const c = cellAt(S.hover);
+      if (c) {
+        const ok = S.recall ? !!S.grid[c.i] : !S.grid[c.i];
+        ctx.fillStyle = ok ? "rgba(255, 255, 255, 0.25)" : "rgba(255, 60, 60, 0.25)";
+        ctx.fillRect(GX + c.col * CW, GY + c.row * CH, CW, CH);
+        if (S.sel && ok) { ctx.save(); ctx.globalAlpha = 0.5; ctx.translate(colX(c.col), rowY(c.row)); drawBird(ctx, S.sel, now); ctx.restore(); }
+      }
+    }
+
+    for (let row = 0; row < ROWS; row++) {
+      for (const b of S.grid || []) {
+        if (!b || b.row !== row) continue;
+        ctx.save();
+        const bob = Math.sin(now * 0.004 + b.col) * 1.5;
+        ctx.translate(b.x - b.kick * 4, b.y + bob);
+        E(ctx, 0, 30, 20, 5, "rgba(0, 0, 0, 0.2)");
+        if (b.type === "rooster") { const s = 1 + (1 - b.fuse) * 0.35; ctx.scale(s, s); }
+        drawBird(ctx, b.type, now);
+        if (b.type === "rooster" && Math.floor(b.fuse * 10) % 2) { ctx.globalAlpha = 0.5; E(ctx, 0, 0, 24, 24, "#fff"); ctx.globalAlpha = 1; }
+        if (b.flash > 0) { ctx.globalAlpha = 0.35; E(ctx, 0, 2, 24, 26, "#ff5040"); ctx.globalAlpha = 1; }
+        if (b.type === "chick" && b.lay < 1.2) drawSeed(ctx, -16, 18, 0.7);
+        ctx.restore();
+        if (b.hp < b.max && b.max < 9999) {
+          R(ctx, b.x - 18, b.y - 40, 36, 4, "rgba(0, 0, 0, 0.4)", 2);
+          R(ctx, b.x - 18, b.y - 40, 36 * clamp(b.hp / b.max, 0, 1), 4, "#7fd34e", 2);
+        }
+      }
+      for (const r of S.robots || []) if (r.row === row) drawRobot(ctx, r, now);
+    }
+
+    for (const s of S.shots || []) {
+      if (s.kind === "snow") { E(ctx, s.x, s.y, 8, 8, "#f2fbff"); E(ctx, s.x - 2, s.y - 2, 3, 3, "#bfe6ff"); }
+      else if (s.kind === "fish") {
+        ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.t * 14);
+        E(ctx, 0, 0, 13, 6, "#7ab8d9"); P(ctx, [[-11, 0], [-19, -7], [-19, 7]], "#5a98b9"); E(ctx, 7, -1, 1.6, 1.6, "#1b1410");
+        ctx.restore();
+      } else if (s.kind === "feather") { E(ctx, s.x, s.y, 12, 3.5, "#fafafa"); E(ctx, s.x - 4, s.y, 6, 1.2, "#c9b48a"); }
+      else { E(ctx, s.x, s.y, 7, 4.5, "#c98a4b"); E(ctx, s.x + 1, s.y - 1.5, 3, 1.5, "#ffd9a0"); }
+    }
+
+    for (const u of S.runners || []) {
+      ctx.save(); ctx.translate(u.x, u.y - 14 + Math.abs(Math.sin(u.x * 0.08)) * -6); ctx.scale(0.9, 0.9); drawBird(ctx, "chick", now); ctx.restore();
+    }
+
+    for (const pk of S.pickups || []) drawSeed(ctx, pk.x, pk.y + Math.sin(now * 0.006 + pk.bob) * 2, 1.4 + (pk.life < 2 ? Math.sin(now * 0.03) * 0.1 : 0));
+
+    for (const p of S.parts || []) {
+      ctx.globalAlpha = clamp(p.life / p.max, 0, 1);
+      if (p.sq) R(ctx, p.x - p.r / 2, p.y - p.r / 2, p.r, p.r, p.c, 1);
+      else E(ctx, p.x, p.y, p.r, p.r, p.c);
+    }
+    ctx.globalAlpha = 1;
+
+    drawBar(now);
+    drawBottom();
+
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (const t of S.texts || []) {
+      ctx.globalAlpha = clamp(t.life, 0, 1);
+      ctx.font = `${t.size}px "Lilita One", sans-serif`;
+      ctx.fillStyle = "rgba(60, 30, 0, 0.6)"; ctx.fillText(t.text, t.x + 1, t.y + 2);
+      ctx.fillStyle = t.c; ctx.fillText(t.text, t.x, t.y);
+    }
+    ctx.globalAlpha = 1;
+
+    if (S.mode === "play" && S.banner > 0) {
+      ctx.globalAlpha = clamp(Math.min(S.banner, 0.5) * 2, 0, 1);
+      const y = GY + ROWS * CH * 0.42;
+      R(ctx, 60, y - 50, W - 120, 100, "rgba(94, 58, 23, 0.85)", 18);
+      ctx.font = '42px "Lilita One", sans-serif';
+      ctx.fillStyle = "#5e3a17"; ctx.fillText(S.bannerText, W / 2, y - 10 + 3);
+      ctx.fillStyle = "#ffc929"; ctx.fillText(S.bannerText, W / 2, y - 10);
+      ctx.font = '17px "Fredoka", sans-serif'; ctx.fillStyle = "#fff6dc";
+      ctx.fillText(S.bannerSub, W / 2, y + 28);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // ---------- loop ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    update(dt);
+    render(now);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
