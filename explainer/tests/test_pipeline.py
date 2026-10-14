@@ -111,3 +111,25 @@ class TimelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WriterTests(unittest.TestCase):
+    def test_invalid_draft_gets_one_repair_round(self):
+        from unittest import mock
+
+        from pipeline import writer
+
+        good = json.loads((ROOT / "specs" / "rope.json").read_text())
+        bad = {**good, "scenes": [{"type": "list", "narration": "x"}]}
+        replies = [json.dumps(bad), "Here you go:\n" + json.dumps(good)]
+        sent = []
+
+        def ask(client, messages):
+            sent.append(list(messages))
+            return replies[len(sent) - 1]
+
+        with mock.patch.object(writer, "_ask", ask), mock.patch.dict("sys.modules", {"anthropic": mock.MagicMock()}):
+            spec = writer.write("ropes")
+        self.assertEqual(spec["title"], good["title"])
+        self.assertEqual(len(sent), 2)
+        self.assertIn("does not validate", sent[1][-1]["content"])
