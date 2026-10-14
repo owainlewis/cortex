@@ -1,0 +1,6 @@
+kokoro-onnx==0.6.1
+faster-whisper==1.2.1
+numpy>=2.0
+scipy>=1.13
+soundfile>=0.12
+anthropic>=1.0

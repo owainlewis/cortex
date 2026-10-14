@@ -1,0 +1,178 @@
+{
+  "title": "Why typing in a huge file doesn't lag",
+  "voice": "am_michael",
+  "speed": 1.05,
+  "theme": "midnight",
+  "format": "vertical",
+  "music": {
+    "mood": "focus"
+  },
+  "pronounce": {
+    "MB": "megabyte",
+    "ropey": "rope-ee"
+  },
+  "post": {
+    "caption": "Your editor never stores your file as one big string. It uses a rope: a tree of small chunks that makes every edit cost the same, anywhere in the file.",
+    "hashtags": [
+      "programming",
+      "datastructures",
+      "rustlang",
+      "texteditor",
+      "coding"
+    ]
+  },
+  "scenes": [
+    {
+      "type": "hook",
+      "kicker": "Data structures",
+      "title": "Type into a *100 MB* file. ==No lag.==",
+      "narration": "Type one letter into a 100 MB file, and your editor doesn't lag. Here's the trick."
+    },
+    {
+      "type": "statement",
+      "kicker": "The naive way",
+      "text": "One long string means ==shifting everything== after the cursor.",
+      "sub": "Insert near the top and almost the whole file has to move.",
+      "narration": "If your file were one long string, every insert means shifting every byte after the cursor, one by one."
+    },
+    {
+      "type": "stat",
+      "kicker": "Per keystroke",
+      "value": 100,
+      "suffix": " MB",
+      "label": "copied for *one* letter",
+      "cue": "hundred",
+      "narration": "That's up to a hundred megabytes copied, for a single letter."
+    },
+    {
+      "type": "tree",
+      "kicker": "The fix",
+      "heading": "A rope: a *tree* of small strings",
+      "root": {
+        "label": "22",
+        "children": [
+          {
+            "label": "11",
+            "children": [
+              {
+                "label": "Hello_"
+              },
+              {
+                "label": "my_na"
+              }
+            ]
+          },
+          {
+            "label": "11",
+            "children": [
+              {
+                "label": "me_i"
+              },
+              {
+                "label": "s_Simon"
+              }
+            ]
+          }
+        ]
+      },
+      "levelCues": [
+        "tree",
+        "branch",
+        "leaves"
+      ],
+      "highlight": {
+        "path": [
+          1,
+          0
+        ],
+        "cue": "walk",
+        "note": "Skip 11 on the left, land in one chunk"
+      },
+      "narration": "Editors use a rope instead. It's a balanced tree. Each branch counts the characters below it, and the leaves hold small chunks of text. To find character fifteen, walk down: skip the left eleven, and land in one small chunk.",
+      "quoteLeaves": true
+    },
+    {
+      "type": "flow",
+      "kicker": "Inserting a letter",
+      "nodes": [
+        {
+          "label": "Walk down to the leaf",
+          "sub": "a few hops, even for huge files"
+        },
+        {
+          "label": "Edit one small chunk",
+          "sub": "a few hundred bytes at most"
+        },
+        {
+          "label": "Update counts on the way up",
+          "sub": "only one path changes"
+        }
+      ],
+      "narration": "Inserting is three steps. Walk down to the right leaf. Edit that one small chunk. Then update the counts on the way back up."
+    },
+    {
+      "type": "bars",
+      "kicker": "Work per keystroke",
+      "heading": "Bytes touched in a *100 MB* file",
+      "unit": " B",
+      "items": [
+        {
+          "label": "Plain string",
+          "value": 100000000,
+          "cue": "plain"
+        },
+        {
+          "label": "Rope",
+          "value": 1000,
+          "highlight": true,
+          "cue": "rope"
+        }
+      ],
+      "narration": "Compare the work. A plain string moves up to a hundred million bytes. A rope touches about a thousand."
+    },
+    {
+      "type": "code",
+      "kicker": "In Rust",
+      "filename": "editor.rs",
+      "language": "rust",
+      "code": "use ropey::Rope;\n\nlet mut text = Rope::from_str(&file);\n\n// Same cost on line 1 or 1,000,000\ntext.insert_char(cursor, 'a');\n\n// Line lookups: O(log n) too\nlet line = text.char_to_line(cursor);",
+      "highlights": [
+        {
+          "lines": [
+            5,
+            6
+          ],
+          "cue": "insert",
+          "note": "Edits cost the same anywhere"
+        },
+        {
+          "lines": [
+            8,
+            9
+          ],
+          "cue": "look",
+          "note": "Jump to any line instantly"
+        }
+      ],
+      "narration": "In Rust, the ropey crate gives you this for free. Insert anywhere in logarithmic time, and look up any line just as fast."
+    },
+    {
+      "type": "list",
+      "kicker": "Why ropes win",
+      "heading": "Three wins for *free*",
+      "items": [
+        "Edits cost the same anywhere",
+        "Undo is cheap: versions share chunks",
+        "Line numbers are tracked for you"
+      ],
+      "narration": "So ropes give you three things. Edits cost the same anywhere in the file. Undo is cheap, because old versions share chunks. And line numbers come for free."
+    },
+    {
+      "type": "outro",
+      "title": "Small chunks. ==Big files.==",
+      "sub": "Follow for more editor internals.",
+      "cta": "Follow for more",
+      "narration": "Small chunks, big files. Follow for more editor internals."
+    }
+  ]
+}
