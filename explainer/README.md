@@ -30,7 +30,15 @@ No API keys are needed to render.
 7. **Mix.** The voice gets a broadcast chain (high-pass, EQ, compression, de-essing).
    Music ducks under speech with a sidechain compressor.
    The master is normalised in two passes to -14 LUFS integrated and -1 dBTP, the level the platforms normalise to.
-8. **Render.** [Remotion](https://www.remotion.dev) renders the React composition: kinetic typography synced to the voice, karaoke captions, animated diagrams, a story-style progress bar, and per-scene lighting changes.
+8. **Render.** [Remotion](https://www.remotion.dev) renders the React composition: type that assembles in time with the voice, captions that follow each spoken word, and diagrams that animate the mechanism being explained.
+
+## Design
+
+The look is editorial and restrained, on purpose.
+Flat colour, one accent, hairline rules, and no gradients, glows, glass or bounce.
+Headlines are set in Geist; emphasis switches to Instrument Serif italic; data and code use Geist Mono.
+Words rise from behind a baseline mask on a single expo-out curve, and scenes leave with a short ease-in lift.
+Scenes show the mechanism itself where they can: the `array` scene moves every byte of an insert, the `tree` scene walks a lookup path, the `code` scene types and then points at the lines that matter.
 
 ## Setup
 
@@ -51,6 +59,7 @@ Whisper downloads its model on first use.
 ./explain build specs/rope.json --draft        # no voice or audio, half size, fast
 ./explain build specs/rope.json --format all   # vertical, square and landscape
 ./explain build specs/rope.json --theme paper  # override the theme
+./explain build specs/rope.json --stills       # two PNG stills per scene, for design review
 ./explain check specs/rope.json                # validate only
 ./explain voices                               # list narrator voices
 ./explain write "how B-trees work" --notes "angle: why databases use them"
@@ -75,7 +84,7 @@ See `specs/rope.json` and `specs/git-snapshots.json` for complete examples.
   "title": "Why typing in a huge file doesn't lag",
   "voice": "am_michael",
   "speed": 1.05,
-  "theme": "midnight",
+  "theme": "ink",
   "format": "vertical",
   "music": {"mood": "focus"},
   "pronounce": {"MB": "megabyte"},
@@ -90,7 +99,7 @@ Top-level settings:
 
 | Key | Values | Default |
 | --- | --- | --- |
-| `theme` | `midnight`, `ember`, `paper` | `midnight` |
+| `theme` | `ink`, `paper`, `blueprint` | `ink` |
 | `format` | `vertical`, `square`, `landscape` | `vertical` |
 | `music.mood` | `focus`, `uplift`, `dark` | `focus` |
 | `music.bpm` | number | mood default |
@@ -99,7 +108,7 @@ Top-level settings:
 | `handle` | shown under the progress bar and on the outro button | none |
 | `pronounce` | display token to spoken words | `{}` |
 
-Text fields accept `*word*` for the accent colour and `==words==` for a highlighter swipe.
+Text fields accept `*word*` for a serif-italic accent and `==words==` for a solid highlight block.
 Marked phrases never break across lines.
 
 Scene types and their fields:
@@ -116,6 +125,7 @@ Scene types and their fields:
 | `terminal` | `lines` (`{cmd, out, cue}`) | one per command |
 | `flow` | `heading?`, `nodes` (`{label, sub?}`) | one per node |
 | `tree` | `heading?`, `root` (`{label, children}`), `levelCues?`, `highlight?` (`{path, cue, note}`), `quoteLeaves?` | one per level, then the highlight |
+| `array` | `heading?`, `text` (2 to 16 chars), `insertAt`, `insert`, `counterLabel?`, `note?`, `cue?` | when the shift starts |
 | `outro` | `title`, `sub?`, `cta?` | none |
 
 Every scene also takes `kicker` (a small label), `narration`, `captions` (defaults to on except for `hook` and `outro`), `voice` and `pronounce`.
@@ -130,7 +140,8 @@ explainer/
   specs/                 example scripts
   pipeline/              Python: spec, voice, timeline, music, sfx, mix, render, writer
   src/                   Remotion: composition, scenes, captions, background, theme
-  src/fonts/             Inter Tight and JetBrains Mono (SIL Open Font License)
+  src/fonts/             Geist, Geist Mono and Instrument Serif (SIL Open Font License)
+  scripts/stills.mjs     renders review stills from a timeline
   tests/                 unit tests for the pure pipeline logic
 ```
 

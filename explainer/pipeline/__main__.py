@@ -62,7 +62,7 @@ def build(args: argparse.Namespace) -> None:
     seconds = tl["durationInFrames"] / tl["fps"]
     print(f"  total {seconds:.1f}s, {len(spec['scenes'])} scenes")
 
-    if not args.draft:
+    if not args.draft and not args.stills:
         with Step("Music and sound design"):
             fps = tl["fps"]
             scenes = tl["scenes"]
@@ -84,6 +84,13 @@ def build(args: argparse.Namespace) -> None:
     post = spec.get("post", {})
     tags = " ".join(f"#{t.lstrip('#')}" for t in post.get("hashtags", []))
     (out / "post.txt").write_text("\n\n".join(x for x in (spec["title"], post.get("caption", ""), tags) if x) + "\n")
+
+    if args.stills:
+        w, h = specs.FORMATS[formats[0]]
+        props = out / f"timeline-{formats[0]}.json"
+        props.write_text(json.dumps({**tl, "format": formats[0], "width": w, "height": h}))
+        render.stills(props, public, out / "stills")
+        return
 
     hook_end = tl["scenes"][0]["duration"] - 4
     for fmt in formats:
@@ -121,6 +128,7 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--format", choices=[*specs.FORMATS, "all"])
     b.add_argument("--theme", choices=sorted(specs.THEMES))
     b.add_argument("--draft", action="store_true", help="skip TTS and audio, render at half size")
+    b.add_argument("--stills", action="store_true", help="render two stills per scene instead of the video, for design review")
     b.add_argument("--sample", action="store_true", help="also copy the timeline to src/sample-timeline.json for the studio")
     b.set_defaults(fn=build)
 

@@ -2,7 +2,7 @@
   "title": "Why typing in a huge file doesn't lag",
   "voice": "am_michael",
   "speed": 1.05,
-  "theme": "midnight",
+  "theme": "ink",
   "format": "vertical",
   "music": {
     "mood": "focus"
@@ -29,10 +29,14 @@
       "narration": "Type one letter into a 100 MB file, and your editor doesn't lag. Here's the trick."
     },
     {
-      "type": "statement",
+      "type": "array",
       "kicker": "The naive way",
-      "text": "One long string means ==shifting everything== after the cursor.",
-      "sub": "Insert near the top and almost the whole file has to move.",
+      "heading": "One long string",
+      "text": "Hello world",
+      "insertAt": 2,
+      "insert": "X",
+      "cue": "shifting",
+      "note": "Insert near the top of a big file and almost all of it moves.",
       "narration": "If your file were one long string, every insert means shifting every byte after the cursor, one by one."
     },
     {

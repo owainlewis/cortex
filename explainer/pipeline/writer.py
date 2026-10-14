@@ -32,14 +32,14 @@ Spec format (all keys shown are supported; omit optional ones you do not need):
   "title": "...",                      // also the video file name
   "voice": "am_michael",               // Kokoro voice; am_michael, am_fenrir, af_heart, af_bella, bm_george, bf_emma
   "speed": 1.05,
-  "theme": "midnight" | "ember" | "paper",
+  "theme": "ink" | "paper" | "blueprint",
   "music": {"mood": "focus" | "uplift" | "dark"},
   "pronounce": {"word": "how to say it"},   // single display tokens whose TTS reading is wrong, e.g. "MB": "megabyte", "O(n)": "O of n"
   "post": {"caption": "...", "hashtags": ["..."]},
   "scenes": [ ... ]
 }
 
-Every scene has "type", "narration" and an optional "kicker" (2-3 word uppercase label). Text fields accept *word* for accent colour and ==words== for a highlighter swipe; use them on the one or two words that matter.
+Every scene has "type", "narration" and an optional "kicker" (2-3 word uppercase label). Text fields accept *word* for a serif-italic accent and ==words== for a solid highlight block; use them on the one or two words that matter, never more.
 
 Scene types:
 - hook: {"title"} big kinetic title. Keep the title close to the narration wording so it assembles in sync with the voice. Must be scene 1.
@@ -52,11 +52,12 @@ Scene types:
 - terminal: {"heading"?, "lines": [{"cmd", "out": [..], "cue"?}]} real commands with realistic output.
 - flow: {"heading"?, "nodes": [{"label", "sub"?}]} 2 to 5 steps of a process.
 - tree: {"heading"?, "root": {"label", "children": [...]}, "levelCues"?: [...], "highlight"?: {"path": [child indexes], "cue", "note"}} up to 3 levels, 8 leaves max.
+- array: {"heading"?, "text", "insertAt", "insert", "cue"?, "counterLabel"?, "note"?} a contiguous buffer (2-16 chars) taking one insert; cells after the cursor visibly shift one by one with a counter. Use it to show why contiguous memory is expensive to edit.
 - outro: {"title", "sub"?, "cta"?} payoff line.
 
 Cues: a "cue" is a word or short phrase from that scene's narration; the element appears the moment the narrator says it. Use the exact words as they appear in the narration. If you omit cues, the pipeline matches item words against the narration or spreads them evenly.
 
-Use visual scene types over statement scenes wherever the idea has structure (numbers, steps, comparisons, code, hierarchy)."""
+Use visual scene types over statement scenes wherever the idea has structure (numbers, steps, comparisons, code, hierarchy). The best scenes show the mechanism itself moving, not a label describing it."""
 
 
 def _extract_json(text: str) -> dict:

@@ -40,6 +40,17 @@ class SpecTests(unittest.TestCase):
         with self.assertRaisesRegex(specs.SpecError, "does not exist"):
             specs.validate(bad)
 
+    def test_array_text_length_checked(self):
+        scene = {"type": "array", "narration": "x", "text": "a" * 20}
+        bad = {**specs.DEFAULTS, "title": "x", "scenes": [{"type": "hook", "title": "t", "narration": "t"}, scene]}
+        with self.assertRaisesRegex(specs.SpecError, "2 to 16 characters"):
+            specs.validate(bad)
+
+    def test_array_cue_matches_shift_words(self):
+        scene = {"type": "array", "text": "Hello"}
+        cues = timeline.resolve_cues(scene, words("every insert means shifting every byte"), 100)
+        self.assertEqual(cues, [30 - timeline.CUE_LEAD])
+
     def test_tree_cues_cover_levels_and_highlight(self):
         scene = {"type": "tree", "root": {"label": "r", "children": [{"label": "a"}]}, "highlight": {"path": [0]}}
         self.assertEqual(len(specs.cue_targets(scene)), 3)

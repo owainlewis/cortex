@@ -1,7 +1,7 @@
 # Font licenses
 
-`InterTight.woff2` is Inter Tight by Rasmus Andersson, Copyright 2016 The Inter Project Authors.
-`JetBrainsMono.woff2` is JetBrains Mono, Copyright 2020 The JetBrains Mono Project Authors.
+`Geist.woff2` and `GeistMono.woff2` are Geist and Geist Mono, Copyright 2024 The Geist Project Authors.
+`InstrumentSerifItalic.woff2` is Instrument Serif Italic, Copyright 2022 The Instrument Serif Project Authors.
 
-Both are licensed under the SIL Open Font License, Version 1.1: https://openfontlicense.org
-Both files are the Latin subsets of the variable fonts served by Google Fonts.
+All are licensed under the SIL Open Font License, Version 1.1: https://openfontlicense.org
+The files are the Latin subsets served by Google Fonts.

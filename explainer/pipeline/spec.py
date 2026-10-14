@@ -16,7 +16,7 @@ FORMATS = {
     "square": (1080, 1080),
     "landscape": (1920, 1080),
 }
-THEMES = {"midnight", "ember", "paper"}
+THEMES = {"ink", "paper", "blueprint"}
 MOODS = {"focus", "uplift", "dark"}
 
 # Required content fields per scene type.
@@ -31,13 +31,14 @@ SCENE_FIELDS = {
     "terminal": ["lines"],
     "flow": ["nodes"],
     "tree": ["root"],
+    "array": ["text"],
     "outro": ["title"],
 }
 
 DEFAULTS = {
     "voice": "am_michael",
     "speed": 1.0,
-    "theme": "midnight",
+    "theme": "ink",
     "format": "vertical",
     "fps": 30,
     "handle": None,
@@ -133,6 +134,8 @@ def validate(spec: dict) -> None:
                 lines = h.get("lines") or []
                 if not lines or min(lines) < 1 or max(lines) > n:
                     errors.append(f"{where}: highlight lines {lines} are outside 1..{n}")
+        if kind == "array" and not 2 <= len(str(scene.get("text", ""))) <= 16:
+            errors.append(f"{where}: 'text' needs 2 to 16 characters so the cells stay legible")
         if kind == "tree" and "root" in scene:
             if _tree_depth(scene["root"]) > 4:
                 errors.append(f"{where}: tree is deeper than 4 levels")
@@ -183,6 +186,8 @@ def cue_targets(scene: dict) -> list[tuple[str | None, str]]:
         return [(scene.get("subCue"), scene["sub"])] if scene.get("sub") else []
     if kind == "code":
         return [(_cue(h), h.get("note", "")) for h in scene.get("highlights", [])]
+    if kind == "array":
+        return [(scene.get("cue"), "shift shifting move moving copy")]
     if kind == "terminal":
         return [(_cue(x), str(x.get("cmd", ""))) for x in scene["lines"]]
     if kind == "tree":

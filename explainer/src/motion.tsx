@@ -1,40 +1,33 @@
 import React from 'react';
-import {interpolate, interpolateColors, spring, useCurrentFrame, useVideoConfig} from 'remotion';
-import {useStyle} from './theme';
+import {Easing, interpolate, useCurrentFrame} from 'remotion';
+import {fonts, useStyle} from './theme';
 import type {Word} from './types';
 
-export const springs = {
-  smooth: {damping: 200, mass: 1, stiffness: 120},
-  snappy: {damping: 20, stiffness: 240, mass: 0.7},
-  bouncy: {damping: 12, stiffness: 170, mass: 0.8},
-};
-
-export const useSpringAt = (delay: number, config = springs.snappy) => {
-  const frame = useCurrentFrame();
-  const {fps} = useVideoConfig();
-  return spring({frame: frame - delay, fps, config});
-};
-
-// Opacity, lift and focus pull for an element entering with progress `p`.
-export const riseStyle = (p: number, distance = 48, blur = 12): React.CSSProperties => ({
-  opacity: interpolate(p, [0, 0.6], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'}),
-  transform: `translateY(${(1 - p) * distance}px)`,
-  filter: p < 0.999 ? `blur(${(1 - Math.min(p, 1)) * blur}px)` : undefined,
-});
-
 export const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
+
+// One motion language everywhere: a fast expo-out for entrances and a short
+// ease-in for exits. No bounce.
+export const easeOut = Easing.bezier(0.16, 1, 0.3, 1);
+export const easeIn = Easing.bezier(0.7, 0, 0.84, 0);
+
+export const progress = (frame: number, start: number, duration = 16, easing = easeOut) =>
+  interpolate(frame, [start, start + duration], [0, 1], {...clamp, easing});
+
+export const useProgress = (start: number, duration = 16, easing = easeOut) =>
+  progress(useCurrentFrame(), start, duration, easing);
+
+// Fade and lift for small elements that do not need a mask.
+export const lift = (p: number, distance = 24): React.CSSProperties => ({
+  opacity: p,
+  transform: `translateY(${(1 - p) * distance}px)`,
+});
 
 const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 
 // For each display token, the frame at which the narrator says it, so titles
 // assemble in time with the voice. Tokens the narrator never says fall back to
 // a short stagger after the previous token.
-export const syncDelays = (
-  tokens: string[],
-  words: Word[] | undefined,
-  start = 4,
-  stagger = 3,
-): number[] => {
+export const syncDelays = (tokens: string[], words: Word[] | undefined, start = 4, stagger = 3): number[] => {
   const out: number[] = [];
   let pointer = 0;
   let last = start - stagger;
@@ -62,7 +55,7 @@ export const syncDelays = (
 
 type Segment = {text: string; mark: 'none' | 'accent' | 'highlight'};
 
-// `*word*` renders in the accent colour, `==words==` gets a highlighter swipe.
+// `*word*` sets in serif italic, `==words==` sits on a flat accent block.
 export const parseRich = (text: string): Segment[] => {
   const out: Segment[] = [];
   const re = /(\*[^*]+\*|==[^=]+==)/g;
@@ -79,7 +72,20 @@ export const parseRich = (text: string): Segment[] => {
   return out;
 };
 
-export const plainText = (text: string) => parseRich(text).map((s) => s.text).join('');
+// A word rising from behind its own baseline mask.
+const Masked: React.FC<{p: number; children: React.ReactNode; style?: React.CSSProperties}> = ({p, children, style}) => (
+  <span
+    style={{
+      display: 'inline-block',
+      overflow: 'hidden',
+      verticalAlign: 'top',
+      padding: '0.06em 0.04em 0.16em',
+      margin: '-0.06em -0.04em -0.16em',
+    }}
+  >
+    <span style={{display: 'inline-block', whiteSpace: 'pre', transform: `translateY(${(1 - p) * 115}%)`, ...style}}>{children}</span>
+  </span>
+);
 
 export const RichText: React.FC<{
   text: string;
@@ -93,164 +99,101 @@ export const RichText: React.FC<{
   start?: number;
   stagger?: number;
   sync?: boolean;
-  maxWidth?: number;
-}> = ({
-  text,
-  size,
-  weight = 800,
-  color,
-  align = 'left',
-  lineHeight = 1.06,
-  letterSpacing = '-0.03em',
-  words,
-  start = 4,
-  stagger = 3,
-  sync = false,
-  maxWidth,
-}) => {
+}> = ({text, size, weight = 650, color, align = 'left', lineHeight = 1.02, letterSpacing = '-0.04em', words, start = 4, stagger = 2, sync = false}) => {
   const {theme} = useStyle();
   const frame = useCurrentFrame();
-  const {fps} = useVideoConfig();
   const segments = parseRich(text).map((seg) => ({...seg, words: seg.text.split(/\s+/).filter(Boolean)}));
-  const flat = segments.flatMap((seg) => seg.words);
-  const delays = syncDelays(flat, sync ? words : undefined, start, stagger);
+  const delays = syncDelays(segments.flatMap((s) => s.words), sync ? words : undefined, start, stagger);
 
   let k = 0;
-  const word = (w: string, wordColor?: string) => {
-    const i = k++;
-    const p = spring({frame: frame - delays[i], fps, config: springs.snappy});
-    return (
-      <span key={i} style={{display: 'inline-block', whiteSpace: 'pre', color: wordColor, ...riseStyle(p, size * 0.45, 10)}}>
-        {w}
-      </span>
-    );
-  };
-  const spaced = (nodes: React.ReactNode[]) => nodes.flatMap((n, i) => (i ? [' ', n] : [n]));
-
   const parts: React.ReactNode[] = [];
   segments.forEach((seg, s) => {
     if (!seg.words.length) return;
-    if (seg.mark === 'none') {
-      seg.words.forEach((w) => parts.push(word(w)));
-      return;
-    }
-    // Marked phrases stay on one line and animate as a unit.
     const first = k;
-    if (seg.mark === 'accent') {
+    const nodes = seg.words.map((w) => {
+      const i = k++;
+      const p = progress(frame, delays[i], 18);
+      const style: React.CSSProperties =
+        seg.mark === 'accent'
+          ? {fontFamily: fonts.serif, fontStyle: 'italic', fontWeight: 400, letterSpacing: '-0.01em', color: theme.accent}
+          : seg.mark === 'highlight'
+            ? {color: theme.accentInk}
+            : {};
+      return (
+        <Masked key={i} p={p} style={style}>
+          {w}
+        </Masked>
+      );
+    });
+    const spaced = nodes.flatMap((n, i) => (i ? [' ', n] : [n]));
+    if (seg.mark === 'highlight') {
+      // The block grows with its words rather than ahead of them.
+      const wipe = progress(frame, delays[first] - 2, Math.max(14, delays[k - 1] - delays[first] + 12));
       parts.push(
-        <span key={`g${s}`} style={{display: 'inline-block', whiteSpace: 'nowrap'}}>
-          {spaced(seg.words.map((w) => word(w, theme.accent)))}
+        <span key={`g${s}`} style={{position: 'relative', display: 'inline-block', whiteSpace: 'nowrap', isolation: 'isolate'}}>
+          <span
+            style={{
+              position: 'absolute',
+              left: '-0.1em',
+              right: '-0.1em',
+              top: '0.06em',
+              bottom: '-0.04em',
+              background: theme.accent,
+              transform: `scaleX(${wipe})`,
+              transformOrigin: 'left',
+              zIndex: -1,
+            }}
+          />
+          {spaced}
         </span>,
       );
-      return;
+    } else if (seg.mark === 'accent') {
+      parts.push(
+        <span key={`g${s}`} style={{whiteSpace: 'nowrap'}}>
+          {spaced}
+        </span>,
+      );
+    } else {
+      parts.push(...nodes);
     }
-    const swipe = spring({frame: frame - delays[first] - 3, fps, config: springs.smooth});
-    const ink = interpolateColors(swipe, [0.2, 0.6], [color ?? theme.text, theme.accentInk]);
-    parts.push(
-      <span key={`g${s}`} style={{display: 'inline-block', whiteSpace: 'nowrap', position: 'relative', isolation: 'isolate'}}>
-        <span
-          style={{
-            position: 'absolute',
-            left: '-0.14em',
-            right: '-0.14em',
-            top: '0.04em',
-            bottom: '0.0em',
-            background: theme.accent,
-            borderRadius: '0.14em',
-            transform: `scaleX(${swipe}) skewX(-6deg)`,
-            transformOrigin: 'left center',
-            zIndex: -1,
-            boxShadow: theme.dark ? `0 0 ${50 * swipe}px ${withAlpha(theme.accent, 0.35)}` : undefined,
-          }}
-        />
-        {spaced(seg.words.map((w) => word(w, ink)))}
-      </span>,
-    );
   });
 
   return (
-    <div
-      style={{
-        fontSize: size,
-        fontWeight: weight,
-        lineHeight,
-        letterSpacing,
-        color: color ?? theme.text,
-        textAlign: align,
-        maxWidth,
-        textWrap: 'balance',
-      }}
-    >
-      {spaced(parts)}
+    <div style={{fontSize: size, fontWeight: weight, lineHeight, letterSpacing, color: color ?? theme.text, textAlign: align, textWrap: 'balance'}}>
+      {parts.flatMap((n, i) => (i ? [' ', n] : [n]))}
     </div>
   );
 };
 
-export const Kicker: React.FC<{text?: string; delay?: number}> = ({text, delay = 0}) => {
-  const {theme} = useStyle();
-  const p = useSpringAt(delay, springs.smooth);
+// Small mono label used above headings and on diagram parts.
+export const Label: React.FC<{text?: string; delay?: number; color?: string; style?: React.CSSProperties}> = ({text, delay = 0, color, style}) => {
+  const {theme, layout} = useStyle();
+  const p = useProgress(delay, 14);
   if (!text) return null;
   return (
     <div
       style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 16,
-        fontSize: 30,
-        fontWeight: 700,
-        letterSpacing: '0.16em',
+        fontFamily: fonts.mono,
+        fontSize: layout.small,
+        fontWeight: 500,
+        letterSpacing: '0.06em',
         textTransform: 'uppercase',
-        color: theme.muted,
-        ...riseStyle(p, 20, 6),
+        color: color ?? theme.muted,
+        ...lift(p, 12),
+        ...style,
       }}
     >
-      <span
-        style={{
-          width: 14,
-          height: 14,
-          borderRadius: 7,
-          background: theme.accent,
-          boxShadow: `0 0 24px ${theme.accent}`,
-        }}
-      />
       {text}
     </div>
   );
 };
 
-export const Panel: React.FC<{
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-  glow?: number;
-}> = ({children, style, glow = 0}) => {
+// A hairline that draws from the left.
+export const Rule: React.FC<{delay?: number; color?: string; thickness?: number}> = ({delay = 0, color, thickness = 2}) => {
   const {theme} = useStyle();
-  return (
-    <div
-      style={{
-        background: theme.panel,
-        border: `2px solid ${glow > 0 ? mix(theme.panelBorder, theme.accent, glow) : theme.panelBorder}`,
-        borderRadius: 28,
-        boxShadow: theme.dark
-          ? `0 30px 80px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06)${
-              glow > 0 ? `, 0 0 ${60 * glow}px ${withAlpha(theme.accent, 0.35 * glow)}` : ''
-            }`
-          : `0 20px 50px rgba(40,30,10,0.12)${glow > 0 ? `, 0 0 ${40 * glow}px ${withAlpha(theme.accent, 0.3 * glow)}` : ''}`,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
+  const p = useProgress(delay, 22);
+  return <div style={{width: '100%', height: thickness, background: color ?? theme.line, transform: `scaleX(${p})`, transformOrigin: 'left'}} />;
 };
-
-export const withAlpha = (hex: string, alpha: number) => {
-  if (!hex.startsWith('#')) return hex;
-  const n = parseInt(hex.slice(1), 16);
-  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
-};
-
-// Blend toward `b` by `t`. Only used for borders so a cheap rgba overlay is fine.
-const mix = (a: string, b: string, t: number) => (t > 0.5 ? withAlpha(b, 0.4 + 0.5 * t) : a);
 
 // Index of the most recently revealed cue, or -1 before the first.
 export const activeCue = (cues: number[], frame: number) => {
@@ -266,13 +209,17 @@ export const formatNumber = (value: number, decimals = 0) =>
 
 // Drawn rather than typed: the bundled latin font subsets have no arrows.
 export const ArrowIcon: React.FC<{size: number; color: string}> = ({size, color}) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" style={{flex: 'none', transform: 'translateY(0.12em)'}}>
-    <path d="M4 12h15M13 6l6 6-6 6" fill="none" stroke={color} strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+  <svg width={size} height={size} viewBox="0 0 24 24" style={{flex: 'none'}}>
+    <path d="M3 12h17M14 6l6 6-6 6" fill="none" stroke={color} strokeWidth="2" strokeLinecap="square" />
   </svg>
 );
 
-export const ChevronIcon: React.FC<{size: number; color: string}> = ({size, color}) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" style={{flex: 'none', alignSelf: 'center'}}>
-    <path d="M8 5l7 7-7 7" fill="none" stroke={color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+export const MarkIcon: React.FC<{good: boolean; size: number; color: string}> = ({good, size, color}) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" style={{flex: 'none'}}>
+    {good ? (
+      <path d="M4 12.5l5 5L20 6.5" fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="square" />
+    ) : (
+      <path d="M5 5l14 14M19 5L5 19" fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="square" />
+    )}
   </svg>
 );

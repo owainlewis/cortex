@@ -1,6 +1,6 @@
 import React, {useMemo} from 'react';
-import {interpolate, spring, useCurrentFrame, useVideoConfig} from 'remotion';
-import {springs} from '../motion';
+import {useCurrentFrame, useVideoConfig} from 'remotion';
+import {progress} from '../motion';
 import {fonts, useStyle} from '../theme';
 import type {SceneTiming, Word} from '../types';
 
@@ -54,47 +54,35 @@ export const Captions: React.FC<{scenes: SceneTiming[]}> = ({scenes}) => {
   });
   if (index < 0) return null;
   const page = pages[index];
-  const enter = spring({frame: frame - (page.start - 2), fps, config: springs.bouncy});
+  const enter = progress(frame, page.start - 2, 8);
 
   return (
     <div
       style={{
         position: 'absolute',
-        left: 60,
-        width: width - 120,
+        left: layout.margin,
+        width: width - layout.margin * 2,
         top: layout.captionY,
         display: 'flex',
         justifyContent: 'center',
         flexWrap: 'wrap',
-        columnGap: '0.28em',
-        fontFamily: fonts.display,
+        columnGap: '0.26em',
+        fontFamily: fonts.sans,
         fontSize: layout.captionSize,
-        fontWeight: 900,
-        letterSpacing: '-0.02em',
+        fontWeight: 700,
+        letterSpacing: '-0.025em',
         lineHeight: 1.15,
         textAlign: 'center',
-        transform: `translateY(${(1 - enter) * 26}px) scale(${interpolate(enter, [0, 1], [0.88, 1])})`,
-        opacity: interpolate(enter, [0, 0.4], [0, 1], {extrapolateRight: 'clamp'}),
+        opacity: enter,
+        transform: `translateY(${(1 - enter) * 12}px)`,
       }}
     >
       {page.words.map((w, i) => {
-        const active = frame >= w.start && (frame < w.end + 2 || i === page.words.length - 1);
         const spoken = frame >= w.start;
-        const pop = spring({frame: frame - w.start, fps, config: springs.bouncy});
+        const next = page.words[i + 1];
+        const active = spoken && (!next || frame < next.start);
         return (
-          <span
-            key={i}
-            style={{
-              display: 'inline-block',
-              color: active ? theme.accent : theme.dark ? '#FFFFFF' : theme.text,
-              opacity: spoken ? 1 : 0.55,
-              transform: `scale(${active ? interpolate(pop, [0, 1], [1, 1.08]) : 1})`,
-              textShadow: theme.dark
-                ? '0 4px 0 rgba(0,0,0,0.55), 0 0 28px rgba(0,0,0,0.85)'
-                : '0 2px 0 rgba(255,255,255,0.8), 0 0 24px rgba(255,255,255,0.9)',
-              WebkitTextStroke: theme.dark ? '2px rgba(0,0,0,0.35)' : undefined,
-            }}
-          >
+          <span key={i} style={{color: active ? theme.accent : spoken ? theme.text : theme.faint}}>
             {w.text}
           </span>
         );

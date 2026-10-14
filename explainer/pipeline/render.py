@@ -51,3 +51,7 @@ def video(props: Path, public: Path, out: Path, draft: bool, has_audio: bool) ->
 def still(props: Path, public: Path, out: Path, frame: int) -> None:
     cmd, flags = _base("still", props, public)
     subprocess.run(cmd + [str(out), f"--frame={frame}", "--image-format=png"] + flags, cwd=ROOT, check=True)
+
+
+def stills(props: Path, public: Path, out: Path) -> None:
+    subprocess.run(["node", "scripts/stills.mjs", str(props), str(public), str(out)], cwd=ROOT, check=True)

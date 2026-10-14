@@ -146,12 +146,14 @@ def build(spec: dict, narrations: list[Narration], audio: str | None) -> tuple[d
             extra["typeStart"], extra["typeEnd"] = start, int(end)
         if kind == "terminal":
             extra["charsPerFrame"] = TERMINAL_CPF
+        if kind == "array":
+            extra["shiftStagger"] = 2
 
         # Sound design follows the same cues the picture uses.
         if index == 0:
             events.append({"t": 0.0, "kind": "impact", "gain": 0.8})
         else:
-            events.append({"t": max(t0 - 0.16, 0), "kind": "whoosh", "gain": 0.7})
+            events.append({"t": max(t0 - 0.16, 0), "kind": "whoosh", "gain": 0.45})
         if kind in ("list", "flow", "bars", "tree"):
             for k, c in enumerate(cues):
                 events.append({"t": t0 + c / fps, "kind": "pop", "step": k, "gain": 0.55})
@@ -181,6 +183,12 @@ def build(spec: dict, narrations: list[Narration], audio: str | None) -> tuple[d
                         events.append({"t": t0 + (c + ch / TERMINAL_CPF) / fps, "kind": "key", "seed": rng.random(), "gain": 0.32})
                 if scene["lines"][k].get("out"):
                     events.append({"t": t0 + (c + n / TERMINAL_CPF + 5) / fps, "kind": "blip", "gain": 0.35})
+        if kind == "array":
+            shift = cues[0] if cues else 20
+            n = len(str(scene["text"])) - min(int(scene.get("insertAt", 0)), len(str(scene["text"])))
+            for k in range(n):
+                events.append({"t": t0 + (shift + k * 2) / fps, "kind": "key", "seed": rng.random(), "gain": 0.4})
+            events.append({"t": t0 + (shift + n * 2 + 6) / fps, "kind": "pop", "step": 2, "gain": 0.6})
         if kind == "outro":
             events.append({"t": t0 + min(duration * 0.45, 24) / fps, "kind": "chime", "gain": 0.6})
 

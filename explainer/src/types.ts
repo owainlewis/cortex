@@ -7,7 +7,7 @@ export type Word = {
   end: number;
 };
 
-export type ThemeName = 'midnight' | 'ember' | 'paper';
+export type ThemeName = 'ink' | 'paper' | 'blueprint';
 
 export type Format = 'vertical' | 'square' | 'landscape';
 

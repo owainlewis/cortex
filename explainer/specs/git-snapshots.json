@@ -2,16 +2,24 @@
   "title": "Git stores snapshots, not diffs",
   "voice": "am_michael",
   "speed": 1.05,
-  "theme": "ember",
+  "theme": "paper",
   "format": "vertical",
-  "music": {"mood": "uplift"},
+  "music": {
+    "mood": "uplift"
+  },
   "pronounce": {
     "Cat-file": "cat file",
     "HEAD": "head"
   },
   "post": {
     "caption": "Git saves a full snapshot of your project on every commit and stays small by naming every file after a hash of its content. (Pack files add delta compression on top, but the model is snapshots.)",
-    "hashtags": ["git", "programming", "softwareengineering", "devtips", "coding"]
+    "hashtags": [
+      "git",
+      "programming",
+      "softwareengineering",
+      "devtips",
+      "coding"
+    ]
   },
   "scenes": [
     {
@@ -24,8 +32,24 @@
       "type": "compare",
       "kicker": "Two designs",
       "heading": "How do you version files?",
-      "left": {"label": "Store diffs", "tone": "bad", "items": ["Old versions are rebuilt", "Checkout replays history"], "cue": "diffs"},
-      "right": {"label": "Store snapshots", "tone": "good", "items": ["Every commit is complete", "Checkout is a lookup"], "cue": "snapshot"},
+      "left": {
+        "label": "Store diffs",
+        "tone": "bad",
+        "items": [
+          "Old versions are rebuilt",
+          "Checkout replays history"
+        ],
+        "cue": "diffs"
+      },
+      "right": {
+        "label": "Store snapshots",
+        "tone": "good",
+        "items": [
+          "Every commit is complete",
+          "Checkout is a lookup"
+        ],
+        "cue": "snapshot"
+      },
       "narration": "Older tools stored diffs, so getting an old version meant replaying changes. Git stores a full snapshot for every commit instead."
     },
     {
@@ -46,13 +70,30 @@
           {
             "label": "tree",
             "children": [
-              {"label": "README.md"},
-              {"label": "src/", "children": [{"label": "main.rs"}, {"label": "lib.rs"}]}
+              {
+                "label": "README.md"
+              },
+              {
+                "label": "src/",
+                "children": [
+                  {
+                    "label": "main.rs"
+                  },
+                  {
+                    "label": "lib.rs"
+                  }
+                ]
+              }
             ]
           }
         ]
       },
-      "levelCues": ["commit", "tree", "blobs", "other"],
+      "levelCues": [
+        "commit",
+        "tree",
+        "blobs",
+        "other"
+      ],
       "narration": "Every file is stored as a blob, named by a hash of its contents. A commit points to a tree, and trees point to blobs and other trees."
     },
     {
@@ -61,12 +102,21 @@
       "lines": [
         {
           "cmd": "git cat-file -p HEAD",
-          "out": ["tree 9bd2f1c…", "parent 41c3a07…", "author Ada <ada@x.io> 1760000000 +0000", "", "Fix login bug"],
+          "out": [
+            "tree 9bd2f1c\u2026",
+            "parent 41c3a07\u2026",
+            "author Ada <ada@x.io> 1760000000 +0000",
+            "",
+            "Fix login bug"
+          ],
           "cue": "Cat-file"
         },
         {
           "cmd": "git cat-file -p HEAD^{tree}",
-          "out": ["100644 blob 5e1c3a9…  README.md", "040000 tree 8f2d4b1…  src"],
+          "out": [
+            "100644 blob 5e1c3a9\u2026  README.md",
+            "040000 tree 8f2d4b1\u2026  src"
+          ],
           "cue": "Ask"
         }
       ],
@@ -76,9 +126,18 @@
       "type": "flow",
       "kicker": "One edit, one commit",
       "nodes": [
-        {"label": "Changed file", "sub": "gets a new blob"},
-        {"label": "Folders above it", "sub": "get new trees"},
-        {"label": "Everything else", "sub": "reused by hash, nothing copied"}
+        {
+          "label": "Changed file",
+          "sub": "gets a new blob"
+        },
+        {
+          "label": "Folders above it",
+          "sub": "get new trees"
+        },
+        {
+          "label": "Everything else",
+          "sub": "reused by hash, nothing copied"
+        }
       ],
       "narration": "So when you change one file and commit, only that file gets a new blob. The folders above it get new trees. Everything else is reused by its hash."
     },
@@ -96,7 +155,11 @@
       "type": "list",
       "kicker": "Why it wins",
       "heading": "Snapshots by hash give you",
-      "items": ["Checkout is a direct lookup", "Duplicate files cost nothing", "Corruption gets caught"],
+      "items": [
+        "Checkout is a direct lookup",
+        "Duplicate files cost nothing",
+        "Corruption gets caught"
+      ],
       "narration": "That's why checkout is fast, duplicate files are free, and corrupted data gets caught, because every hash is checked."
     },
     {
