@@ -59,7 +59,11 @@ export const Code: React.FC<SceneProps> = ({scene}) => {
   const language = (d.language ?? '').toLowerCase();
   const lines: string[] = String(d.code).replace(/\t/g, '    ').split('\n');
   const longest = Math.max(...lines.map((l) => l.length), 18);
-  const fontSize = Math.min(38, (layout.content.w - 120) / (longest * 0.6));
+  // Fit both the longest line and the line count, leaving room for the note.
+  const headerH = (d.kicker ? layout.small + 40 : 0) + (d.heading ? layout.title * 2.2 + 28 : 0);
+  const noteH = layout.body * (layout.format === 'vertical' ? 2.6 : 1.4) + 34;
+  const chromeH = 100; // filename row and block padding
+  const fontSize = Math.min(38, (layout.content.w - 120) / (longest * 0.6), (layout.content.h - headerH - noteH - chromeH) / (lines.length * 1.65));
   const lineH = fontSize * 1.65;
   const typeStart = scene.extra.typeStart ?? 6;
   const typeEnd = scene.extra.typeEnd ?? typeStart;
@@ -129,7 +133,7 @@ export const Code: React.FC<SceneProps> = ({scene}) => {
           })}
         </div>
       </div>
-      <div style={{minHeight: layout.body * 2.6, marginTop: 34}}>
+      <div style={{minHeight: noteH - 34, marginTop: 34}}>
         {hl?.note ? (
           <div key={active} style={{display: 'flex', gap: 20, alignItems: 'flex-start', fontSize: layout.body, fontWeight: 550, letterSpacing: '-0.02em', lineHeight: 1.2, ...lift(noteP, 14)}}>
             <div style={{paddingTop: layout.body * 0.12}}>

@@ -111,12 +111,15 @@ export const Tree: React.FC<SceneProps> = ({scene}) => {
   const d = scene.data;
   const {nodes, leaves, depth} = placeTree(d.root);
   const W = layout.content.w;
-  const nodeH = 84;
-  const levelH = Math.min(layout.format === 'vertical' ? 190 : 150, (layout.content.h - (d.highlight ? 470 : 360) - nodeH) / Math.max(depth, 1));
+  // Fit the tree into whatever height the heading and note leave over.
+  const reserved = layout.title * 2.3 + 90 + (d.highlight?.note ? layout.body * 2.6 + 48 : 0);
+  const avail = layout.content.h - reserved;
+  const nodeH = Math.min(84, (avail / (depth + 1)) * 0.75);
+  const levelH = Math.min(190, (avail - nodeH) / Math.max(depth, 1));
   const H = depth * levelH + nodeH;
   const colW = W / Math.max(leaves, 1);
   const nodeW = Math.min(colW - 16, 280);
-  const fontSize = Math.min(34, nodeW / 6.4);
+  const fontSize = Math.min(34, nodeW / 6.4, nodeH * 0.42);
   const cx = (n: Placed) => colW * (n.x + 0.5);
   const top = (n: Placed) => n.depth * levelH;
 
