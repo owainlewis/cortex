@@ -161,6 +161,11 @@ class FootageTests(unittest.TestCase):
         self.assertEqual(len(tl["words"]), len(self.words))
         self.assertTrue(any(e["kind"] == "whoosh" for e in events))
 
+    def test_graphic_opens_just_before_its_first_element(self):
+        self.plan["scenes"][1]["items"] = [{"text": "Chunk", "cue": "chunk"}]
+        tl, _ = self.footage.build(self.plan, self.words, 12.0, 30)
+        self.assertEqual(tl["scenes"][1]["cues"][0], 12)
+
     def test_missing_phrase_is_reported(self):
         self.plan["scenes"][1]["at"] = "never said this"
         with self.assertRaisesRegex(specs.SpecError, "never said this"):

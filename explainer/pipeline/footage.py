@@ -112,6 +112,13 @@ def build(plan: dict, words_sec: list[dict], seconds: float, fps: int) -> tuple[
         duration = end - start
         rel = [{**w, "start": w["start"] - start, "end": w["end"] - start} for w in words if start <= w["start"] < end]
         cues = resolve_cues(scene, rel, duration)
+        # Open the graphic just before its first element, not on an empty card.
+        if cues and cues[0] > 18 and scene["type"] not in ("hook", "statement", "stat"):
+            delta = cues[0] - 12
+            start += delta
+            duration -= delta
+            cues = [c - delta for c in cues]
+            rel = [{**w, "start": w["start"] - delta, "end": w["end"] - delta} for w in rel if w["start"] >= delta]
         extra = scene_extra(scene, cues)
         t0 = start / fps
         events.append({"t": max(t0 - 0.12, 0), "kind": "whoosh", "gain": 0.35})
