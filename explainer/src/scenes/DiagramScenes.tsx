@@ -11,7 +11,7 @@ export const Flow: React.FC<SceneProps> = ({scene}) => {
   const frame = useCurrentFrame();
   const d = scene.data;
   const nodes: any[] = d.nodes.map((n: any) => (typeof n === 'string' ? {label: n} : n));
-  const row = layout.format !== 'vertical';
+  const row = layout.wide;
   const active = activeCue(scene.cues, frame);
   const gap = row ? Math.min(140, layout.content.w * 0.08) : 70;
   const cardW = row ? (layout.content.w - gap * (nodes.length - 1)) / nodes.length : layout.content.w;

@@ -1,0 +1,46 @@
+{
+  "theme": "night",
+  "handle": "Owain Lewis",
+  "colors": {
+    "frame": "#070A09",
+    "canvas": "#0C110F",
+    "card": "#111715",
+    "border": "rgba(242, 238, 228, 0.16)",
+    "text": "#F2EEE4",
+    "muted": "#8E8A80",
+    "faint": "#2E3431",
+    "accent": "#C8A57E",
+    "accentSoft": "rgba(200, 165, 126, 0.12)",
+    "accentInk": "#0C110F",
+    "ink": "#F2EEE4",
+    "inkText": "#0C110F",
+    "inkMuted": "#6F6B63",
+    "captionBg": "rgba(12, 17, 15, 0.88)",
+    "captionText": "#F2EEE4"
+  },
+  "style": {
+    "surface": "outline",
+    "background": "grid",
+    "labelColor": "muted",
+    "labelFont": "sans",
+    "arrows": "straight",
+    "corners": true,
+    "figures": true,
+    "headlineWeight": 400,
+    "divider": true
+  },
+  "fonts": {
+    "serif": "../owain/fonts/Newsreader-standin.woff2",
+    "serifItalic": "../owain/fonts/Newsreader-Italic-standin.woff2",
+    "sans": "../owain/fonts/Inter-standin.woff2"
+  },
+  "radius": 2,
+  "captions": "box",
+  "formats": [
+    "landscape",
+    "vertical"
+  ],
+  "sounds": "../../sounds",
+  "music": "../../music",
+  "musicLevel": -20
+}

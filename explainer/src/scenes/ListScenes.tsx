@@ -23,7 +23,7 @@ const OptionCard: React.FC<{item: Item; p: number; row: boolean; index: number; 
   const {layout, theme} = useStyle();
   const tile = layout.body * 2.1;
   const iconTile = (
-    <div style={{width: tile, height: tile, borderRadius: 16, background: theme.accentSoft, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none'}}>
+    <div style={{width: tile, height: tile, borderRadius: Math.min(16, theme.radius + 2), background: theme.accentSoft, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none'}}>
       {item.icon ? <Icon name={item.icon} size={tile * 0.5} /> : <span style={{fontFamily: fonts.serif, fontSize: tile * 0.55, color: theme.accent}}>{index + 1}</span>}
     </div>
   );
@@ -67,7 +67,7 @@ export const List: React.FC<SceneProps> = ({scene}) => {
   const frame = useCurrentFrame();
   const d = scene.data;
   const items = (d.items as any[]).map(asItem);
-  const row = layout.format === 'landscape' && items.length <= 4;
+  const row = layout.wide && items.length <= 4;
   return (
     <div style={{display: 'flex', flexDirection: 'column'}}>
       <Heading kicker={d.kicker} text={d.heading} />
@@ -89,12 +89,12 @@ export const Compare: React.FC<SceneProps> = ({scene}) => {
   const right = (d.right.items as any[]).map(asItem);
   const leftAt = scene.cues[0] ?? 6;
   const rightAt = scene.cues[1] ?? leftAt + 30;
-  const row = layout.format === 'landscape';
+  const row = layout.wide;
   const pill = progress(frame, rightAt + 6, 14);
   return (
     <div style={{display: 'flex', flexDirection: 'column'}}>
       <Heading kicker={d.kicker} text={d.heading} />
-      <div style={{display: 'flex', flexDirection: row ? 'row' : 'column', gap: row ? 44 : 26, alignItems: 'stretch'}}>
+      <div style={{display: 'flex', flexDirection: row ? 'row' : 'column', gap: row ? 44 : 26, alignItems: 'stretch', paddingTop: d.right.label && row ? layout.body * 0.9 : 0}}>
         {left.map((item, i) => (
           <OptionCard
             key={`l${i}`}

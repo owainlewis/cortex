@@ -41,6 +41,14 @@ export type Timeline = {
   // Where the speaker sits in their frame, as [x, y] fractions, for cropping.
   focus?: [number, number];
   handle: string | null;
+  // Brand overrides prepared by pipeline/brand.py; asset paths are in the public dir.
+  brand?: {
+    colors?: Record<string, string | number>;
+    fonts?: {sans?: string; serif?: string; serifItalic?: string; mono?: string};
+    logo?: string | null;
+    radius?: number | null;
+    captions?: 'box' | 'off';
+  };
   scenes: SceneTiming[];
   // Narrated words, absolute frames. Drives the karaoke captions.
   words: Word[];

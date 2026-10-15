@@ -3,3 +3,14 @@ node_modules/
 models/
 out/
 __pycache__/
+# Media you collect stays out of git; the folders and their READMEs stay in.
+inbox/*
+!inbox/.gitkeep
+sounds/**/*.*
+!sounds/README.md
+music/**/*.*
+!music/README.md
+# Licensed brand fonts stay local; the free stand-ins are tracked.
+brands/*/fonts/*
+!brands/*/fonts/*-standin.woff2
+!brands/*/fonts/README.md

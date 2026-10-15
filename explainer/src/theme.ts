@@ -8,10 +8,11 @@ import type {Format, ThemeName} from './types';
 
 // Fonts ship with the project (SIL OFL) so renders never depend on the
 // network and look identical on every machine.
+// Families go through CSS variables so a brand can swap them at render time.
 export const fonts = {
-  sans: '"Manrope", "SF Pro Text", system-ui, sans-serif',
-  serif: '"Instrument Serif", "New York", Georgia, serif',
-  mono: '"Geist Mono", "SF Mono", ui-monospace, monospace',
+  sans: 'var(--font-sans, "Manrope", "SF Pro Text", system-ui, sans-serif)',
+  serif: 'var(--font-serif, "Instrument Serif", "New York", Georgia, serif)',
+  mono: 'var(--font-mono, "Geist Mono", "SF Mono", ui-monospace, monospace)',
 };
 
 const loadFonts = () => {
@@ -54,6 +55,19 @@ export type Theme = {
   inkText: string;
   inkMuted: string;
   shadow: string;
+  captionBg: string;
+  captionText: string;
+  radius: number;
+  // Style switches a brand can flip without touching components.
+  surface: 'card' | 'outline';
+  background: 'plain' | 'dots' | 'grid';
+  labelColor: 'muted' | 'accent';
+  labelFont: 'sans' | 'mono';
+  arrows: 'curved' | 'straight';
+  corners: boolean; // drafting ticks at card corners
+  figures: boolean; // number scenes like figures in a drawing set
+  divider: boolean; // rule, diamond, rule under headlines
+  headlineWeight: number;
   syntax: {keyword: string; string: string; number: string; comment: string};
 };
 
@@ -75,6 +89,18 @@ export const themes: Record<ThemeName, Theme> = {
     inkText: '#F4F3EF',
     inkMuted: '#8E8C86',
     shadow: '0 1px 2px rgba(30,28,20,0.04), 0 14px 36px rgba(30,28,20,0.07)',
+    captionBg: 'rgba(28,28,26,0.86)',
+    captionText: '#FFFFFF',
+    radius: 22,
+    surface: 'card',
+    background: 'plain',
+    labelColor: 'muted',
+    labelFont: 'sans',
+    arrows: 'curved',
+    corners: false,
+    figures: false,
+    divider: false,
+    headlineWeight: 400,
     syntax: {keyword: '#A5BE7C', string: '#D9C58F', number: '#D9C58F', comment: '#6E6C66'},
   },
   night: {
@@ -94,6 +120,18 @@ export const themes: Record<ThemeName, Theme> = {
     inkText: '#141413',
     inkMuted: '#6A6862',
     shadow: '0 1px 2px rgba(0,0,0,0.3), 0 14px 36px rgba(0,0,0,0.35)',
+    captionBg: 'rgba(241,239,233,0.92)',
+    captionText: '#141413',
+    radius: 22,
+    surface: 'card',
+    background: 'plain',
+    labelColor: 'muted',
+    labelFont: 'sans',
+    arrows: 'curved',
+    corners: false,
+    figures: false,
+    divider: false,
+    headlineWeight: 400,
     syntax: {keyword: '#566B39', string: '#7A5A1E', number: '#7A5A1E', comment: '#8E8C86'},
   },
 };
@@ -104,6 +142,12 @@ export type Layout = {
   height: number;
   inset: number; // frame around the canvas
   radius: number;
+  // The canvas the graphics sit on, in frame coordinates.
+  canvas: {x: number; y: number; w: number; h: number; radius: number};
+  // Vertical footage splits the frame: graphics above `split`, speaker below.
+  split: number | null;
+  // True when the graphics area is wider than tall, so cards sit side by side.
+  wide: boolean;
   content: {x: number; y: number; w: number; h: number};
   pip: {x: number; y: number; w: number; h: number};
   captionY: number;
@@ -114,12 +158,28 @@ export type Layout = {
   small: number;
 };
 
-// `withSpeaker` reserves room for the picture-in-picture speaker.
+const framed = (width: number, height: number, inset: number, radius: number) => ({x: inset, y: inset, w: width - inset * 2, h: height - inset * 2, radius});
+
+// `withSpeaker` reserves room for the speaker: picture-in-picture in landscape
+// and square, a split screen in vertical.
 export const layoutFor = (format: Format, width: number, height: number, withSpeaker = false): Layout => {
+  if (format === 'vertical' && withSpeaker) {
+    const split = Math.round(height * 0.47);
+    return {
+      format, width, height, inset: 0, radius: 0,
+      canvas: {x: 0, y: 0, w: width, h: split, radius: 0},
+      split,
+      wide: true,
+      content: {x: 64, y: 130, w: width - 128, h: split - 130 - 70},
+      pip: {x: 0, y: split, w: width, h: height - split},
+      captionY: split - 34, captionSize: 46,
+      display: 104, title: 64, body: 38, small: 22,
+    };
+  }
   if (format === 'vertical') {
     return {
-      format, width, height, inset: 18, radius: 36,
-      content: {x: 72, y: withSpeaker ? 420 : 300, w: width - 144, h: withSpeaker ? 820 : 920},
+      format, width, height, inset: 18, radius: 36, canvas: framed(width, height, 18, 36), split: null, wide: false,
+      content: {x: 72, y: 300, w: width - 144, h: 920},
       pip: {x: width - 18 - 40 - 230, y: 18 + 60, w: 230, h: 300},
       captionY: 1330, captionSize: 54,
       display: 140, title: 88, body: 48, small: 26,
@@ -127,7 +187,7 @@ export const layoutFor = (format: Format, width: number, height: number, withSpe
   }
   if (format === 'square') {
     return {
-      format, width, height, inset: 16, radius: 30,
+      format, width, height, inset: 16, radius: 30, canvas: framed(width, height, 16, 30), split: null, wide: false,
       content: {x: 80, y: 90, w: width - 160 - (withSpeaker ? 180 : 0), h: 700},
       pip: {x: width - 16 - 30 - 170, y: 300, w: 170, h: 230},
       captionY: 870, captionSize: 40,
@@ -135,7 +195,7 @@ export const layoutFor = (format: Format, width: number, height: number, withSpe
     };
   }
   return {
-    format, width, height, inset: 24, radius: 30,
+    format, width, height, inset: 24, radius: 30, canvas: framed(width, height, 24, 30), split: null, wide: true,
     content: {x: 130, y: 90, w: width - 260 - (withSpeaker ? 250 : 0), h: 760},
     pip: {x: width - 24 - 44 - 240, y: 330, w: 240, h: 330},
     captionY: 890, captionSize: 54,
@@ -151,3 +211,6 @@ export const StyleContext = createContext<Ctx>({
 });
 
 export const useStyle = () => useContext(StyleContext);
+
+// Which scene is rendering, for figure numbers.
+export const SceneIndex = createContext<{index: number; total: number}>({index: 0, total: 1});

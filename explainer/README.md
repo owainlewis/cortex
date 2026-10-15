@@ -44,7 +44,7 @@ Icons come from Lucide and are named in the spec (`"icon": "file-text"`).
 Motion is soft and deliberate: words settle in as they are spoken, cards rise into place, arrows draw themselves, and rejected options get struck through.
 Scenes show the mechanism itself where they can: the `array` scene moves every byte of an insert, the `tree` scene walks a lookup path, the `code` scene types and then points at the lines that matter.
 
-There are two themes: `studio` (light, the default) and `night` (dark).
+There are two base themes, `studio` (light, the default) and `night` (dark); a brand file (below) restyles either without code changes.
 
 ## Why Remotion
 
@@ -136,6 +136,58 @@ A plan anchors each graphic to words you actually say:
 
 `specs/footage-example.json` is a complete plan for a public-domain NIOSH interview clip.
 Set `EXPLAINER_WHISPER=base.en` for faster, less accurate transcription (the default is `small.en`).
+
+## Making it routine
+
+Three ways to run it, from most hands-on to least:
+
+1. **Claude Code.** In this repository, ask "make an explainer from ~/Movies/talk.mov".
+   The `explainer-video` skill (`.claude/skills/explainer-video/SKILL.md`) transcribes the video, has Claude Code write the graphics plan, reviews stills, and renders every format.
+   No API key is needed because Claude Code writes the plan itself.
+2. **Inbox.** Drop videos into `inbox/` and run `./explain inbox`.
+   A plan beside a video (`talk.plan.json` next to `talk.mp4`) is used as is; otherwise Claude drafts one (needs `ANTHROPIC_API_KEY`).
+   Each video renders in the formats listed in the brand, and finished videos are skipped until the video or its plan changes.
+3. **By hand.** `./explain transcribe talk.mp4`, write `out/talk/plan.json`, then `./explain footage talk.mp4 --plan out/talk/plan.json`.
+
+Vertical footage uses a fixed split screen: graphics in the top 47 percent, the speaker edge to edge below, captions on the seam.
+Between graphics the top panel shows the video's title.
+Landscape and square use picture-in-picture instead.
+
+## Brand
+
+Everything visual lives in a brand folder: `brand/` by default, or any folder passed with `--brand`.
+`brands/owain` (paper) and `brands/owain-ink` (ink) are the Owain Lewis brand: Signifier and Helvetica, a bronze accent, and drafting details.
+
+`brand.json` keys, all optional:
+
+| Key | What it sets |
+| --- | --- |
+| `theme` | base palette, `studio` or `night` |
+| `colors` | any of `frame`, `canvas`, `card`, `border`, `text`, `muted`, `faint`, `accent`, `accentSoft`, `accentInk`, `ink`, `inkText`, `inkMuted`, `captionBg`, `captionText` |
+| `style.surface` | `card` (white, shadowed, stacked) or `outline` (hairline panels) |
+| `style.background` | `plain`, `dots`, or `grid` (fine grid, margin rules, registration crosshairs) |
+| `style.corners` | drafting ticks outside panel corners |
+| `style.arrows` | `curved` (hand-drawn) or `straight` (dimension line) |
+| `style.figures` | number each graphic like a figure: "Fig. 03 — Her advice" |
+| `style.labelFont`, `style.labelColor` | labels in `sans` or `mono`, `muted` or `accent` |
+| `style.headlineWeight` | headline weight, e.g. 300 for light |
+| `fonts.serif`, `fonts.serifItalic`, `fonts.sans`, `fonts.mono` | a font file in the brand folder, or `local:Family Name` for a font installed on the rendering machine |
+| `logo` | an image shown in the canvas's top-left corner |
+| `handle` | shown on the outro and between graphics |
+| `radius` | corner radius for panels; pills follow it |
+| `captions` | `box` or `off` |
+| `formats` | formats `./explain inbox` renders |
+| `sounds`, `music` | sound and music folders, relative to the brand folder |
+| `musicLevel` | music level under speech in footage mode, in dB |
+
+Iterate on a brand with stills: edit `brand.json`, run `./explain footage <video> --plan <plan> --brand <folder> --stills`, and look at `out/<name>/stills-<format>/`.
+Each run takes about a minute and shows exactly what will render.
+
+## Sound and music
+
+Put your own effects in `sounds/<kind>/` and tracks in `music/` or `music/<mood>/`.
+`sounds/README.md` lists the kinds, what each should sound like, and where to get good ones; `music/README.md` covers tracks.
+Anything missing falls back to the built-in synthesis, so you can replace sounds one kind at a time.
 
 ## Writing a spec
 

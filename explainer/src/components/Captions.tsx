@@ -27,7 +27,7 @@ const paginate = (words: Word[], fps: number, maxChars: number): Page[] => {
 export const Captions: React.FC<{words: Word[]}> = ({words}) => {
   const frame = useCurrentFrame();
   const {fps} = useVideoConfig();
-  const {layout} = useStyle();
+  const {layout, theme} = useStyle();
   const maxChars = layout.format === 'vertical' ? 30 : 46;
   const pages = useMemo(() => paginate(words, fps, maxChars), [words, fps, maxChars]);
   const page = pages.find((p, i) => {
@@ -47,10 +47,10 @@ export const Captions: React.FC<{words: Word[]}> = ({words}) => {
           fontWeight: 600,
           lineHeight: 1.32,
           letterSpacing: '-0.01em',
-          color: '#FFFFFF',
+          color: theme.captionText,
         }}
       >
-        <span style={{background: 'rgba(28,28,26,0.86)', padding: '0.08em 0.3em', boxDecorationBreak: 'clone', WebkitBoxDecorationBreak: 'clone'}}>
+        <span style={{background: theme.captionBg, padding: '0.08em 0.3em', boxDecorationBreak: 'clone', WebkitBoxDecorationBreak: 'clone'}}>
           {page.words.map((w, i) => (
             <span key={i} style={{opacity: frame >= w.start ? 1 : 0.5}}>
               {i ? ' ' : ''}

@@ -1,7 +1,8 @@
 import {icons, type LucideIcon} from 'lucide-react';
 import React from 'react';
 import {Easing, interpolate, useCurrentFrame} from 'remotion';
-import {fonts, useStyle} from './theme';
+import {useContext} from 'react';
+import {fonts, SceneIndex, useStyle} from './theme';
 import type {Word} from './types';
 
 export const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
@@ -120,7 +121,7 @@ export const RichText: React.FC<{
       style={{
         fontFamily: serif ? fonts.serif : fonts.sans,
         fontSize: size,
-        fontWeight: serif ? 400 : weight ?? 600,
+        fontWeight: serif ? theme.headlineWeight : weight ?? 600,
         letterSpacing: serif ? '-0.015em' : '-0.02em',
         lineHeight: lineHeight ?? (serif ? 1.0 : 1.2),
         color: color ?? theme.text,
@@ -136,17 +137,21 @@ export const RichText: React.FC<{
 // Wide-tracked uppercase label, like a section marker.
 export const Label: React.FC<{text?: string; delay?: number; align?: 'left' | 'center'; style?: React.CSSProperties}> = ({text, delay = 0, align, style}) => {
   const {theme, layout} = useStyle();
+  const {index} = useContext(SceneIndex);
   const p = useProgress(delay, 16);
   if (!text) return null;
+  const mono = theme.labelFont === 'mono';
+  if (theme.figures) text = `${String(index + 1).padStart(2, '0')}  ·  ${text}`;
   return (
     <div
       style={{
-        fontFamily: fonts.sans,
-        fontSize: layout.small,
-        fontWeight: 600,
-        letterSpacing: '0.2em',
+        fontFamily: mono ? fonts.mono : fonts.sans,
+        fontSize: layout.small * (mono ? 0.95 : 1),
+        fontWeight: mono ? 500 : 600,
+        letterSpacing: mono ? '0.12em' : '0.2em',
+        whiteSpace: 'pre',
         textTransform: 'uppercase',
-        color: theme.muted,
+        color: theme.labelColor === 'accent' ? theme.accent : theme.muted,
         textAlign: align,
         ...enter(p, 10),
         ...style,
@@ -182,11 +187,13 @@ export const Card: React.FC<{
   style?: React.CSSProperties;
 }> = ({children, stacked = true, dark = false, p = 1, style}) => {
   const {theme} = useStyle();
+  const outline = theme.surface === 'outline';
   const face: React.CSSProperties = {
-    background: dark ? theme.ink : theme.card,
-    border: `1.5px solid ${dark ? theme.ink : theme.border}`,
-    borderRadius: 22,
+    background: dark && !outline ? theme.ink : theme.card,
+    border: `1.5px solid ${dark && !outline ? theme.ink : theme.border}`,
+    borderRadius: theme.radius,
   };
+  stacked = stacked && !outline;
   return (
     <div style={{position: 'relative', ...enter(p, 24), ...style}}>
       {stacked
@@ -194,7 +201,8 @@ export const Card: React.FC<{
             <div key={o} style={{position: 'absolute', inset: 0, transform: `translate(${o}px, ${o}px)`, ...face, background: theme.canvas, border: `1.5px solid ${theme.border}`, opacity: p}} />
           ))
         : null}
-      <div style={{position: 'relative', height: '100%', boxSizing: 'border-box', boxShadow: theme.shadow, overflow: 'hidden', ...face}}>{children}</div>
+      <div style={{position: 'relative', height: '100%', boxSizing: 'border-box', boxShadow: outline ? undefined : theme.shadow, overflow: 'hidden', ...face}}>{children}</div>
+      {theme.corners ? <CornerTicks /> : null}
     </div>
   );
 };
@@ -238,7 +246,8 @@ export const Pill: React.FC<{text: string; tone?: 'ink' | 'accent' | 'light'; ic
         alignItems: 'center',
         gap: fs * 0.4,
         padding: `${fs * 0.42}px ${fs * 0.9}px`,
-        borderRadius: 999,
+        // Pills follow the brand's corners: round for soft brands, squared for sharp ones.
+        borderRadius: theme.radius >= 12 ? 999 : theme.radius + 2,
         background: colors.bg,
         color: colors.fg,
         border: `1.5px solid ${colors.border}`,
@@ -258,22 +267,45 @@ export const Pill: React.FC<{text: string; tone?: 'ink' | 'accent' | 'light'; ic
   );
 };
 
-// A gently curved, hand-drawn style arrow that draws itself.
+// Registration ticks just outside each corner, like a technical drawing.
+const CornerTicks: React.FC = () => {
+  const {theme} = useStyle();
+  const o = -10;
+  const len = 14;
+  const tick = (pos: React.CSSProperties, rot: number) => (
+    <svg width={len} height={len} style={{position: 'absolute', overflow: 'visible', transform: `rotate(${rot}deg)`, ...pos}}>
+      <path d={`M0 ${len} L0 0 L${len} 0`} fill="none" stroke={theme.muted} strokeWidth={1.5} />
+    </svg>
+  );
+  return (
+    <>
+      {tick({left: o, top: o}, 0)}
+      {tick({right: o, top: o}, 90)}
+      {tick({right: o, bottom: o}, 180)}
+      {tick({left: o, bottom: o}, 270)}
+    </>
+  );
+};
+
+// A gently curved, hand-drawn style arrow that draws itself; straight with an
+// open head when the brand asks for drafting arrows.
 export const CurvedArrow: React.FC<{length: number; p: number; vertical?: boolean; bend?: number}> = ({length, p, vertical = false, bend = 0.18}) => {
   const {theme} = useStyle();
   const L = length;
-  const h = Math.max(24, L * bend * 2 + 20);
-  const path = `M 6 ${h / 2 + 4} Q ${L / 2} ${h / 2 - L * bend} ${L - 10} ${h / 2}`;
+  const straight = theme.arrows === 'straight';
+  const h = straight ? 24 : Math.max(24, L * bend * 2 + 20);
+  const path = straight ? `M 6 ${h / 2} L ${L - 10} ${h / 2}` : `M 6 ${h / 2 + 4} Q ${L / 2} ${h / 2 - L * bend} ${L - 10} ${h / 2}`;
   const approx = L * 1.08;
   const head = p > 0.9 ? 1 : 0;
   const svg = (
     <svg width={L} height={h} viewBox={`0 0 ${L} ${h}`} style={{overflow: 'visible', display: 'block'}}>
-      <path d={path} fill="none" stroke={theme.accent} strokeWidth={3.5} strokeLinecap="round" strokeDasharray={approx} strokeDashoffset={approx * (1 - p)} />
+      {straight ? <line x1={6} y1={h / 2 - 8} x2={6} y2={h / 2 + 8} stroke={theme.accent} strokeWidth={2} opacity={p > 0 ? 1 : 0} /> : null}
+      <path d={path} fill="none" stroke={theme.accent} strokeWidth={straight ? 2 : 3.5} strokeLinecap={straight ? 'butt' : 'round'} strokeDasharray={approx} strokeDashoffset={approx * (1 - p)} />
       <path
         d={`M ${L - 24} ${h / 2 - 11} L ${L - 9} ${h / 2} L ${L - 25} ${h / 2 + 9}`}
         fill="none"
         stroke={theme.accent}
-        strokeWidth={3.5}
+        strokeWidth={straight ? 2 : 3.5}
         strokeLinecap="round"
         strokeLinejoin="round"
         opacity={head}
@@ -321,3 +353,19 @@ export const badgeSlot = (row: boolean, body: number): React.CSSProperties =>
   row
     ? {position: 'absolute', top: -body * 1.55, left: 0, right: 0, display: 'flex', justifyContent: 'center', zIndex: 2}
     : {position: 'absolute', top: -body * 0.6, right: body * 0.6, zIndex: 2};
+
+// Rule, diamond, rule: a quiet break under a headline. It draws outward from
+// the diamond.
+export const Divider: React.FC<{delay?: number}> = ({delay = 0}) => {
+  const {theme} = useStyle();
+  const p = useProgress(delay, 22);
+  if (!theme.divider) return null;
+  const line: React.CSSProperties = {width: 90, height: 1.5, background: theme.text, transform: `scaleX(${p})`};
+  return (
+    <div style={{display: 'flex', alignItems: 'center', gap: 22, opacity: p}}>
+      <div style={{...line, transformOrigin: 'right'}} />
+      <div style={{width: 11, height: 11, background: theme.text, transform: `rotate(45deg) scale(${p})`}} />
+      <div style={{...line, transformOrigin: 'left'}} />
+    </div>
+  );
+};

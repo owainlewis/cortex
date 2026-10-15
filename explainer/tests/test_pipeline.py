@@ -176,3 +176,68 @@ class FootageTests(unittest.TestCase):
         del self.plan["scenes"][0]["at"]
         with self.assertRaisesRegex(specs.SpecError, "missing 'at'"):
             specs.validate(self.plan, footage=True)
+
+
+class BrandTests(unittest.TestCase):
+    def test_bundled_brands_load(self):
+        from pipeline import brand
+
+        for path in ("brand", "brands/owain", "brands/owain-ink"):
+            with self.subTest(path=path):
+                brand.load(ROOT / path)
+
+    def test_bad_brand_reports_problems(self):
+        import tempfile
+
+        from pipeline import brand
+
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "brand.json").write_text(json.dumps({"colors": {"nope": "#000"}, "style": {"surface": "glass"}, "fonts": {"serif": "missing.woff2"}}))
+            with self.assertRaises(brand.BrandError) as ctx:
+                brand.load(d)
+        msg = str(ctx.exception)
+        self.assertIn("unknown colors", msg)
+        self.assertIn("style.surface", msg)
+        self.assertIn("missing.woff2", msg)
+
+    def test_local_fonts_pass_through(self):
+        import tempfile
+
+        from pipeline import brand
+
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "brand.json").write_text(json.dumps({"fonts": {"sans": "local:Helvetica Neue"}, "style": {"corners": True}}))
+            published = brand.publish(brand.load(d), Path(d) / "public")
+        self.assertEqual(published["fonts"]["sans"], "local:Helvetica Neue")
+        self.assertTrue(published["colors"]["corners"])
+
+
+class LibraryTests(unittest.TestCase):
+    def test_library_samples_replace_synthesis(self):
+        import subprocess
+        import tempfile
+
+        from pipeline import library, sfx
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "sounds"
+            (root / "pop").mkdir(parents=True)
+            subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=440:d=0.1", str(root / "pop" / "a.wav")], check=True)
+            lib = library.SoundLibrary(root, Path(d) / "cache")
+            self.assertTrue(lib.has("pop"))
+            self.assertFalse(lib.has("whoosh"))
+            out = sfx.render([{"t": 0.5, "kind": "pop", "gain": 1.0}, {"t": 1.0, "kind": "whoosh"}], 2.0, 440.0, lib)
+            self.assertAlmostEqual(float(np.max(np.abs(out[24000:28800]))), 0.7, places=1)
+            self.assertGreater(float(np.max(np.abs(out[48000:]))), 0.0)
+
+    def test_music_bed_loops_to_length(self):
+        import subprocess
+        import tempfile
+
+        from pipeline import library
+
+        with tempfile.TemporaryDirectory() as d:
+            track = Path(d) / "t.wav"
+            subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=220:d=5", str(track)], check=True)
+            bed = library.music_bed(track, 12.0, Path(d) / "cache")
+        self.assertEqual(len(bed), 12 * 48000)

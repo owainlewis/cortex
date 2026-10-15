@@ -1,4 +1,5 @@
-"""Synthesised sound effects, triggered by timeline events."""
+"""Sound effects, triggered by timeline events: samples from your sound
+library where you have them, synthesised otherwise."""
 
 from __future__ import annotations
 
@@ -92,11 +93,24 @@ def chime(root_hz: float) -> np.ndarray:
     return reverb(stereo(out * np.minimum(1, t / 0.002)), 0.5, 2.5)
 
 
-def render(events: list[dict], seconds: float, root_hz: float) -> np.ndarray:
+def render(events: list[dict], seconds: float, root_hz: float, library=None) -> np.ndarray:
+    """Mix every event into one stereo track. Kinds with files in the sound
+    library use them; everything else is synthesised."""
     out = np.zeros((int(seconds * SR), 2))
     cache: dict[tuple, np.ndarray] = {}
+    counts: dict[str, int] = {}
     for e in events:
         kind = e["kind"]
+        if library is not None and library.has(kind):
+            index = counts.get(kind, 0) + (e.get("step", 0) if kind == "pop" else 0)
+            counts[kind] = counts.get(kind, 0) + 1
+            sound = library.pick(kind, index)
+            at = e["t"]
+            if kind == "riser":
+                # Real risers are cut to end on the hit rather than start on it.
+                at = e["t"] + e.get("dur", 1.0) - len(sound) / SR
+            place(out, sound, at, e.get("gain", 1.0))
+            continue
         if kind == "pop":
             k = ("pop", e.get("step", 0))
             if k not in cache:

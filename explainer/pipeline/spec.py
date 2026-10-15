@@ -62,6 +62,8 @@ def load(path: str | Path, footage: bool = False) -> dict:
         spec = json.loads(path.read_text())
     except json.JSONDecodeError as e:
         raise SpecError(f"{path}: invalid JSON: {e}") from e
+    # Remember whether the video chose its own theme, so a brand default can apply otherwise.
+    spec["_theme_set"] = "theme" in spec
     for key, value in DEFAULTS.items():
         spec.setdefault(key, value)
     spec.setdefault("slug", slugify(spec.get("title", path.stem)))

@@ -1,6 +1,6 @@
 import React from 'react';
 import {Easing, interpolate, useCurrentFrame} from 'remotion';
-import {Card, clamp, formatNumber, Label, Pill, progress, RichText, useProgress} from '../motion';
+import {Card, clamp, Divider, formatNumber, Label, Pill, progress, RichText, useProgress} from '../motion';
 import {fonts, useStyle} from '../theme';
 import type {SceneProps} from '../types';
 
@@ -17,6 +17,7 @@ export const Hook: React.FC<SceneProps> = ({scene}) => {
     <Center>
       <Label text={d.kicker} align="center" />
       <RichText text={d.title} serif size={layout.display * 1.05} words={scene.words} sync start={1} align="center" />
+      <Divider delay={14} />
       {d.subtitle ? <Pill text={d.subtitle} p={sub} /> : null}
     </Center>
   );
@@ -32,6 +33,7 @@ export const Statement: React.FC<SceneProps> = ({scene}) => {
     <Center>
       <Label text={d.kicker} align="center" />
       <RichText text={d.text} serif size={layout.display * 0.85} words={scene.words} sync align="center" />
+      <Divider delay={12} />
       {d.sub ? (
         short ? (
           <Pill text={d.sub} p={sub} />
@@ -81,6 +83,7 @@ export const Outro: React.FC<SceneProps & {handle?: string | null}> = ({scene, h
   return (
     <Center>
       <RichText text={d.title} serif size={layout.display} words={scene.words} sync align="center" />
+      <Divider delay={12} />
       {d.sub ? <div style={{fontSize: layout.body, color: theme.muted, opacity: cta}}>{d.sub}</div> : null}
       {d.cta || handle ? <Pill text={[d.cta ?? 'Follow', handle].filter(Boolean).join('  ')} icon="arrow-right" p={cta} size={layout.body * 0.9} /> : null}
     </Center>

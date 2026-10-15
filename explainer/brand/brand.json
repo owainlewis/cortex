@@ -1,0 +1,22 @@
+{
+  "theme": "studio",
+  "handle": null,
+  "colors": {},
+  "fonts": {},
+  "logo": null,
+  "radius": 22,
+  "captions": "box",
+  "formats": [
+    "landscape",
+    "vertical"
+  ],
+  "sounds": "../sounds",
+  "music": "../music",
+  "musicLevel": -20,
+  "style": {
+    "surface": "card",
+    "background": "plain",
+    "labelColor": "muted",
+    "headlineWeight": 400
+  }
+}
