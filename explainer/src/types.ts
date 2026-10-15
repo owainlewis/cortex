@@ -7,7 +7,7 @@ export type Word = {
   end: number;
 };
 
-export type ThemeName = 'ink' | 'paper' | 'blueprint';
+export type ThemeName = 'studio' | 'night';
 
 export type Format = 'vertical' | 'square' | 'landscape';
 
@@ -36,6 +36,10 @@ export type Timeline = {
   theme: ThemeName;
   durationInFrames: number;
   audio: string | null;
+  // Presenter footage in the public dir, shown full frame or picture-in-picture.
+  video?: string | null;
+  // Where the speaker sits in their frame, as [x, y] fractions, for cropping.
+  focus?: [number, number];
   handle: string | null;
   scenes: SceneTiming[];
   // Narrated words, absolute frames. Drives the karaoke captions.

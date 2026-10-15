@@ -18,7 +18,7 @@ class SpecTests(unittest.TestCase):
     def test_example_specs_validate(self):
         for path in (ROOT / "specs").glob("*.json"):
             with self.subTest(path=path.name):
-                specs.load(path)
+                specs.load(path, footage=path.name.startswith("footage"))
 
     def test_reports_every_problem(self):
         bad = {**specs.DEFAULTS, "title": "x", "scenes": [{"type": "list", "narration": "hi"}, {"type": "nope"}]}
@@ -124,7 +124,7 @@ class WriterTests(unittest.TestCase):
         replies = [json.dumps(bad), "Here you go:\n" + json.dumps(good)]
         sent = []
 
-        def ask(client, messages):
+        def ask(client, messages, system=None):
             sent.append(list(messages))
             return replies[len(sent) - 1]
 
@@ -133,3 +133,41 @@ class WriterTests(unittest.TestCase):
         self.assertEqual(spec["title"], good["title"])
         self.assertEqual(len(sent), 2)
         self.assertIn("does not validate", sent[1][-1]["content"])
+
+
+class FootageTests(unittest.TestCase):
+    def setUp(self):
+        from pipeline import footage
+
+        self.footage = footage
+        text = "So today I want to talk about ropes. A rope is a tree of strings. Each leaf holds a chunk. That is all for now."
+        self.words = [{"text": w, "start": i * 0.4, "end": i * 0.4 + 0.3} for i, w in enumerate(text.split())]
+        self.plan = {
+            **specs.DEFAULTS,
+            "title": "t",
+            "format": "landscape",
+            "scenes": [
+                {"type": "statement", "at": "A rope is a", "until": "tree of strings", "text": "A rope"},
+                {"type": "list", "at": "Each leaf holds", "items": ["Leaf", "Chunk"]},
+            ],
+        }
+
+    def test_scenes_anchor_to_phrases(self):
+        tl, events = self.footage.build(self.plan, self.words, 12.0, 30)
+        first, second = tl["scenes"]
+        self.assertEqual(first["from"], int(round(8 * 0.4 * 30)) - self.footage.LEAD_FRAMES)
+        self.assertLessEqual(first["from"] + first["duration"], second["from"])
+        self.assertEqual(tl["video"], "speaker.mp4")
+        self.assertEqual(len(tl["words"]), len(self.words))
+        self.assertTrue(any(e["kind"] == "whoosh" for e in events))
+
+    def test_missing_phrase_is_reported(self):
+        self.plan["scenes"][1]["at"] = "never said this"
+        with self.assertRaisesRegex(specs.SpecError, "never said this"):
+            self.footage.build(self.plan, self.words, 12.0, 30)
+
+    def test_footage_plans_need_at_not_narration(self):
+        specs.validate(self.plan, footage=True)
+        del self.plan["scenes"][0]["at"]
+        with self.assertRaisesRegex(specs.SpecError, "missing 'at'"):
+            specs.validate(self.plan, footage=True)

@@ -1,3 +1,4 @@
+import {icons, type LucideIcon} from 'lucide-react';
 import React from 'react';
 import {Easing, interpolate, useCurrentFrame} from 'remotion';
 import {fonts, useStyle} from './theme';
@@ -5,28 +6,27 @@ import type {Word} from './types';
 
 export const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
 
-// One motion language everywhere: a fast expo-out for entrances and a short
-// ease-in for exits. No bounce.
-export const easeOut = Easing.bezier(0.16, 1, 0.3, 1);
-export const easeIn = Easing.bezier(0.7, 0, 0.84, 0);
+// Soft, confident motion: a long ease-out for entrances, a short ease-in for
+// exits. Nothing bounces.
+export const easeOut = Easing.bezier(0.22, 1, 0.36, 1);
+export const easeIn = Easing.bezier(0.55, 0, 1, 0.45);
 
-export const progress = (frame: number, start: number, duration = 16, easing = easeOut) =>
+export const progress = (frame: number, start: number, duration = 18, easing = easeOut) =>
   interpolate(frame, [start, start + duration], [0, 1], {...clamp, easing});
 
-export const useProgress = (start: number, duration = 16, easing = easeOut) =>
+export const useProgress = (start: number, duration = 18, easing = easeOut) =>
   progress(useCurrentFrame(), start, duration, easing);
 
-// Fade and lift for small elements that do not need a mask.
-export const lift = (p: number, distance = 24): React.CSSProperties => ({
+// Fade, rise and settle from a hair below full size.
+export const enter = (p: number, distance = 18): React.CSSProperties => ({
   opacity: p,
-  transform: `translateY(${(1 - p) * distance}px)`,
+  transform: `translateY(${(1 - p) * distance}px) scale(${0.97 + 0.03 * p})`,
 });
 
 const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 
 // For each display token, the frame at which the narrator says it, so titles
-// assemble in time with the voice. Tokens the narrator never says fall back to
-// a short stagger after the previous token.
+// assemble in time with the voice. Unsaid tokens follow a short stagger.
 export const syncDelays = (tokens: string[], words: Word[] | undefined, start = 4, stagger = 3): number[] => {
   const out: number[] = [];
   let pointer = 0;
@@ -53,9 +53,9 @@ export const syncDelays = (tokens: string[], words: Word[] | undefined, start = 
   return out;
 };
 
-type Segment = {text: string; mark: 'none' | 'accent' | 'highlight'};
+type Segment = {text: string; mark: 'none' | 'italic' | 'accent'};
 
-// `*word*` sets in serif italic, `==words==` sits on a flat accent block.
+// `*word*` sets in italic, `==words==` in the accent colour.
 export const parseRich = (text: string): Segment[] => {
   const out: Segment[] = [];
   const re = /(\*[^*]+\*|==[^=]+==)/g;
@@ -64,122 +64,91 @@ export const parseRich = (text: string): Segment[] => {
   while ((m = re.exec(text))) {
     if (m.index > last) out.push({text: text.slice(last, m.index), mark: 'none'});
     const raw = m[0];
-    if (raw.startsWith('==')) out.push({text: raw.slice(2, -2), mark: 'highlight'});
-    else out.push({text: raw.slice(1, -1), mark: 'accent'});
+    out.push(raw.startsWith('==') ? {text: raw.slice(2, -2), mark: 'accent'} : {text: raw.slice(1, -1), mark: 'italic'});
     last = m.index + raw.length;
   }
   if (last < text.length) out.push({text: text.slice(last), mark: 'none'});
   return out;
 };
 
-// A word rising from behind its own baseline mask.
-const Masked: React.FC<{p: number; children: React.ReactNode; style?: React.CSSProperties}> = ({p, children, style}) => (
-  <span
-    style={{
-      display: 'inline-block',
-      overflow: 'hidden',
-      verticalAlign: 'top',
-      padding: '0.06em 0.04em 0.16em',
-      margin: '-0.06em -0.04em -0.16em',
-    }}
-  >
-    <span style={{display: 'inline-block', whiteSpace: 'pre', transform: `translateY(${(1 - p) * 115}%)`, ...style}}>{children}</span>
-  </span>
-);
+export const plain = (text: string) => parseRich(text).map((s) => s.text).join('');
 
+// Text that settles in word by word. `serif` is the headline voice.
 export const RichText: React.FC<{
   text: string;
   size: number;
+  serif?: boolean;
   weight?: number;
   color?: string;
   align?: 'left' | 'center';
   lineHeight?: number;
-  letterSpacing?: string;
   words?: Word[];
   start?: number;
   stagger?: number;
   sync?: boolean;
-}> = ({text, size, weight = 650, color, align = 'left', lineHeight = 1.02, letterSpacing = '-0.04em', words, start = 4, stagger = 2, sync = false}) => {
+}> = ({text, size, serif = false, weight, color, align = 'left', lineHeight, words, start = 4, stagger = 2, sync = false}) => {
   const {theme} = useStyle();
   const frame = useCurrentFrame();
   const segments = parseRich(text).map((seg) => ({...seg, words: seg.text.split(/\s+/).filter(Boolean)}));
   const delays = syncDelays(segments.flatMap((s) => s.words), sync ? words : undefined, start, stagger);
-
   let k = 0;
-  const parts: React.ReactNode[] = [];
-  segments.forEach((seg, s) => {
-    if (!seg.words.length) return;
-    const first = k;
-    const nodes = seg.words.map((w) => {
+  const nodes: React.ReactNode[] = [];
+  segments.forEach((seg) =>
+    seg.words.forEach((w) => {
       const i = k++;
-      const p = progress(frame, delays[i], 18);
-      const style: React.CSSProperties =
-        seg.mark === 'accent'
-          ? {fontFamily: fonts.serif, fontStyle: 'italic', fontWeight: 400, letterSpacing: '-0.01em', color: theme.accent}
-          : seg.mark === 'highlight'
-            ? {color: theme.accentInk}
-            : {};
-      return (
-        <Masked key={i} p={p} style={style}>
+      const p = progress(frame, delays[i], 16);
+      nodes.push(
+        <span
+          key={i}
+          style={{
+            display: 'inline-block',
+            whiteSpace: 'pre',
+            fontStyle: seg.mark === 'italic' ? 'italic' : undefined,
+            color: seg.mark === 'accent' || (seg.mark === 'italic' && serif) ? theme.accent : undefined,
+            opacity: p,
+            transform: `translateY(${(1 - p) * 0.25}em)`,
+            filter: p < 0.98 ? `blur(${(1 - p) * 6}px)` : undefined,
+          }}
+        >
           {w}
-        </Masked>
-      );
-    });
-    const spaced = nodes.flatMap((n, i) => (i ? [' ', n] : [n]));
-    if (seg.mark === 'highlight') {
-      // The block grows with its words rather than ahead of them.
-      const wipe = progress(frame, delays[first] - 2, Math.max(14, delays[k - 1] - delays[first] + 12));
-      parts.push(
-        <span key={`g${s}`} style={{position: 'relative', display: 'inline-block', whiteSpace: 'nowrap', isolation: 'isolate'}}>
-          <span
-            style={{
-              position: 'absolute',
-              left: '-0.1em',
-              right: '-0.1em',
-              top: '0.06em',
-              bottom: '-0.04em',
-              background: theme.accent,
-              transform: `scaleX(${wipe})`,
-              transformOrigin: 'left',
-              zIndex: -1,
-            }}
-          />
-          {spaced}
         </span>,
       );
-    } else if (seg.mark === 'accent') {
-      parts.push(
-        <span key={`g${s}`} style={{whiteSpace: 'nowrap'}}>
-          {spaced}
-        </span>,
-      );
-    } else {
-      parts.push(...nodes);
-    }
-  });
-
+    }),
+  );
   return (
-    <div style={{fontSize: size, fontWeight: weight, lineHeight, letterSpacing, color: color ?? theme.text, textAlign: align, textWrap: 'balance'}}>
-      {parts.flatMap((n, i) => (i ? [' ', n] : [n]))}
+    <div
+      style={{
+        fontFamily: serif ? fonts.serif : fonts.sans,
+        fontSize: size,
+        fontWeight: serif ? 400 : weight ?? 600,
+        letterSpacing: serif ? '-0.015em' : '-0.02em',
+        lineHeight: lineHeight ?? (serif ? 1.0 : 1.2),
+        color: color ?? theme.text,
+        textAlign: align,
+        textWrap: 'balance',
+      }}
+    >
+      {nodes.flatMap((n, i) => (i ? [' ', n] : [n]))}
     </div>
   );
 };
 
-// Small mono label used above headings and on diagram parts.
-export const Label: React.FC<{text?: string; delay?: number; color?: string; style?: React.CSSProperties}> = ({text, delay = 0, color, style}) => {
+// Wide-tracked uppercase label, like a section marker.
+export const Label: React.FC<{text?: string; delay?: number; align?: 'left' | 'center'; style?: React.CSSProperties}> = ({text, delay = 0, align, style}) => {
   const {theme, layout} = useStyle();
-  const p = useProgress(delay, 14);
+  const p = useProgress(delay, 16);
   if (!text) return null;
   return (
     <div
       style={{
-        fontFamily: fonts.mono,
+        fontFamily: fonts.sans,
         fontSize: layout.small,
-        fontWeight: 500,
-        letterSpacing: '0.06em',
+        fontWeight: 600,
+        letterSpacing: '0.2em',
         textTransform: 'uppercase',
-        color: color ?? theme.muted,
-        ...lift(p, 12),
+        color: theme.muted,
+        textAlign: align,
+        ...enter(p, 10),
         ...style,
       }}
     >
@@ -188,11 +157,150 @@ export const Label: React.FC<{text?: string; delay?: number; color?: string; sty
   );
 };
 
-// A hairline that draws from the left.
-export const Rule: React.FC<{delay?: number; color?: string; thickness?: number}> = ({delay = 0, color, thickness = 2}) => {
+export const iconFor = (name?: string): LucideIcon | null => {
+  if (!name) return null;
+  const key = name
+    .split(/[-_ ]/)
+    .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+    .join('') as keyof typeof icons;
+  return icons[key] ?? null;
+};
+
+export const Icon: React.FC<{name?: string; size: number; color?: string; stroke?: number}> = ({name, size, color, stroke = 1.8}) => {
   const {theme} = useStyle();
-  const p = useProgress(delay, 22);
-  return <div style={{width: '100%', height: thickness, background: color ?? theme.line, transform: `scaleX(${p})`, transformOrigin: 'left'}} />;
+  const Cmp = iconFor(name);
+  if (!Cmp) return null;
+  return <Cmp size={size} color={color ?? theme.accent} strokeWidth={stroke} absoluteStrokeWidth={false} style={{flex: 'none'}} />;
+};
+
+// A white card with an optional paper stack behind it.
+export const Card: React.FC<{
+  children: React.ReactNode;
+  stacked?: boolean;
+  dark?: boolean;
+  p?: number;
+  style?: React.CSSProperties;
+}> = ({children, stacked = true, dark = false, p = 1, style}) => {
+  const {theme} = useStyle();
+  const face: React.CSSProperties = {
+    background: dark ? theme.ink : theme.card,
+    border: `1.5px solid ${dark ? theme.ink : theme.border}`,
+    borderRadius: 22,
+  };
+  return (
+    <div style={{position: 'relative', ...enter(p, 24), ...style}}>
+      {stacked
+        ? [12, 6].map((o) => (
+            <div key={o} style={{position: 'absolute', inset: 0, transform: `translate(${o}px, ${o}px)`, ...face, background: theme.canvas, border: `1.5px solid ${theme.border}`, opacity: p}} />
+          ))
+        : null}
+      <div style={{position: 'relative', height: '100%', boxSizing: 'border-box', boxShadow: theme.shadow, overflow: 'hidden', ...face}}>{children}</div>
+    </div>
+  );
+};
+
+export const CardHeader: React.FC<{icon?: string; title: string; dark?: boolean; right?: React.ReactNode}> = ({icon, title, dark, right}) => {
+  const {theme, layout} = useStyle();
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 16,
+        padding: `${layout.body * 0.6}px ${layout.body * 0.75}px`,
+        borderBottom: `1.5px solid ${dark ? 'rgba(255,255,255,0.08)' : theme.border}`,
+        fontSize: layout.body * 0.82,
+        fontWeight: 650,
+        letterSpacing: '-0.01em',
+        color: dark ? theme.inkText : theme.text,
+      }}
+    >
+      <Icon name={icon} size={layout.body * 0.85} color={dark ? theme.inkText : theme.text} />
+      <span style={{flex: 1}}>{title}</span>
+      {right}
+    </div>
+  );
+};
+
+export const Pill: React.FC<{text: string; tone?: 'ink' | 'accent' | 'light'; icon?: string; p?: number; size?: number}> = ({text, tone = 'ink', icon, p = 1, size}) => {
+  const {theme, layout} = useStyle();
+  const fs = size ?? layout.body * 0.78;
+  const colors =
+    tone === 'ink'
+      ? {bg: theme.ink, fg: theme.inkText, border: theme.ink}
+      : tone === 'accent'
+        ? {bg: theme.accent, fg: theme.accentInk, border: theme.accent}
+        : {bg: theme.card, fg: theme.text, border: theme.border};
+  return (
+    <div
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: fs * 0.4,
+        padding: `${fs * 0.42}px ${fs * 0.9}px`,
+        borderRadius: 999,
+        background: colors.bg,
+        color: colors.fg,
+        border: `1.5px solid ${colors.border}`,
+        boxShadow: tone === 'light' ? theme.shadow : undefined,
+        fontFamily: fonts.sans,
+        fontSize: fs,
+        fontWeight: 600,
+        letterSpacing: '-0.01em',
+        whiteSpace: 'nowrap',
+        opacity: p,
+        transform: `scale(${0.85 + 0.15 * p})`,
+      }}
+    >
+      {icon ? <Icon name={icon} size={fs * 1.05} color={tone === 'light' ? theme.accent : colors.fg} stroke={2.2} /> : null}
+      {text}
+    </div>
+  );
+};
+
+// A gently curved, hand-drawn style arrow that draws itself.
+export const CurvedArrow: React.FC<{length: number; p: number; vertical?: boolean; bend?: number}> = ({length, p, vertical = false, bend = 0.18}) => {
+  const {theme} = useStyle();
+  const L = length;
+  const h = Math.max(24, L * bend * 2 + 20);
+  const path = `M 6 ${h / 2 + 4} Q ${L / 2} ${h / 2 - L * bend} ${L - 10} ${h / 2}`;
+  const approx = L * 1.08;
+  const head = p > 0.9 ? 1 : 0;
+  const svg = (
+    <svg width={L} height={h} viewBox={`0 0 ${L} ${h}`} style={{overflow: 'visible', display: 'block'}}>
+      <path d={path} fill="none" stroke={theme.accent} strokeWidth={3.5} strokeLinecap="round" strokeDasharray={approx} strokeDashoffset={approx * (1 - p)} />
+      <path
+        d={`M ${L - 24} ${h / 2 - 11} L ${L - 9} ${h / 2} L ${L - 25} ${h / 2 + 9}`}
+        fill="none"
+        stroke={theme.accent}
+        strokeWidth={3.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity={head}
+      />
+    </svg>
+  );
+  return vertical ? <div style={{width: h, height: L, display: 'flex', alignItems: 'center', justifyContent: 'center'}}><div style={{transform: 'rotate(90deg)'}}>{svg}</div></div> : svg;
+};
+
+// Diagonal strike drawn across a rejected option.
+export const Strike: React.FC<{p: number}> = ({p}) => {
+  const {theme} = useStyle();
+  return (
+    <svg style={{position: 'absolute', inset: 0, width: '100%', height: '100%', overflow: 'visible'}} viewBox="0 0 100 100" preserveAspectRatio="none">
+      <line
+        x1="12"
+        y1="12"
+        x2={12 + 76 * p}
+        y2={12 + 76 * p}
+        stroke={theme.accent}
+        strokeWidth={6}
+        vectorEffect="non-scaling-stroke"
+        strokeLinecap="round"
+        opacity={p > 0 ? 1 : 0}
+      />
+    </svg>
+  );
 };
 
 // Index of the most recently revealed cue, or -1 before the first.
@@ -207,19 +315,9 @@ export const activeCue = (cues: number[], frame: number) => {
 export const formatNumber = (value: number, decimals = 0) =>
   value.toLocaleString('en-US', {minimumFractionDigits: decimals, maximumFractionDigits: decimals});
 
-// Drawn rather than typed: the bundled latin font subsets have no arrows.
-export const ArrowIcon: React.FC<{size: number; color: string}> = ({size, color}) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" style={{flex: 'none'}}>
-    <path d="M3 12h17M14 6l6 6-6 6" fill="none" stroke={color} strokeWidth="2" strokeLinecap="square" />
-  </svg>
-);
-
-export const MarkIcon: React.FC<{good: boolean; size: number; color: string}> = ({good, size, color}) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" style={{flex: 'none'}}>
-    {good ? (
-      <path d="M4 12.5l5 5L20 6.5" fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="square" />
-    ) : (
-      <path d="M5 5l14 14M19 5L5 19" fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="square" />
-    )}
-  </svg>
-);
+// Where a badge or label pill sits on a card: centred above it in a row of
+// cards, pinned over the top-right corner when cards are stacked.
+export const badgeSlot = (row: boolean, body: number): React.CSSProperties =>
+  row
+    ? {position: 'absolute', top: -body * 1.55, left: 0, right: 0, display: 'flex', justifyContent: 'center', zIndex: 2}
+    : {position: 'absolute', top: -body * 0.6, right: body * 0.6, zIndex: 2};

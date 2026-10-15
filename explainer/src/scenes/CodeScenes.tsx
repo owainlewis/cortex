@@ -1,8 +1,9 @@
 import React from 'react';
 import {interpolate, useCurrentFrame} from 'remotion';
-import {activeCue, ArrowIcon, clamp, Label, lift, progress, RichText} from '../motion';
+import {activeCue, Card, CardHeader, clamp, Pill, progress} from '../motion';
 import {fonts, Theme, useStyle} from '../theme';
 import type {SceneProps} from '../types';
+import {Heading} from './ListScenes';
 
 const KEYWORDS = new Set(
   (
@@ -13,43 +14,33 @@ const KEYWORDS = new Set(
     'func package interface go defer chan select range map'
   ).split(' '),
 );
-
 const HASH_COMMENT = new Set(['python', 'py', 'bash', 'sh', 'shell', 'zsh', 'ruby', 'yaml', 'toml']);
 
 type Tok = {text: string; color: string};
 
+// Code sits on a dark card, so colours come from the dark syntax palette.
 const tokenizeLine = (line: string, theme: Theme, language: string): Tok[] => {
   const s = theme.syntax;
+  const base = theme.inkText;
   const comment = HASH_COMMENT.has(language) ? /^(#.*|\/\/.*)/ : /^(\/\/.*|--.*)/;
   const out: Tok[] = [];
   let rest = line;
   while (rest.length) {
     let m: RegExpMatchArray | null;
-    let color = theme.text;
+    let color = base;
     if ((m = rest.match(comment))) color = s.comment;
     else if ((m = rest.match(/^("(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|`[^`]*`?)/))) color = s.string;
     else if ((m = rest.match(/^\d[\d_.]*/))) color = s.number;
-    else if ((m = rest.match(/^[A-Za-z_][A-Za-z0-9_]*/))) color = KEYWORDS.has(m[0]) ? s.keyword : theme.text;
-    else if ((m = rest.match(/^\s+/))) color = theme.text;
+    else if ((m = rest.match(/^[A-Za-z_][A-Za-z0-9_]*/))) color = KEYWORDS.has(m[0]) ? s.keyword : base;
+    else if ((m = rest.match(/^\s+/))) color = base;
     else {
       m = [rest[0]] as unknown as RegExpMatchArray;
-      color = theme.muted;
+      color = theme.inkMuted;
     }
     out.push({text: m[0], color});
     rest = rest.slice(m[0].length);
   }
   return out;
-};
-
-const Header: React.FC<{kicker?: string; heading?: string}> = ({kicker, heading}) => {
-  const {layout} = useStyle();
-  if (!kicker && !heading) return null;
-  return (
-    <div style={{display: 'flex', flexDirection: 'column', gap: 28, marginBottom: 40}}>
-      <Label text={kicker} />
-      {heading ? <RichText text={heading} size={layout.title} weight={650} start={2} /> : null}
-    </div>
-  );
 };
 
 export const Code: React.FC<SceneProps> = ({scene}) => {
@@ -59,12 +50,10 @@ export const Code: React.FC<SceneProps> = ({scene}) => {
   const language = (d.language ?? '').toLowerCase();
   const lines: string[] = String(d.code).replace(/\t/g, '    ').split('\n');
   const longest = Math.max(...lines.map((l) => l.length), 18);
-  // Fit both the longest line and the line count, leaving room for the note.
   const headerH = (d.kicker ? layout.small + 40 : 0) + (d.heading ? layout.title * 2.2 + 28 : 0);
-  const noteH = layout.body * (layout.format === 'vertical' ? 2.6 : 1.4) + 34;
-  const chromeH = 100; // filename row and block padding
-  const fontSize = Math.min(38, (layout.content.w - 120) / (longest * 0.6), (layout.content.h - headerH - noteH - chromeH) / (lines.length * 1.65));
-  const lineH = fontSize * 1.65;
+  const noteH = layout.body * 2 + 40;
+  const fontSize = Math.min(36, (layout.content.w - 140) / (longest * 0.6), (layout.content.h - headerH - noteH - 140) / (lines.length * 1.6));
+  const lineH = fontSize * 1.6;
   const typeStart = scene.extra.typeStart ?? 6;
   const typeEnd = scene.extra.typeEnd ?? typeStart;
   const total = lines.reduce((n, l) => n + l.length + 1, 0);
@@ -77,32 +66,16 @@ export const Code: React.FC<SceneProps> = ({scene}) => {
   const move = progress(frame, scene.cues[active] ?? 0, 14);
   const bandTop = range ? interpolate(move, [0, 1], [prev ? prev.lines[0] - 1 : range[0] - 1, range[0] - 1]) * lineH : 0;
   const bandH = range ? (range[1] - range[0] + 1) * lineH : 0;
-  const win = progress(frame, 0, 18);
-  const noteP = progress(frame, (scene.cues[active] ?? 0) + 4, 16);
   const caretOn = Math.floor(frame / 15) % 2 === 0;
-
   let budget = typed;
   return (
     <div style={{display: 'flex', flexDirection: 'column'}}>
-      <Header kicker={d.kicker} heading={d.heading} />
-      <div style={{...lift(win, 30)}}>
-        <div style={{display: 'flex', justifyContent: 'space-between', fontFamily: fonts.mono, fontSize: layout.small, color: theme.muted, marginBottom: 16}}>
-          <span>{d.filename ?? ''}</span>
-          <span>{language}</span>
-        </div>
-        <div style={{position: 'relative', background: theme.surface, padding: '28px 0'}}>
+      <Heading kicker={d.kicker} text={d.heading} />
+      <Card dark stacked={false} p={progress(frame, 0, 20)}>
+        <CardHeader dark icon="file-code" title={d.filename ?? 'code'} right={<span style={{fontFamily: fonts.mono, fontSize: layout.small, color: theme.inkMuted}}>{language}</span>} />
+        <div style={{position: 'relative', padding: '24px 0 28px'}}>
           {range ? (
-            <div
-              style={{
-                position: 'absolute',
-                left: 0,
-                right: 0,
-                top: 28 + bandTop,
-                height: bandH,
-                borderLeft: `6px solid ${theme.accent}`,
-                background: theme.dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
-              }}
-            />
+            <div style={{position: 'absolute', left: 0, right: 0, top: 24 + bandTop, height: bandH, borderLeft: `5px solid ${theme.accent}`, background: 'rgba(255,255,255,0.06)'}} />
           ) : null}
           {lines.map((line, i) => {
             const visible = Math.max(0, Math.min(line.length, budget));
@@ -112,11 +85,8 @@ export const Code: React.FC<SceneProps> = ({scene}) => {
             const inRange = range ? lineNo >= range[0] && lineNo <= range[1] : true;
             let left = visible;
             return (
-              <div
-                key={i}
-                style={{position: 'relative', display: 'flex', height: lineH, alignItems: 'center', fontFamily: fonts.mono, fontSize, whiteSpace: 'pre', opacity: inRange ? 1 : 0.32}}
-              >
-                <span style={{width: 70, textAlign: 'right', paddingRight: 26, color: theme.faint, flex: 'none', fontSize: fontSize * 0.75}}>{lineNo}</span>
+              <div key={i} style={{position: 'relative', display: 'flex', height: lineH, alignItems: 'center', fontFamily: fonts.mono, fontSize, whiteSpace: 'pre', opacity: inRange ? 1 : 0.35}}>
+                <span style={{width: 70, textAlign: 'right', paddingRight: 26, color: theme.inkMuted, flex: 'none', fontSize: fontSize * 0.75}}>{lineNo}</span>
                 {tokenizeLine(line, theme, language).map((tok, k) => {
                   if (left <= 0) return null;
                   const text = tok.text.slice(0, left);
@@ -132,16 +102,9 @@ export const Code: React.FC<SceneProps> = ({scene}) => {
             );
           })}
         </div>
-      </div>
-      <div style={{minHeight: noteH - 34, marginTop: 34}}>
-        {hl?.note ? (
-          <div key={active} style={{display: 'flex', gap: 20, alignItems: 'flex-start', fontSize: layout.body, fontWeight: 550, letterSpacing: '-0.02em', lineHeight: 1.2, ...lift(noteP, 14)}}>
-            <div style={{paddingTop: layout.body * 0.12}}>
-              <ArrowIcon size={layout.body * 0.9} color={theme.accent} />
-            </div>
-            <span>{hl.note}</span>
-          </div>
-        ) : null}
+      </Card>
+      <div style={{minHeight: noteH, marginTop: 30, display: 'flex', justifyContent: 'center'}}>
+        {hl?.note ? <Pill key={active} text={hl.note} icon="arrow-right" tone="light" p={progress(frame, (scene.cues[active] ?? 0) + 4, 14)} /> : null}
       </div>
     </div>
   );
@@ -152,16 +115,15 @@ export const Terminal: React.FC<SceneProps> = ({scene}) => {
   const frame = useCurrentFrame();
   const d = scene.data;
   const cpf = scene.extra.charsPerFrame ?? 1.2;
-  const fontSize = layout.format === 'vertical' ? 34 : 30;
+  const fontSize = layout.format === 'vertical' ? 30 : 30;
   const entries: any[] = d.lines;
   const caretOn = Math.floor(frame / 15) % 2 === 0;
-  const win = progress(frame, 0, 18);
   return (
     <div style={{display: 'flex', flexDirection: 'column'}}>
-      <Header kicker={d.kicker} heading={d.heading} />
-      <div style={lift(win, 30)}>
-        <div style={{fontFamily: fonts.mono, fontSize: layout.small, color: theme.muted, marginBottom: 16}}>{d.title ?? 'terminal'}</div>
-        <div style={{background: theme.surface, padding: '32px 36px 40px', fontFamily: fonts.mono, fontSize, lineHeight: 1.6, minHeight: 320}}>
+      <Heading kicker={d.kicker} text={d.heading} />
+      <Card dark stacked={false} p={progress(frame, 0, 20)}>
+        <CardHeader dark icon="terminal" title={d.title ?? 'Terminal'} />
+        <div style={{padding: '26px 34px 34px', fontFamily: fonts.mono, fontSize, lineHeight: 1.6, minHeight: 300}}>
           {entries.map((e, i) => {
             const start = scene.cues[i] ?? i * 30;
             if (frame < start) return null;
@@ -172,16 +134,16 @@ export const Terminal: React.FC<SceneProps> = ({scene}) => {
             const next = scene.cues[i + 1] ?? Infinity;
             const caret = frame < next && (chars < cmd.length || caretOn);
             return (
-              <div key={i} style={{marginBottom: 18}}>
+              <div key={i} style={{marginBottom: 16}}>
                 <div style={{whiteSpace: 'pre-wrap'}}>
-                  <span style={{color: theme.accent}}>$ </span>
-                  <span style={{color: theme.text}}>{cmd.slice(0, chars)}</span>
-                  {caret ? <span style={{display: 'inline-block', width: fontSize * 0.55, height: fontSize * 1.1, verticalAlign: 'text-bottom', background: theme.accent, marginLeft: 2}} /> : null}
+                  <span style={{color: theme.syntax.keyword}}>$ </span>
+                  <span style={{color: theme.inkText}}>{cmd.slice(0, chars)}</span>
+                  {caret ? <span style={{display: 'inline-block', width: fontSize * 0.55, height: fontSize * 1.1, verticalAlign: 'text-bottom', background: theme.syntax.keyword, marginLeft: 2}} /> : null}
                 </div>
                 {out.map((line, k) => {
                   const at = doneAt + 5 + k * 3;
                   return (
-                    <div key={k} style={{color: theme.muted, opacity: interpolate(frame, [at, at + 4], [0, 1], clamp), whiteSpace: 'pre-wrap', minHeight: '1.6em'}}>
+                    <div key={k} style={{color: theme.inkMuted, opacity: interpolate(frame, [at, at + 4], [0, 1], clamp), whiteSpace: 'pre-wrap', minHeight: '1.6em'}}>
                       {line}
                     </div>
                   );
@@ -190,7 +152,7 @@ export const Terminal: React.FC<SceneProps> = ({scene}) => {
             );
           })}
         </div>
-      </div>
+      </Card>
     </div>
   );
 };

@@ -16,7 +16,7 @@ FORMATS = {
     "square": (1080, 1080),
     "landscape": (1920, 1080),
 }
-THEMES = {"ink", "paper", "blueprint"}
+THEMES = {"studio", "night"}
 MOODS = {"focus", "uplift", "dark"}
 
 # Required content fields per scene type.
@@ -38,7 +38,7 @@ SCENE_FIELDS = {
 DEFAULTS = {
     "voice": "am_michael",
     "speed": 1.0,
-    "theme": "ink",
+    "theme": "studio",
     "format": "vertical",
     "fps": 30,
     "handle": None,
@@ -56,7 +56,7 @@ def slugify(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60] or "explainer"
 
 
-def load(path: str | Path) -> dict:
+def load(path: str | Path, footage: bool = False) -> dict:
     path = Path(path)
     try:
         spec = json.loads(path.read_text())
@@ -65,7 +65,7 @@ def load(path: str | Path) -> dict:
     for key, value in DEFAULTS.items():
         spec.setdefault(key, value)
     spec.setdefault("slug", slugify(spec.get("title", path.stem)))
-    validate(spec)
+    validate(spec, footage)
     return spec
 
 
@@ -83,7 +83,9 @@ def _tree_path_ok(node: dict, path: list) -> bool:
     return True
 
 
-def validate(spec: dict) -> None:
+def validate(spec: dict, footage: bool = False) -> None:
+    """Check a spec. In footage mode scenes are anchored to the speaker's words
+    with `at` instead of carrying their own narration."""
     errors: list[str] = []
     if not spec.get("title"):
         errors.append("missing top-level 'title'")
@@ -105,7 +107,9 @@ def validate(spec: dict) -> None:
             errors.append(f"{where}: unknown type {kind!r}; expected one of {sorted(SCENE_FIELDS)}")
             continue
         where = f"scene {i + 1} ({kind})"
-        if not str(scene.get("narration", "")).strip():
+        if footage and not str(scene.get("at", "")).strip():
+            errors.append(f"{where}: missing 'at' (the phrase in the transcript where it starts)")
+        if not footage and not str(scene.get("narration", "")).strip():
             errors.append(f"{where}: missing 'narration'")
         for field in SCENE_FIELDS[kind]:
             if field not in scene:
@@ -142,7 +146,7 @@ def validate(spec: dict) -> None:
             hl = scene.get("highlight")
             if hl and not _tree_path_ok(scene["root"], hl.get("path", [])):
                 errors.append(f"{where}: highlight.path {hl.get('path')} does not exist in the tree")
-    if scenes and scenes[0].get("type") != "hook":
+    if scenes and not footage and scenes[0].get("type") != "hook":
         errors.append("scene 1 should be a 'hook': the first two seconds decide whether anyone watches")
     if errors:
         raise SpecError("Invalid spec:\n  - " + "\n  - ".join(errors))
@@ -182,6 +186,8 @@ def cue_targets(scene: dict) -> list[tuple[str | None, str]]:
         if scene.get("sub"):
             out.append((scene.get("subCue"), scene["sub"]))
         return out
+    if kind == "hook":
+        return [(scene.get("subtitleCue"), scene["subtitle"])] if scene.get("subtitle") else []
     if kind == "statement":
         return [(scene.get("subCue"), scene["sub"])] if scene.get("sub") else []
     if kind == "code":

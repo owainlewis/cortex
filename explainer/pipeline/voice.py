@@ -11,6 +11,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -50,7 +51,9 @@ def _kokoro():
 def _whisper():
     from faster_whisper import WhisperModel
 
-    return WhisperModel("base.en", device="cpu", compute_type="int8", download_root=str(MODELS / "whisper"))
+    # small.en is noticeably more accurate on real recordings than base.en.
+    name = os.environ.get("EXPLAINER_WHISPER", "small.en")
+    return WhisperModel(name, device="cpu", compute_type="int8", download_root=str(MODELS / "whisper"))
 
 
 def voices() -> list[str]:

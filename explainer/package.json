@@ -10,6 +10,7 @@
     "@remotion/bundler": "4.0.535",
     "@remotion/cli": "4.0.535",
     "@remotion/renderer": "4.0.535",
+    "lucide-react": "1.57.0",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "remotion": "4.0.535"

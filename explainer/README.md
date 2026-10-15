@@ -1,16 +1,20 @@
 # Explainer
 
-An automated pipeline that turns a short JSON script into a narrated, motion-graphics explainer video for TikTok, Reels and Shorts.
+An automated pipeline that adds motion graphics, captions and sound design to explainer videos for horizontal and vertical social formats.
 
-One command produces a finished, upload-ready package:
+It has two modes:
 
-- `<slug>-vertical.mp4`: 1080x1920, 30 fps, H.264 CRF 16, AAC 320 kbps.
-- `cover-vertical.png`: a cover frame taken at the end of the hook.
-- `captions.srt`: captions for platforms that take an SRT upload.
-- `post.txt`: title, caption and hashtags.
+- **Footage.** Give it your own talking-head video. It transcribes you word by word, places graphics on the exact phrases where they belong, and renders an edit where you play full frame between graphics and tuck into a picture-in-picture card while one is on screen.
+- **Narrated.** Give it a script (or a topic, and Claude drafts the script). A local neural voice reads it and the graphics play over a clean canvas.
 
-Everything runs locally.
-No API keys are needed to render.
+Either way you get an upload-ready package:
+
+- an H.264 MP4 at 1920x1080, 1080x1920 or 1080x1080, mixed to -14 LUFS;
+- `captions.srt` for platforms that take caption files;
+- for narrated videos, a cover frame and `post.txt` with a caption and hashtags.
+
+Everything renders locally.
+Only the Claude planning and writing steps need an API key.
 
 ## What it does
 
@@ -34,11 +38,25 @@ No API keys are needed to render.
 
 ## Design
 
-The look is editorial and restrained, on purpose.
-Flat colour, one accent, hairline rules, and no gradients, glows, glass or bounce.
-Headlines are set in Geist; emphasis switches to Instrument Serif italic; data and code use Geist Mono.
-Words rise from behind a baseline mask on a single expo-out curve, and scenes leave with a short ease-in lift.
+The look is a calm studio style: a warm canvas inside a soft frame, white stacked cards, line icons, one muted olive accent and black pills for emphasis.
+Headlines are set in Instrument Serif, body text in Manrope, and code and numbers in Geist Mono.
+Icons come from Lucide and are named in the spec (`"icon": "file-text"`).
+Motion is soft and deliberate: words settle in as they are spoken, cards rise into place, arrows draw themselves, and rejected options get struck through.
 Scenes show the mechanism itself where they can: the `array` scene moves every byte of an insert, the `tree` scene walks a lookup path, the `code` scene types and then points at the lines that matter.
+
+There are two themes: `studio` (light, the default) and `night` (dark).
+
+## Why Remotion
+
+The graphics are React components rendered by [Remotion](https://www.remotion.dev).
+It was chosen over the alternatives for the automated parts:
+
+- It renders headless from a JSON timeline, so one plan produces every format with no manual step.
+- It plays and crops your footage (`OffthreadVideo`) and lays the mixed audio under the picture.
+- Claude writes React well, and Remotion publishes an official agent skill (`npx skills add remotion-dev/skills`) for adding new scene types.
+
+Claude Motion (in claude.ai) is good for one-off animations made in chat, but it has no API and does not take your footage, so it cannot run this pipeline.
+HyperFrames (HTML and GSAP, Apache-2.0) is the alternative if Remotion's license is a problem: Remotion is free for individuals and companies of up to three people and needs a company license above that.
 
 ## Setup
 
@@ -75,6 +93,50 @@ Read the draft before rendering: the writer is told not to invent statistics, bu
 
 `build --sample` also copies the timeline to `src/sample-timeline.json`, which is what Remotion Studio previews.
 
+## Footage mode
+
+```sh
+./explain footage talk.mp4                         # transcribe, plan with Claude, render
+./explain footage talk.mp4 --format vertical       # 1080x1920
+./explain footage talk.mp4 --format all            # every format from one plan
+./explain footage talk.mp4 --plan my-plan.json     # use a plan you wrote or edited
+./explain footage talk.mp4 --stills                # review stills, no render
+./explain footage talk.mp4 --no-music              # sound effects only
+```
+
+The first run writes `out/<name>/transcript.txt` and, when no plan is given, asks Claude to draft `out/<name>/plan.json`.
+Edit the plan and run again to change what appears and when; transcription is cached.
+
+A plan anchors each graphic to words you actually say:
+
+```json
+{
+  "title": "From psychology to epidemiology",
+  "theme": "studio",
+  "music": {"mood": "uplift", "enabled": true},
+  "focus": [0.63, 0.35],
+  "scenes": [
+    {
+      "type": "compare",
+      "at": "Those are super smart people",
+      "until": "less to do with being super smart",
+      "heading": "What it *actually* took",
+      "left": {"label": "What she assumed", "items": [{"text": "Being super smart", "icon": "brain"}], "cue": "super smart"},
+      "right": {"label": "What it took", "items": [{"text": "Sticking with it", "icon": "repeat"}], "cue": "sticking with it"}
+    }
+  ]
+}
+```
+
+- `at` is the phrase where the graphic lands; it must appear in the transcript after the previous scene's `at`.
+- `until` is optional; without it a graphic holds until the next one or for 12 seconds.
+- `focus` is where your face sits in the frame, as fractions, so the picture-in-picture and vertical crops keep you in shot.
+- Scene content uses the same scene types as narrated specs, below.
+- Cues inside a scene are phrases from that stretch of your speech.
+
+`specs/footage-example.json` is a complete plan for a public-domain NIOSH interview clip.
+Set `EXPLAINER_WHISPER=base.en` for faster, less accurate transcription (the default is `small.en`).
+
 ## Writing a spec
 
 See `specs/rope.json` and `specs/git-snapshots.json` for complete examples.
@@ -84,7 +146,7 @@ See `specs/rope.json` and `specs/git-snapshots.json` for complete examples.
   "title": "Why typing in a huge file doesn't lag",
   "voice": "am_michael",
   "speed": 1.05,
-  "theme": "ink",
+  "theme": "studio",
   "format": "vertical",
   "music": {"mood": "focus"},
   "pronounce": {"MB": "megabyte"},
@@ -99,7 +161,7 @@ Top-level settings:
 
 | Key | Values | Default |
 | --- | --- | --- |
-| `theme` | `ink`, `paper`, `blueprint` | `ink` |
+| `theme` | `studio`, `night` | `studio` |
 | `format` | `vertical`, `square`, `landscape` | `vertical` |
 | `music.mood` | `focus`, `uplift`, `dark` | `focus` |
 | `music.bpm` | number | mood default |
@@ -140,7 +202,7 @@ explainer/
   specs/                 example scripts
   pipeline/              Python: spec, voice, timeline, music, sfx, mix, render, writer
   src/                   Remotion: composition, scenes, captions, background, theme
-  src/fonts/             Geist, Geist Mono and Instrument Serif (SIL Open Font License)
+  src/fonts/             Manrope, Instrument Serif and Geist Mono (SIL Open Font License)
   scripts/stills.mjs     renders review stills from a timeline
   tests/                 unit tests for the pure pipeline logic
 ```

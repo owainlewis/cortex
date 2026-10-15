@@ -3,6 +3,8 @@
     python -m pipeline build specs/rope.json            # full render
     python -m pipeline build specs/rope.json --draft    # fast, silent, half size
     python -m pipeline build specs/rope.json --format all
+    python -m pipeline footage talk.mp4                 # motion graphics over your own video
+    python -m pipeline footage talk.mp4 --plan plan.json --format vertical
     python -m pipeline write "how B-trees work"         # draft a spec with Claude
     python -m pipeline voices
 """
@@ -12,9 +14,12 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
+
+import numpy as np
 
 from . import spec as specs
 
@@ -110,6 +115,82 @@ def build(args: argparse.Namespace) -> None:
         shutil.copy(out / f"timeline-{formats[0]}.json", ROOT / "src" / "sample-timeline.json")
 
 
+def footage(args: argparse.Namespace) -> None:
+    from . import footage as fx
+    from . import mix, music, render, sfx, timeline
+
+    video_in = Path(args.video).resolve()
+    seconds = fx.probe(video_in)
+    slug = specs.slugify(Path(args.video).stem)
+    out = ROOT / "out" / slug
+    public = out / "public"
+    public.mkdir(parents=True, exist_ok=True)
+
+    with Step("Transcribing"):
+        words = fx.transcribe(video_in, ROOT / "out" / ".cache" / "transcripts")
+        (out / "transcript.txt").write_text(fx.transcript_text(words) + "\n")
+        print(f"  {len(words)} words, {seconds:.1f}s")
+
+    plan_path = Path(args.plan) if args.plan else out / "plan.json"
+    if not plan_path.exists():
+        from . import writer
+
+        with Step("Planning graphics with Claude"):
+            drafted = writer.plan(
+                fx.transcript_text(words),
+                title=Path(args.video).stem,
+                check_anchors=lambda d: fx.build({**specs.DEFAULTS, "format": "landscape", **d}, words, seconds, 30),
+            )
+            plan_path.write_text(json.dumps(drafted, indent=2) + "\n")
+            print(f"  wrote {plan_path.relative_to(ROOT) if plan_path.is_relative_to(ROOT) else plan_path}; edit it and re-run to adjust")
+    plan = json.loads(plan_path.read_text())
+    plan.setdefault("title", slug)
+    for key, value in specs.DEFAULTS.items():
+        plan.setdefault(key, value)
+    plan["format"] = args.format if args.format and args.format != "all" else plan.get("format", "landscape")
+    if args.theme:
+        plan["theme"] = args.theme
+    specs.validate(plan, footage=True)
+
+    tl, events = fx.build(plan, words, seconds, plan["fps"])
+    print(f"  {len(tl['scenes'])} graphics over {seconds:.1f}s")
+
+    speaker = public / "speaker.mp4"
+    if not speaker.exists() or speaker.stat().st_mtime < video_in.stat().st_mtime:
+        with Step("Preparing footage"):
+            subprocess.run(
+                ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(video_in), "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", str(speaker)],
+                check=True,
+            )
+
+    if not args.stills:
+        with Step("Sound design and mix"):
+            (out / "stems").mkdir(parents=True, exist_ok=True)
+            voice_audio = fx.extract_audio(video_in, out / "stems" / "source.wav", 48000)
+            mood = plan["music"].get("mood", "focus")
+            if plan["music"].get("enabled", True) and not args.no_music:
+                bed, root_hz = music.render(seconds, mood, plan["music"].get("bpm"), drums_in=tl["scenes"][0]["from"] / tl["fps"] if tl["scenes"] else 0)
+            else:
+                bed, root_hz = np.zeros((int(seconds * 48000), 2), dtype=np.float32), music.midi_hz(music.MOODS[mood]["root"])
+            effects = sfx.render(events, seconds, root_hz)
+            loud = mix.mix(voice_audio, bed, effects, public / "mix.wav", out / "stems", music_db=-20.0)
+            print(f"  loudness {loud['lufs']:.1f} LUFS, true peak {loud['true_peak']:.1f} dBTP")
+
+    (out / "captions.srt").write_text(timeline.srt(tl))
+    formats = list(specs.FORMATS) if args.format == "all" else [plan["format"]]
+    for fmt in formats:
+        w, h = specs.FORMATS[fmt]
+        props = out / f"timeline-{fmt}.json"
+        props.write_text(json.dumps({**tl, "format": fmt, "width": w, "height": h}))
+        if args.stills:
+            render.stills(props, public, out / f"stills-{fmt}")
+            continue
+        video = out / f"{slug}-{fmt}.mp4"
+        with Step(f"Rendering {fmt} {w}x{h}"):
+            render.video(props, public, video, False, True)
+        print(f"  → {video.relative_to(ROOT)}")
+
+
 def write(args: argparse.Namespace) -> None:
     from . import writer
 
@@ -131,6 +212,15 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--stills", action="store_true", help="render two stills per scene instead of the video, for design review")
     b.add_argument("--sample", action="store_true", help="also copy the timeline to src/sample-timeline.json for the studio")
     b.set_defaults(fn=build)
+
+    f = sub.add_parser("footage", help="add motion graphics, captions and sound to your own video")
+    f.add_argument("video")
+    f.add_argument("--plan", help="graphics plan JSON; drafted with Claude when missing")
+    f.add_argument("--format", choices=[*specs.FORMATS, "all"])
+    f.add_argument("--theme", choices=sorted(specs.THEMES))
+    f.add_argument("--no-music", action="store_true", help="sound effects only, no music bed")
+    f.add_argument("--stills", action="store_true", help="render review stills instead of the video")
+    f.set_defaults(fn=footage)
 
     w = sub.add_parser("write", help="draft a spec from a topic with Claude")
     w.add_argument("topic")

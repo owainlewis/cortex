@@ -105,6 +105,74 @@ def resolve_cues(scene: dict, words: list[dict], duration: int) -> list[int]:
     return out
 
 
+def scene_extra(scene: dict, cues: list[int]) -> dict[str, float]:
+    """Scene specific timing the renderer needs, e.g. typing windows."""
+    kind = scene["type"]
+    extra: dict[str, float] = {}
+    if kind == "stat":
+        extra["countFrames"] = 32
+    if kind == "code":
+        chars = len(str(scene["code"]))
+        start = 6
+        natural = start + chars / 2.2
+        end = min(natural, cues[0] - 4) if cues else natural
+        end = max(end, start + chars / 6)
+        if scene.get("reveal") == "instant":
+            end = start
+        extra["typeStart"], extra["typeEnd"] = start, int(end)
+    if kind == "terminal":
+        extra["charsPerFrame"] = TERMINAL_CPF
+    if kind == "array":
+        extra["shiftStagger"] = 2
+    return extra
+
+
+def scene_events(scene: dict, cues: list[int], extra: dict, t0: float, duration: int, fps: int, rng: random.Random) -> list[dict]:
+    """Sound design for one scene, placed on the same cues the picture uses."""
+    kind = scene["type"]
+    events: list[dict] = []
+    if kind in ("list", "flow", "bars", "tree"):
+        for k, c in enumerate(cues):
+            events.append({"t": t0 + c / fps, "kind": "pop", "step": k, "gain": 0.55})
+    if kind == "compare":
+        for k, c in enumerate(cues):
+            events.append({"t": t0 + c / fps, "kind": "pop", "step": k * 2, "gain": 0.6})
+        if len(cues) > 1:
+            events.append({"t": t0 + (cues[1] + 4) / fps, "kind": "thud", "gain": 0.5})
+    if kind == "stat":
+        start = cues[0] if cues else 6
+        # Build into the number, hit as it lands.
+        events.append({"t": t0 + (start - 20) / fps, "kind": "riser", "dur": 20 / fps, "gain": 0.45})
+        events.append({"t": t0 + start / fps, "kind": "impact", "gain": 0.6})
+    if kind == "code":
+        f = extra["typeStart"]
+        while f < extra["typeEnd"]:
+            events.append({"t": t0 + f / fps, "kind": "key", "seed": rng.random(), "gain": 0.32})
+            f += rng.choice([1, 2, 2, 3])
+        for c in cues:
+            events.append({"t": t0 + c / fps, "kind": "blip", "gain": 0.45})
+    if kind == "terminal":
+        for k, c in enumerate(cues):
+            cmd = str(scene["lines"][k].get("cmd", ""))
+            for ch in range(len(cmd)):
+                if rng.random() < 0.8:
+                    events.append({"t": t0 + (c + ch / TERMINAL_CPF) / fps, "kind": "key", "seed": rng.random(), "gain": 0.32})
+            if scene["lines"][k].get("out"):
+                events.append({"t": t0 + (c + len(cmd) / TERMINAL_CPF + 5) / fps, "kind": "blip", "gain": 0.35})
+    if kind == "array":
+        shift = cues[0] if cues else 20
+        text = str(scene["text"])
+        n = len(text) - min(int(scene.get("insertAt", 0)), len(text))
+        for k in range(n):
+            events.append({"t": t0 + (shift + k * 2) / fps, "kind": "key", "seed": rng.random(), "gain": 0.4})
+        events.append({"t": t0 + (shift + n * 2 + 6) / fps, "kind": "pop", "step": 2, "gain": 0.6})
+    if kind in ("hook", "statement") and cues:
+        events.append({"t": t0 + cues[0] / fps, "kind": "pop", "step": 4, "gain": 0.45})
+    if kind == "outro":
+        events.append({"t": t0 + min(duration * 0.45, 24) / fps, "kind": "chime", "gain": 0.6})
+    return events
+
+
 def build(spec: dict, narrations: list[Narration], audio: str | None) -> tuple[dict, list[dict]]:
     fps = spec["fps"]
     width, height = specs.FORMATS[spec["format"]]
@@ -128,69 +196,13 @@ def build(spec: dict, narrations: list[Narration], audio: str | None) -> tuple[d
             for w in narr.words
         ]
         cues = resolve_cues(scene, words, duration)
-        extra: dict[str, float] = {}
         t0 = cursor / fps
-
-        if kind == "stat":
-            extra["countFrames"] = 32
-        if kind == "code":
-            chars = len(str(scene["code"]))
-            start = 6
-            natural = start + chars / 2.2
-            end = natural
-            if cues:
-                end = min(natural, cues[0] - 4)
-            end = max(end, start + chars / 6)
-            if scene.get("reveal") == "instant":
-                end = start
-            extra["typeStart"], extra["typeEnd"] = start, int(end)
-        if kind == "terminal":
-            extra["charsPerFrame"] = TERMINAL_CPF
-        if kind == "array":
-            extra["shiftStagger"] = 2
-
-        # Sound design follows the same cues the picture uses.
+        extra = scene_extra(scene, cues)
         if index == 0:
             events.append({"t": 0.0, "kind": "impact", "gain": 0.8})
         else:
             events.append({"t": max(t0 - 0.16, 0), "kind": "whoosh", "gain": 0.45})
-        if kind in ("list", "flow", "bars", "tree"):
-            for k, c in enumerate(cues):
-                events.append({"t": t0 + c / fps, "kind": "pop", "step": k, "gain": 0.55})
-        if kind == "compare":
-            for k, c in enumerate(cues):
-                events.append({"t": t0 + c / fps, "kind": "pop", "step": k * 2, "gain": 0.6})
-            if len(cues) > 1:
-                events.append({"t": t0 + (cues[1] - 4) / fps, "kind": "thud", "gain": 0.5})
-        if kind == "stat":
-            start = cues[0] if cues else 6
-            # Build into the number, hit as it lands.
-            events.append({"t": t0 + (start - 20) / fps, "kind": "riser", "dur": 20 / fps, "gain": 0.45})
-            events.append({"t": t0 + start / fps, "kind": "impact", "gain": 0.6})
-        if kind == "code":
-            f = extra["typeStart"]
-            while f < extra["typeEnd"]:
-                events.append({"t": t0 + f / fps, "kind": "key", "seed": rng.random(), "gain": 0.32})
-                f += rng.choice([1, 2, 2, 3])
-            for c in cues:
-                events.append({"t": t0 + c / fps, "kind": "blip", "gain": 0.45})
-        if kind == "terminal":
-            for k, c in enumerate(cues):
-                cmd = str(scene["lines"][k].get("cmd", ""))
-                n = len(cmd)
-                for ch in range(0, n, 1):
-                    if rng.random() < 0.8:
-                        events.append({"t": t0 + (c + ch / TERMINAL_CPF) / fps, "kind": "key", "seed": rng.random(), "gain": 0.32})
-                if scene["lines"][k].get("out"):
-                    events.append({"t": t0 + (c + n / TERMINAL_CPF + 5) / fps, "kind": "blip", "gain": 0.35})
-        if kind == "array":
-            shift = cues[0] if cues else 20
-            n = len(str(scene["text"])) - min(int(scene.get("insertAt", 0)), len(str(scene["text"])))
-            for k in range(n):
-                events.append({"t": t0 + (shift + k * 2) / fps, "kind": "key", "seed": rng.random(), "gain": 0.4})
-            events.append({"t": t0 + (shift + n * 2 + 6) / fps, "kind": "pop", "step": 2, "gain": 0.6})
-        if kind == "outro":
-            events.append({"t": t0 + min(duration * 0.45, 24) / fps, "kind": "chime", "gain": 0.6})
+        events += scene_events(scene, cues, extra, t0, duration, fps, rng)
 
         captions = scene.get("captions", kind not in ("hook", "outro"))
         scenes_out.append(

@@ -47,7 +47,7 @@ def _ffmpeg(args: list[str]) -> str:
     return proc.stderr
 
 
-def mix(voice: np.ndarray, music: np.ndarray, effects: np.ndarray, out: Path, work: Path) -> dict:
+def mix(voice: np.ndarray, music: np.ndarray, effects: np.ndarray, out: Path, work: Path, music_db: float = -13.0) -> dict:
     work.mkdir(parents=True, exist_ok=True)
     n = max(len(voice), len(music), len(effects))
 
@@ -64,7 +64,7 @@ def mix(voice: np.ndarray, music: np.ndarray, effects: np.ndarray, out: Path, wo
 
     graph = (
         f"[0:a]{VOICE_CHAIN},aformat=channel_layouts=stereo,asplit=2[v][key];"
-        "[1:a]volume=-13dB[m];"
+        f"[1:a]volume={music_db}dB[m];"
         "[m][key]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=500:makeup=1[duck];"
         "[2:a]volume=-3dB[fx];"
         "[v][duck][fx]amix=inputs=3:normalize=0,alimiter=limit=0.89:attack=3:release=60[mix]"

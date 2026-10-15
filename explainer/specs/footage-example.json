@@ -1,0 +1,49 @@
+{
+  "title": "From psychology to epidemiology",
+  "theme": "studio",
+  "music": {"mood": "uplift", "enabled": true},
+  "focus": [0.63, 0.35],
+  "scenes": [
+    {
+      "type": "flow",
+      "at": "I started out wanting to",
+      "until": "they required statistics",
+      "kicker": "The path",
+      "nodes": [
+        {"label": "Teacher", "sub": "Couldn't afford school", "icon": "graduation-cap", "cue": "teacher"},
+        {"label": "Psychology", "sub": "No math, or so she thought", "icon": "brain", "cue": "psychologist"},
+        {"label": "Statistics", "sub": "Required anyway", "icon": "chart-column", "badge": "Turning point", "cue": "statistics"}
+      ]
+    },
+    {
+      "type": "statement",
+      "at": "The teaching assistant for that",
+      "until": "She got me through that course",
+      "kicker": "What changed",
+      "text": "One *teaching assistant* changed the trajectory",
+      "sub": "She got me through that course",
+      "subCue": "She got me through"
+    },
+    {
+      "type": "list",
+      "at": "you need to be a research",
+      "until": "need to do to go forward",
+      "kicker": "Her advice",
+      "heading": "Three next steps",
+      "items": [
+        {"text": "Research assistant", "icon": "flask-conical", "cue": "research"},
+        {"text": "Honors program", "icon": "award", "cue": "honors"},
+        {"text": "Teaching assistant", "icon": "presentation", "cue": "teaching"}
+      ]
+    },
+    {
+      "type": "compare",
+      "at": "Those are super smart people",
+      "until": "less to do with being super smart",
+      "kicker": "The PhD",
+      "heading": "What it *actually* took",
+      "left": {"label": "What she assumed", "items": [{"text": "Being super smart", "icon": "brain"}], "cue": "super smart"},
+      "right": {"label": "What it took", "items": [{"text": "Sticking with it", "icon": "repeat"}], "cue": "sticking with it"}
+    }
+  ]
+}

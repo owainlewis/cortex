@@ -1,114 +1,122 @@
 import React from 'react';
 import {useCurrentFrame} from 'remotion';
-import {activeCue, formatNumber, Label, lift, MarkIcon, progress, RichText, Rule} from '../motion';
+import {badgeSlot, Card, CardHeader, formatNumber, Icon, Label, Pill, progress, RichText, Strike} from '../motion';
 import {fonts, useStyle} from '../theme';
 import type {SceneProps} from '../types';
 
-const itemText = (item: any): string => (typeof item === 'string' ? item : item.text);
+type Item = {text: string; icon?: string; detail?: string; badge?: string};
+const asItem = (item: any): Item => (typeof item === 'string' ? {text: item} : {...item, text: item.text ?? item.label});
 
-const Heading: React.FC<{kicker?: string; text?: string}> = ({kicker, text}) => {
+export const Heading: React.FC<{kicker?: string; text?: string}> = ({kicker, text}) => {
   const {layout} = useStyle();
+  if (!kicker && !text) return null;
   return (
-    <div style={{display: 'flex', flexDirection: 'column', gap: 28, marginBottom: 20}}>
-      <Label text={kicker} />
-      {text ? <RichText text={text} size={layout.title} weight={650} start={2} lineHeight={1.06} /> : null}
+    <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 22, marginBottom: layout.body * 1.4, textAlign: 'center'}}>
+      <Label text={kicker} align="center" />
+      {text ? <RichText text={text} serif size={layout.title} start={2} align="center" /> : null}
     </div>
   );
 };
 
-// Numbered editorial list: serif numerals, hairline dividers, the item being
-// spoken at full strength and earlier items stepped back.
-export const List: React.FC<SceneProps> = ({scene}) => {
+// One option card: icon tile, title, optional detail line.
+const OptionCard: React.FC<{item: Item; p: number; row: boolean; index: number; faded?: boolean; strike?: number; height?: number}> = ({item, p, row, index, faded, strike = 0, height}) => {
   const {layout, theme} = useStyle();
-  const frame = useCurrentFrame();
-  const d = scene.data;
-  const items: any[] = d.items;
-  const active = activeCue(scene.cues, frame);
+  const tile = layout.body * 2.1;
+  const iconTile = (
+    <div style={{width: tile, height: tile, borderRadius: 16, background: theme.accentSoft, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none'}}>
+      {item.icon ? <Icon name={item.icon} size={tile * 0.5} /> : <span style={{fontFamily: fonts.serif, fontSize: tile * 0.55, color: theme.accent}}>{index + 1}</span>}
+    </div>
+  );
   return (
-    <div style={{display: 'flex', flexDirection: 'column'}}>
-      <Heading kicker={d.kicker} text={d.heading} />
-      {items.map((item, i) => {
-        const at = scene.cues[i];
-        const p = progress(frame, at, 18);
-        const past = i < active;
-        return (
-          <div key={i} style={{display: 'flex', flexDirection: 'column'}}>
-            <Rule delay={at - 4} />
-            <div style={{display: 'flex', alignItems: 'baseline', gap: 36, padding: '30px 0', opacity: past ? 0.42 : 1}}>
-              <div
-                style={{
-                  flex: 'none',
-                  width: layout.body * 1.6,
-                  fontFamily: fonts.serif,
-                  fontStyle: 'italic',
-                  fontSize: layout.body * 1.5,
-                  lineHeight: 1,
-                  color: theme.accent,
-                  ...lift(p, 20),
-                }}
-              >
-                {String(i + 1).padStart(2, '0')}
-              </div>
-              <RichText text={itemText(item)} size={layout.body * 1.05} weight={550} lineHeight={1.18} letterSpacing="-0.025em" start={at + 2} stagger={1} />
+    <div style={{position: 'relative', flex: row ? 1 : undefined}}>
+      {item.badge ? (
+        <div style={badgeSlot(row, layout.body)}>
+          <Pill text={item.badge} tone="accent" icon="check" p={progress(p * 30, 18, 10)} size={layout.body * 0.7} />
+        </div>
+      ) : null}
+      <Card p={p} style={{height, opacity: p * (faded ? 0.55 : 1)}}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: row ? 'column' : 'row',
+            alignItems: row ? 'center' : 'center',
+            textAlign: row ? 'center' : 'left',
+            gap: layout.body * 0.7,
+            padding: layout.body * (row ? 1.1 : 0.75),
+            height: '100%',
+            boxSizing: 'border-box',
+            justifyContent: row ? 'center' : 'flex-start',
+          }}
+        >
+          {iconTile}
+          <div style={{display: 'flex', flexDirection: 'column', gap: 8}}>
+            <div style={{fontFamily: row ? fonts.serif : fonts.sans, fontSize: row ? layout.body * 1.25 : layout.body, fontWeight: row ? 400 : 650, letterSpacing: row ? '-0.01em' : '-0.02em', lineHeight: 1.12, color: faded ? theme.muted : theme.text}}>
+              {item.text}
             </div>
+            {item.detail ? <div style={{fontSize: layout.body * 0.72, color: theme.muted, lineHeight: 1.35}}>{item.detail}</div> : null}
           </div>
-        );
-      })}
-      <Rule delay={scene.cues[items.length - 1] + 4} />
+        </div>
+        {strike > 0 ? <Strike p={strike} /> : null}
+      </Card>
     </div>
   );
 };
 
-export const Compare: React.FC<SceneProps> = ({scene}) => {
-  const {layout, theme} = useStyle();
+export const List: React.FC<SceneProps> = ({scene}) => {
+  const {layout} = useStyle();
   const frame = useCurrentFrame();
   const d = scene.data;
-  const stacked = layout.format !== 'landscape';
-  const sides = [d.left, d.right];
+  const items = (d.items as any[]).map(asItem);
+  const row = layout.format === 'landscape' && items.length <= 4;
   return (
     <div style={{display: 'flex', flexDirection: 'column'}}>
       <Heading kicker={d.kicker} text={d.heading} />
-      <div style={{display: 'flex', flexDirection: stacked ? 'column' : 'row', gap: stacked ? 0 : 80}}>
-        {sides.map((side, s) => {
-          const at = scene.cues[s] ?? s * 20;
-          const good = side.tone ? side.tone === 'good' : s === 1;
-          const color = good ? theme.text : theme.muted;
-          return (
-            <div key={s} style={{flex: 1, display: 'flex', flexDirection: 'column'}}>
-              <Rule delay={at - 4} color={good ? theme.accent : theme.line} thickness={good ? 3 : 2} />
-              <Label
-                text={side.label}
-                delay={at}
-                color={good ? theme.accent : theme.muted}
-                style={{marginTop: 26, marginBottom: 22}}
-              />
-              <div style={{display: 'flex', flexDirection: 'column', gap: 20, marginBottom: 44}}>
-                {(side.items as any[]).map((item, i) => {
-                  const q = progress(frame, at + 5 + i * 4, 16);
-                  return (
-                    <div key={i} style={{display: 'flex', alignItems: 'center', gap: 22, ...lift(q, 14)}}>
-                      <MarkIcon good={good} size={layout.body * 0.8} color={good ? theme.accent : theme.muted} />
-                      <div
-                        style={{
-                          fontSize: layout.body,
-                          fontWeight: good ? 600 : 450,
-                          letterSpacing: '-0.02em',
-                          lineHeight: 1.2,
-                          color,
-                          textDecoration: good ? undefined : 'line-through',
-                          textDecorationColor: theme.faint,
-                          textDecorationThickness: 2,
-                        }}
-                      >
-                        {itemText(item)}
-                      </div>
-                    </div>
-                  );
-                })}
+      <div style={{display: 'flex', flexDirection: row ? 'row' : 'column', gap: row ? 48 : 30, alignItems: 'stretch'}}>
+        {items.map((item, i) => (
+          <OptionCard key={i} item={item} index={i} row={row} p={progress(frame, scene.cues[i], 20)} height={row ? layout.content.h * 0.5 : undefined} />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// The rejected side is shown, then struck through as the better answer lands.
+export const Compare: React.FC<SceneProps> = ({scene}) => {
+  const {layout} = useStyle();
+  const frame = useCurrentFrame();
+  const d = scene.data;
+  const left = (d.left.items as any[]).map(asItem);
+  const right = (d.right.items as any[]).map(asItem);
+  const leftAt = scene.cues[0] ?? 6;
+  const rightAt = scene.cues[1] ?? leftAt + 30;
+  const row = layout.format === 'landscape';
+  const pill = progress(frame, rightAt + 6, 14);
+  return (
+    <div style={{display: 'flex', flexDirection: 'column'}}>
+      <Heading kicker={d.kicker} text={d.heading} />
+      <div style={{display: 'flex', flexDirection: row ? 'row' : 'column', gap: row ? 44 : 26, alignItems: 'stretch'}}>
+        {left.map((item, i) => (
+          <OptionCard
+            key={`l${i}`}
+            item={item}
+            index={i}
+            row={row}
+            faded={frame >= rightAt}
+            strike={progress(frame, rightAt + i * 5, 14)}
+            p={progress(frame, leftAt + i * 5, 20)}
+            height={row ? layout.content.h * 0.48 : undefined}
+          />
+        ))}
+        {right.map((item, i) => (
+          <div key={`r${i}`} style={{position: 'relative', flex: row ? 1 : undefined}}>
+            {i === 0 && d.right.label ? (
+              <div style={badgeSlot(row, layout.body)}>
+                <Pill text={d.right.label} p={pill} size={layout.body * 0.72} />
               </div>
-            </div>
-          );
-        })}
+            ) : null}
+            <OptionCard item={{...item, icon: item.icon}} index={left.length + i} row={row} p={progress(frame, rightAt + i * 5, 20)} height={row ? layout.content.h * 0.48 : undefined} />
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -121,48 +129,36 @@ export const Bars: React.FC<SceneProps> = ({scene}) => {
   const items: any[] = d.items;
   const max = Math.max(...items.map((x) => Number(x.value)));
   const decimals = d.decimals ?? 0;
+  const card = progress(frame, 0, 20);
+  const chartH = layout.content.h * (layout.format === 'vertical' ? 0.5 : 0.48);
   return (
     <div style={{display: 'flex', flexDirection: 'column'}}>
-      <Heading kicker={d.kicker} text={d.heading} />
-      <div style={{display: 'flex', flexDirection: 'column', gap: 44}}>
-        {items.map((item, i) => {
-          const at = scene.cues[i] ?? i * 8;
-          const appear = progress(frame, at, 14);
-          const grow = progress(frame, at + 2, 30);
-          const hl = !!item.highlight;
-          const w = (Number(item.value) / max) * grow;
-          return (
-            <div key={i} style={{display: 'flex', flexDirection: 'column', gap: 16, ...lift(appear, 14)}}>
-              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'baseline'}}>
-                <div style={{fontSize: layout.body, fontWeight: hl ? 600 : 450, letterSpacing: '-0.02em', color: hl ? theme.text : theme.muted}}>
-                  {item.label}
-                </div>
-                <div style={{fontFamily: fonts.mono, fontSize: layout.body * 0.8, color: hl ? theme.accent : theme.muted, fontVariantNumeric: 'tabular-nums'}}>
+      <Label text={d.kicker} align="center" style={{marginBottom: 28}} />
+      <Card p={card}>
+        <CardHeader icon={d.icon ?? 'chart-column'} title={d.heading ? d.heading.replace(/[*=]/g, '') : 'Comparison'} />
+        <div style={{display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: layout.body * 1.2, padding: `${layout.body}px ${layout.body * 1.4}px ${layout.body * 0.8}px`, height: chartH}}>
+          {items.map((item, i) => {
+            const at = scene.cues[i] ?? i * 8;
+            const grow = progress(frame, at, 26);
+            const hl = !!item.highlight;
+            const h = Math.max((Number(item.value) / max) * grow, grow > 0 ? 0.012 : 0);
+            return (
+              <div key={i} style={{flex: 1, maxWidth: layout.body * 4, height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', gap: 14}}>
+                <div style={{fontFamily: fonts.mono, fontSize: layout.body * 0.62, color: hl ? theme.accent : theme.muted, opacity: progress(frame, at + 4, 12), whiteSpace: 'nowrap'}}>
                   {d.prefix ?? ''}
                   {formatNumber(Number(item.value) * grow, decimals)}
                   {d.unit ?? ''}
                 </div>
+                <div style={{width: '100%', height: `${h * 78}%`, borderRadius: 10, background: hl ? theme.accent : theme.border}} />
+                <div style={{fontSize: layout.body * 0.7, fontWeight: 600, color: hl ? theme.text : theme.muted, textAlign: 'center', opacity: progress(frame, at, 12)}}>{item.label}</div>
               </div>
-              <div style={{position: 'relative', height: 32}}>
-                <div style={{position: 'absolute', left: 0, right: 0, top: 15, height: 2, background: theme.line}} />
-                <div
-                  style={{
-                    position: 'absolute',
-                    left: 0,
-                    top: 0,
-                    bottom: 0,
-                    width: `${Math.max(w, 0.006) * 100}%`,
-                    background: hl ? theme.accent : theme.muted,
-                  }}
-                />
-              </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      </Card>
       {d.note ? (
-        <div style={{fontSize: layout.body * 0.85, color: theme.muted, marginTop: 40, ...lift(progress(frame, scene.cues[items.length] ?? 999, 16), 14)}}>
-          {d.note}
+        <div style={{display: 'flex', justifyContent: 'center', marginTop: 32}}>
+          <Pill text={d.note} p={progress(frame, scene.cues[items.length] ?? 999, 14)} />
         </div>
       ) : null}
     </div>
