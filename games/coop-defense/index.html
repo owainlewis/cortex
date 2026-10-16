@@ -101,11 +101,11 @@
   <div class="overlay" id="overlay">
     <div class="card">
       <h1 id="title">Coop Defense</h1>
-      <p id="msg">Robots are marching on the coop. Put animals on the grass to stop them before they reach the eggs.</p>
+      <p id="msg">Angry food is marching on the coop. Put animals on the grass to stop them before they reach the eggs.</p>
       <ul class="tips" id="tips">
         <li>Tap an animal card, then tap a square to place it.</li>
         <li>Chicks lay 30 golden seeds every 5 seconds. Tap seeds to collect them. You also get a harvest every 10 seconds.</li>
-        <li>Each lane has one guard chick. It charges once if a robot gets through.</li>
+        <li>Each lane has one guard chick. It charges once if any food gets through.</li>
         <li>Clearing a wave gives bonus seeds. Recall removes an animal.</li>
         <li>Keys: <b>1-8</b> pick an animal, <b>R</b> recall, <b>P</b> pause.</li>
       </ul>
@@ -180,21 +180,28 @@
   // ---------- data ----------
   const ANIMALS = {
     chick: { name: "Chick", cost: 50, cd: 5, hp: 120 },
-    hedgehog: { name: "Hedgehog", cost: 100, cd: 5, hp: 150, fire: 1.4, dmg: 20, shot: "spine" },
+    hedgehog: { name: "Hedgehog", cost: 100, cd: 5, hp: 150, fire: 1.4, dmg: 60, shot: "spine" },
     turtle: { name: "Turtle", cost: 75, cd: 20, hp: 1100 },
-    pig: { name: "Pig", cost: 175, cd: 7, hp: 150, fire: 1.5, dmg: 20, shot: "mud", slow: 3 },
-    goat: { name: "Goat", cost: 225, cd: 7, hp: 170, fire: 1.4, dmg: 20, shot: "horn", double: true },
+    pig: { name: "Pig", cost: 175, cd: 7, hp: 150, fire: 1.5, dmg: 60, shot: "mud", slow: 3 },
+    goat: { name: "Goat", cost: 225, cd: 7, hp: 170, fire: 1.4, dmg: 60, shot: "horn", double: true },
     skunk: { name: "Skunk", cost: 150, cd: 25, hp: 99999, bomb: true },
-    cow: { name: "Cow", cost: 300, cd: 9, hp: 220, fire: 2.4, dmg: 75, shot: "milk" },
-    frog: { name: "Frog", cost: 350, cd: 10, hp: 220, fire: 3.2, dmg: 25, shot: "slime", freeze: 2.2 },
+    cow: { name: "Cow", cost: 300, cd: 9, hp: 220, fire: 2.4, dmg: 225, shot: "milk" },
+    frog: { name: "Frog", cost: 350, cd: 10, hp: 220, fire: 3.2, dmg: 75, shot: "slime", freeze: 2.2 },
   };
   const ORDER = Object.keys(ANIMALS);
-  const ROBOTS = {
-    scout: { hp: 190, sp: 15, dps: 40, val: 50 },
-    helmet: { hp: 520, sp: 15, dps: 40, val: 100 },
-    runner: { hp: 150, sp: 30, dps: 40, val: 80 },
-    tank: { hp: 1400, sp: 8, dps: 90, val: 250 },
-    boss: { hp: 4500, sp: 6, dps: 300, val: 1500 },
+  const FOODS = {
+    donut: { hp: 190, sp: 15, dps: 40, val: 50 },
+    burger: { hp: 520, sp: 15, dps: 40, val: 100 },
+    pizza: { hp: 150, sp: 30, dps: 40, val: 80 },
+    melon: { hp: 1400, sp: 8, dps: 90, val: 250 },
+    cake: { hp: 4500, sp: 6, dps: 300, val: 1500 },
+  };
+  const FOOD_BITS = {
+    donut: ["#ff8fb8", "#c98a4b", "#ffe066", "#7ad7f0"],
+    burger: ["#e0a24f", "#6b3a22", "#6cc04a", "#ffd23f"],
+    pizza: ["#ffcf4a", "#c8402c", "#d79b4e"],
+    melon: ["#3f9a3c", "#ff4f5e", "#1f5a24", "#2a1a12"],
+    cake: ["#ffb3cf", "#fff3e0", "#ff5f8f", "#ffe066"],
   };
 
   // ---------- state ----------
@@ -202,7 +209,7 @@
   function reset() {
     Object.assign(S, {
       mode: "play", seeds: 150, score: 0, wave: 0, unlocked: ORDER.length,
-      grid: new Array(ROWS * COLS).fill(null), robots: [], shots: [], pickups: [], parts: [], texts: [], runners: [],
+      grid: new Array(ROWS * COLS).fill(null), foods: [], shots: [], pickups: [], parts: [], texts: [], runners: [],
       guards: new Array(ROWS).fill(true), cool: {}, sel: null, recall: false, hover: null,
       harvestT: 10, queue: [], spawnT: 0, spawnGap: 8, total: 0, spawned: 0, waveDone: true, nextWaveT: 0.5,
       banner: 0, bannerText: "", bannerSub: "", shake: 0, seedPulse: 0,
@@ -225,12 +232,12 @@
     const count = 3 + n * 2;
     for (let i = 0; i < count; i++) {
       const r = Math.random();
-      if (n >= 5 && r < 0.12 + n * 0.01) q.push("tank");
-      else if (n >= 3 && r < 0.3) q.push("runner");
-      else if (n >= 2 && r < 0.5 + n * 0.02) q.push("helmet");
-      else q.push("scout");
+      if (n >= 5 && r < 0.12 + n * 0.01) q.push("melon");
+      else if (n >= 3 && r < 0.3) q.push("pizza");
+      else if (n >= 2 && r < 0.5 + n * 0.02) q.push("burger");
+      else q.push("donut");
     }
-    if (n % 6 === 0) q.push("boss");
+    if (n % 6 === 0) q.push("cake");
     S.queue = q;
     S.total = q.length;
     S.spawned = 0;
@@ -238,14 +245,14 @@
     S.spawnT = n === 1 ? 14 : 4;
     S.banner = 2.4;
     S.bannerText = `Wave ${n}`;
-    S.bannerSub = n % 6 === 0 ? "A giant robot is coming" : n === 1 ? "Plant chicks for seeds, then hedgehogs to fight" : "Here they come";
+    S.bannerSub = n % 6 === 0 ? "The Mega Cake is coming" : n === 1 ? "Plant chicks for seeds, then hedgehogs to fight" : "Here they come";
     sfx("wave");
   }
 
-  function spawnRobot(type) {
-    const d = ROBOTS[type], m = 1 + (S.wave - 1) * 0.08;
+  function spawnFood(type) {
+    const d = FOODS[type], m = 1 + (S.wave - 1) * 0.08;
     const row = Math.floor(Math.random() * ROWS);
-    S.robots.push({ type, row, x: W + 30, y: rowY(row), hp: d.hp * m, max: d.hp * m, sp: d.sp * rand(0.9, 1.1), dps: d.dps, val: d.val, t: rand(0, 6), slow: 0, freeze: 0, flash: 0, eating: false });
+    S.foods.push({ type, row, x: W + 30, y: rowY(row), hp: d.hp * m, max: d.hp * m, sp: d.sp * rand(0.9, 1.1), dps: d.dps, val: d.val, t: rand(0, 6), slow: 0, freeze: 0, flash: 0, eating: false });
     S.spawned++;
   }
 
@@ -312,7 +319,7 @@
   $("go").addEventListener("click", () => { if (S.mode === "paused") togglePause(); else start(); });
 
   function togglePause() {
-    if (S.mode === "play") { S.mode = "paused"; showOverlay("Paused", "The robots will wait.", "Resume", false); }
+    if (S.mode === "play") { S.mode = "paused"; showOverlay("Paused", "The food will wait.", "Resume", false); }
     else if (S.mode === "paused") { S.mode = "play"; $("overlay").hidden = true; last = performance.now(); }
   }
   function showOverlay(title, msg, btn, tips) {
@@ -363,20 +370,19 @@
 
   function explode(b) {
     S.grid[b.row * COLS + b.col] = null;
-    for (const r of S.robots) {
-      if (Math.abs(r.row - b.row) <= 1 && Math.abs(r.x - b.x) < CW * 1.6) { r.hp -= 1800; r.flash = 0.2; }
+    for (const r of S.foods) {
+      if (Math.abs(r.row - b.row) <= 1 && Math.abs(r.x - b.x) < CW * 1.6) { r.hp -= 5000; r.flash = 0.2; }
     }
     burst(b.x, b.y, 50, ["#b6e36a", "#8e7cc3", "#d9f2a0", "#6a5a8a"], 360, 11, 60);
     S.shake = 12;
     sfx("boom");
   }
 
-  function killRobot(r) {
+  function killFood(r) {
     r.dead = true;
     S.score += r.val;
     float(r.x, r.y - 40, `+${r.val}`);
-    burst(r.x, r.y, r.type === "boss" ? 50 : 16, ["#9aa5b1", "#5b6570", "#ffcc33", "#ff3b3b"], r.type === "boss" ? 360 : 220, 6);
-    burst(r.x, r.y - 10, r.type === "boss" ? 16 : 7, ["#6b6b6b", "#8a8a8a", "#4a4a4a"], 70, r.type === "boss" ? 22 : 13, -50);
+    burst(r.x, r.y - 6, r.type === "cake" ? 60 : 20, FOOD_BITS[r.type], r.type === "cake" ? 380 : 240, 7);
     sfx("clank");
   }
 
@@ -387,7 +393,7 @@
     const reached = S.wave;
     const isBest = reached > best;
     if (isBest) { best = reached; try { localStorage.setItem("coopdefense.best", String(best)); } catch (e) {} }
-    showOverlay("The eggs are gone", `The robots broke through on wave ${reached}. Score ${fmt(S.score)}.${isBest ? " New best wave." : ""}`, "Play again", false);
+    showOverlay("The eggs are gone", `The food broke through on wave ${reached}. Score ${fmt(S.score)}.${isBest ? " New best wave." : ""}`, "Play again", false);
   }
 
   // ---------- update ----------
@@ -410,8 +416,8 @@
     // waves
     if (S.queue.length) {
       S.spawnT -= dt;
-      if (S.spawnT <= 0) { spawnRobot(S.queue.shift()); S.spawnT = S.spawnGap * rand(0.6, 1.3); }
-    } else if (!S.waveDone && !S.robots.length) {
+      if (S.spawnT <= 0) { spawnFood(S.queue.shift()); S.spawnT = S.spawnGap * rand(0.6, 1.3); }
+    } else if (!S.waveDone && !S.foods.length) {
       S.waveDone = true;
       S.nextWaveT = 7;
       S.seeds += 50 + S.wave * 10;
@@ -438,7 +444,7 @@
       }
       if (d.fire) {
         b.t -= dt;
-        const ahead = S.robots.some((r) => r.row === b.row && r.x > b.x - 10 && r.x < W - 10);
+        const ahead = S.foods.some((r) => r.row === b.row && r.x > b.x - 10 && r.x < W - 10);
         if (b.t <= 0 && ahead) {
           b.t = d.fire;
           shoot(b);
@@ -455,7 +461,7 @@
       s.x += 380 * dt;
       if (s.x > W + 20) { s.dead = true; continue; }
       let hit = null;
-      for (const r of S.robots) {
+      for (const r of S.foods) {
         if (r.dead || r.row !== s.row || Math.abs(r.x - s.x) > 22) continue;
         if (!hit || r.x < hit.x) hit = r;
       }
@@ -470,10 +476,10 @@
       }
     }
 
-    // robots
-    for (const r of S.robots) {
+    // food
+    for (const r of S.foods) {
       if (r.dead) continue;
-      if (r.hp <= 0) { killRobot(r); continue; }
+      if (r.hp <= 0) { killFood(r); continue; }
       r.flash -= dt;
       if (r.freeze > 0) { r.freeze -= dt; r.eating = false; continue; }
       r.t += dt;
@@ -505,7 +511,7 @@
 
     for (const u of S.runners) {
       u.x += 460 * dt;
-      for (const r of S.robots) if (!r.dead && r.row === u.row && Math.abs(r.x - u.x) < 34) { r.hp = 0; killRobot(r); }
+      for (const r of S.foods) if (!r.dead && r.row === u.row && Math.abs(r.x - u.x) < 34) { r.hp = 0; killFood(r); }
       if (Math.random() < 0.6) S.parts.push({ x: u.x - 16, y: u.y + 14, vx: rand(-60, -20), vy: rand(-60, -20), r: rand(2, 4), life: 0.4, max: 0.4, c: "#c9b48a", g: 200 });
       if (u.x > W + 40) u.dead = true;
     }
@@ -524,7 +530,7 @@
     for (const t of S.texts) { t.life -= dt; t.y -= 30 * dt; }
 
     S.shots = S.shots.filter((x) => !x.dead);
-    S.robots = S.robots.filter((x) => !x.dead);
+    S.foods = S.foods.filter((x) => !x.dead);
     S.runners = S.runners.filter((x) => !x.dead);
     S.pickups = S.pickups.filter((x) => !x.dead);
     S.parts = S.parts.filter((x) => x.life > 0);
@@ -653,73 +659,100 @@
     }
   }
 
-  function drawRobot(g, r, now) {
-    const walk = r.eating ? 0 : Math.sin(r.t * 7);
-    const chew = r.eating ? Math.sin(now * 0.02) : 0;
+  function angryFace(g, x, y, k, chew) {
+    E(g, x - 7 * k, y, 5.5 * k, 6 * k, "#ffffff"); E(g, x + 7 * k, y, 5.5 * k, 6 * k, "#ffffff");
+    E(g, x - 9.5 * k, y + 1 * k, 2.6 * k, 3 * k, "#1b1410"); E(g, x + 4.5 * k, y + 1 * k, 2.6 * k, 3 * k, "#1b1410");
+    E(g, x - 10.5 * k, y - 0.5 * k, 0.9 * k, 0.9 * k, "#fff"); E(g, x + 3.5 * k, y - 0.5 * k, 0.9 * k, 0.9 * k, "#fff");
+    g.strokeStyle = "#3a1a0a"; g.lineWidth = 2.6 * k; g.lineCap = "round";
+    g.beginPath(); g.moveTo(x - 14 * k, y - 10 * k); g.lineTo(x - 3 * k, y - 5 * k); g.moveTo(x + 13 * k, y - 10 * k); g.lineTo(x + 3 * k, y - 5 * k); g.stroke();
+    const open = 1.5 + Math.abs(chew) * 5;
+    g.fillStyle = "#5a1a12"; g.beginPath(); g.ellipse(x - 3 * k, y + 12 * k, 7 * k, open * k, 0, 0, TAU); g.fill();
+    if (open > 3) { g.fillStyle = "#fff"; g.fillRect(x - 8 * k, y + (12 - open) * k, 4 * k, 2.5 * k); g.fillRect(x - 2 * k, y + (12 - open) * k, 4 * k, 2.5 * k); }
+  }
+  function foodLegs(g, walk) {
+    g.strokeStyle = "#3a2410"; g.lineWidth = 3; g.lineCap = "round";
+    g.beginPath(); g.moveTo(-8, 14); g.lineTo(-8 + walk * 5, 31); g.moveTo(8, 14); g.lineTo(8 - walk * 5, 31); g.stroke();
+    g.fillStyle = "#2a1a12";
+    g.beginPath(); g.ellipse(-11 + walk * 5, 32, 5.5, 3, 0, 0, TAU); g.fill();
+    g.beginPath(); g.ellipse(5 - walk * 5, 32, 5.5, 3, 0, 0, TAU); g.fill();
+  }
+
+  function drawFood(g, r, now) {
+    const walk = r.eating || r.freeze > 0 ? 0 : Math.sin(r.t * 7);
+    const chew = r.eating ? Math.sin(now * 0.02) : 0.15;
     g.save();
     g.translate(r.x, r.y + 8);
-    if (r.type === "boss") g.scale(1.7, 1.7), g.translate(0, -14);
-    if (r.type === "runner") g.scale(0.85, 0.85);
-    const body = r.type === "runner" ? "#ff8a3d" : r.type === "boss" ? "#7b6cff" : "#c9d1d8";
-    const dark = r.type === "runner" ? "#c25a16" : r.type === "boss" ? "#4b3fbf" : "#8a96a3";
-    shadow(g, 0, 36, 28, 7);
-    if (r.type === "tank") {
-      R(g, -30, 18, 60, 16, "#3a3f45", 8);
-      for (let i = -24; i <= 24; i += 12) E(g, i + ((r.t * 20) % 12) - 6, 26, 4, 4, "#6c737b");
-      R(g, -28, -10, 56, 30, "#6f7b86", 8);
-      R(g, -24, -4, 20, 12, "#55606b", 3);
-      R(g, -16, -32, 30, 24, "#8a96a3", 6);
-      g.shadowColor = "#ff3b3b"; g.shadowBlur = 10;
-      R(g, -14, -26, 16, 7, "#ff3b3b", 3);
+    if (r.type === "cake") g.scale(1.7, 1.7), g.translate(0, -14);
+    shadow(g, 0, 34, r.type === "melon" ? 34 : 26, 7);
+    if (r.type === "donut") {
+      foodLegs(g, walk);
+      E(g, 0, -8, 27, 26, "#c98a4b");
+      g.fillStyle = "#ff8fb8"; g.beginPath();
+      for (let i = 0; i <= 40; i++) { const a = (i / 40) * TAU, rr = 22 + Math.sin(a * 7) * 2; g.lineTo(Math.cos(a) * rr, -10 + Math.sin(a) * rr); }
+      g.fill();
+      E(g, -6, -18, 9, 5, "rgba(255, 255, 255, 0.35)", -0.4);
+      const sp = ["#ffe066", "#7ad7f0", "#ffffff", "#a98bff"];
+      for (let i = 0; i < 10; i++) { const a = i * 2.4, d = 12 + (i % 3) * 4; g.save(); g.translate(Math.cos(a) * d, -10 + Math.sin(a) * d); g.rotate(a * 1.7); g.fillStyle = sp[i % 4]; g.fillRect(-3, -1, 6, 2.4); g.restore(); }
+      E(g, 8, 2, 4.5, 4, "#4f9433");
+      angryFace(g, -2, -18, 0.8, chew);
+    } else if (r.type === "burger") {
+      foodLegs(g, walk);
+      E(g, 0, -16, 29, 24, "#e0a24f");
+      for (let i = 0; i < 9; i++) E(g, -18 + (i * 37) % 36, -32 + (i * 13) % 12, 2.2, 1.2, "#fff3d6", i);
+      g.fillStyle = "#6cc04a"; g.beginPath(); g.moveTo(-31, -6);
+      for (let i = 0; i <= 12; i++) g.lineTo(-31 + i * (62 / 12), i % 2 ? 0 : -6);
+      g.lineTo(31, -10); g.lineTo(-31, -10); g.fill();
+      P(g, [[-26, -2], [26, -2], [16, 8], [6, 0], [-10, 9]], "#ffd23f");
+      R(g, -29, -2, 58, 12, "#5c321d", 6);
+      R(g, -26, 8, 52, 11, "#d58f3e", 6);
+      angryFace(g, -2, -24, 0.8, chew);
+    } else if (r.type === "pizza") {
+      g.translate(0, -Math.abs(Math.sin(r.t * 9)) * 5);
+      foodLegs(g, walk);
+      P(g, [[-32, -6], [20, -34], [20, 22]], "#ffcf4a");
+      g.fillStyle = "rgba(255, 140, 40, 0.35)"; g.beginPath(); g.moveTo(-28, -6); g.lineTo(18, -26); g.lineTo(18, -16); g.fill();
+      R(g, 14, -36, 14, 60, "#d79b4e", 7);
+      E(g, -6, 6, 6, 6, "#c8402c"); E(g, 8, -18, 6, 6, "#c8402c"); E(g, 8, 10, 6, 6, "#c8402c");
+      angryFace(g, -2, -8, 0.75, chew);
+    } else if (r.type === "melon") {
+      E(g, 0, -6, 34, 32, "#3f9a3c");
+      g.save(); g.beginPath(); g.ellipse(0, -6, 34, 32, 0, 0, TAU); g.clip();
+      g.strokeStyle = "#1f5a24"; g.lineWidth = 5;
+      for (let i = 0; i < 6; i++) {
+        const c = Math.cos(r.t * 0.6 + i * (Math.PI / 6));
+        g.beginPath(); g.ellipse(0, -6, Math.abs(c) * 34, 32, 0, 0, TAU); g.stroke();
+      }
+      g.restore();
+      E(g, -10, -22, 10, 6, "rgba(255, 255, 255, 0.25)", -0.5);
+      angryFace(g, -4, -10, 1, chew);
+    } else if (r.type === "cake") {
+      foodLegs(g, walk);
+      R(g, -28, -30, 56, 50, "#f6c6d6", 10);
+      R(g, -28, -6, 56, 7, "#fff3e0", 3);
+      g.fillStyle = "#ff5f8f"; g.beginPath(); g.moveTo(-28, -30);
+      for (let i = 0; i <= 8; i++) g.lineTo(-28 + i * 7, -30 + (i % 2 ? 12 : 4));
+      g.lineTo(28, -30); g.closePath(); g.fill();
+      E(g, -16, -32, 4, 4, "#d6203a"); E(g, 16, -32, 4, 4, "#d6203a");
+      R(g, -3, -50, 6, 20, "#7ad7f0", 2);
+      g.shadowColor = "#ffb43b"; g.shadowBlur = 12;
+      E(g, 0, -56 + Math.sin(now * 0.02), 3.5, 6.5, "#ffb43b");
       g.shadowBlur = 0;
-      R(g, -40, -24, 26, 6, "#4a525a", 3);
-    } else {
-      if (r.type === "runner") {
-        E(g, 0, 26, 11, 11, "#3a3f45"); E(g, 0, 26, 4, 4, "#9aa5b1");
-      } else {
-        R(g, -12 + walk * 4, 14, 8, 20, dark, 3); R(g, 4 - walk * 4, 14, 8, 20, dark, 3);
-        R(g, -14 + walk * 4, 30, 12, 5, "#3a3f45", 2); R(g, 2 - walk * 4, 30, 12, 5, "#3a3f45", 2);
-      }
-      R(g, -18, -14, 36, 32, body, 8);
-      R(g, -14, -11, 4, 26, "rgba(255, 255, 255, 0.28)", 2);
-      for (const [x, y] of [[-14, -10], [14, -10], [-14, 14], [14, 14]]) { E(g, x, y, 1.6, 1.6, "#5b6570"); E(g, x - 0.5, y - 0.5, 0.7, 0.7, "rgba(255, 255, 255, 0.7)"); }
-      R(g, -10, -6, 20, 14, dark, 4);
-      g.strokeStyle = "rgba(0, 0, 0, 0.25)"; g.lineWidth = 1; g.strokeRect(-10, -6, 20, 14);
-      E(g, -4, 1, 3, 3, "#ffcc33"); E(g, 4, 1, 3, 3, "#ff3b3b");
-      R(g, -32 - chew * 4, -2 + chew * 2, 18, 7, dark, 3);
-      E(g, -33 - chew * 4, 1 + chew * 2, 5, 5, "#3a3f45");
-      R(g, -16, -40, 32, 26, body, 7);
-      R(g, -17, -33, 20, 9, "#2a2f36", 4);
-      g.shadowColor = "#ff3b3b"; g.shadowBlur = 10;
-      R(g, -15, -31, 16, 5, "#ff3b3b", 2);
-      g.shadowBlur = 0;
-      R(g, -13, -38, 4, 22, "rgba(255, 255, 255, 0.22)", 2);
-      E(g, -11, -29, 3, 2, "#ffd0d0");
-      g.strokeStyle = dark; g.lineWidth = 2; g.beginPath(); g.moveTo(4, -40); g.lineTo(4, -50); g.stroke();
-      E(g, 4, -52, 3.5, 3.5, Math.sin(now * 0.008 + r.x) > 0 ? "#ff3b3b" : "#7a1b1b");
-      if (r.type === "helmet") {
-        g.fillStyle = "#ffcc33";
-        g.beginPath(); g.ellipse(0, -40, 20, 13, 0, Math.PI, TAU); g.fill();
-        R(g, -22, -42, 44, 5, "#e0a800", 2);
-        g.fillStyle = "#2a2f36";
-        for (let i = -12; i <= 8; i += 10) { g.beginPath(); g.moveTo(i, -42); g.lineTo(i + 4, -42); g.lineTo(i + 8, -50); g.lineTo(i + 4, -50); g.fill(); }
-      }
-      if (r.type === "boss") {
-        P(g, [[-14, -40], [-10, -54], [-6, -40]], "#ffcc33");
-        P(g, [[-4, -40], [0, -58], [4, -40]], "#ffcc33");
-        P(g, [[6, -40], [10, -54], [14, -40]], "#ffcc33");
-      }
+      angryFace(g, -2, -14, 0.9, chew);
     }
     if (r.freeze > 0) {
-      g.globalAlpha = 0.55; R(g, -24, -46, 48, 82, "#8fe36a", 12);
+      g.globalAlpha = 0.55; R(g, -26, -46, 52, 82, "#8fe36a", 12);
       g.globalAlpha = 0.8; E(g, -10, -30, 4, 10, "#e4ffd0", -0.4); E(g, 12, 20, 6, 4, "#5fbf3a");
       E(g, -14, 34, 5, 7, "#7fd34e"); E(g, 8, 36, 4, 6, "#7fd34e");
       g.globalAlpha = 1;
-    } else if (r.slow > 0) { g.globalAlpha = 0.35; E(g, 0, -6, 26, 40, "#7cc8ff"); g.globalAlpha = 1; }
-    if (r.flash > 0) { g.globalAlpha = 0.6; E(g, 0, -6, 24, 38, "#ffffff"); g.globalAlpha = 1; }
+    } else if (r.slow > 0) {
+      g.globalAlpha = 0.5;
+      for (const [x, y, rx] of [[-12, -20, 7], [10, -4, 8], [-4, 10, 6], [14, -24, 5]]) E(g, x, y, rx, rx * 0.7, "#6b4226");
+      g.globalAlpha = 1;
+    }
+    if (r.flash > 0) { g.globalAlpha = 0.6; E(g, 0, -8, 28, 34, "rgba(255, 255, 255, 0.9)"); g.globalAlpha = 1; }
     g.restore();
     if (r.hp < r.max) {
-      const w = r.type === "boss" ? 70 : 36, y = r.type === "boss" ? r.y - 92 : r.y - 54;
+      const w = r.type === "cake" ? 70 : 36, y = r.type === "cake" ? r.y - 92 : r.y - 54;
       R(g, r.x - w / 2, y, w, 5, "rgba(0, 0, 0, 0.45)", 2);
       R(g, r.x - w / 2, y, w * clamp(r.hp / r.max, 0, 1), 5, "#ff4d3d", 2);
     }
@@ -946,7 +979,7 @@
           R(ctx, b.x - 18, b.y - 40, 36 * clamp(b.hp / b.max, 0, 1), 4, "#7fd34e", 2);
         }
       }
-      for (const r of S.robots || []) if (r.row === row) drawRobot(ctx, r, now);
+      for (const r of S.foods || []) if (r.row === row) drawFood(ctx, r, now);
     }
 
     for (const s of S.shots || []) {
