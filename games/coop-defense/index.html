@@ -101,13 +101,13 @@
   <div class="overlay" id="overlay">
     <div class="card">
       <h1 id="title">Coop Defense</h1>
-      <p id="msg">Robots are marching on the coop. Put birds on the grass to stop them before they reach the eggs.</p>
+      <p id="msg">Robots are marching on the coop. Put animals on the grass to stop them before they reach the eggs.</p>
       <ul class="tips" id="tips">
-        <li>Tap a bird card, then tap a square to place it.</li>
+        <li>Tap an animal card, then tap a square to place it.</li>
         <li>Chicks lay golden seeds. Tap seeds to collect them. You also get a harvest every 10 seconds.</li>
         <li>Each lane has one guard chick. It charges once if a robot gets through.</li>
-        <li>Clear a wave to unlock a new bird. Recall removes a bird.</li>
-        <li>Keys: <b>1-8</b> pick a bird, <b>R</b> recall, <b>P</b> pause.</li>
+        <li>Clearing a wave gives bonus seeds. Recall removes an animal.</li>
+        <li>Keys: <b>1-8</b> pick an animal, <b>R</b> recall, <b>P</b> pause.</li>
       </ul>
       <button id="go" type="button">Start</button>
       <p class="best">Best wave <span id="best">0</span></p>
@@ -176,25 +176,17 @@
   }
 
   // ---------- data ----------
-  const BIRDS = {
+  const ANIMALS = {
     chick: { name: "Chick", cost: 50, cd: 5, hp: 120 },
-    pecker: { name: "Pecker", cost: 100, cd: 5, hp: 150, fire: 1.4, dmg: 20, shot: "seed" },
-    owl: { name: "Owl", cost: 75, cd: 20, hp: 1100 },
-    penguin: { name: "Penguin", cost: 175, cd: 7, hp: 150, fire: 1.5, dmg: 20, shot: "snow", slow: 3 },
-    eagle: { name: "Eagle", cost: 225, cd: 7, hp: 170, fire: 1.4, dmg: 20, shot: "feather", double: true },
-    rooster: { name: "Rooster", cost: 150, cd: 25, hp: 99999, bomb: true },
-    pelican: { name: "Pelican", cost: 300, cd: 9, hp: 220, fire: 2.4, dmg: 75, shot: "fish" },
+    hedgehog: { name: "Hedgehog", cost: 100, cd: 5, hp: 150, fire: 1.4, dmg: 20, shot: "spine" },
+    turtle: { name: "Turtle", cost: 75, cd: 20, hp: 1100 },
+    pig: { name: "Pig", cost: 175, cd: 7, hp: 150, fire: 1.5, dmg: 20, shot: "mud", slow: 3 },
+    goat: { name: "Goat", cost: 225, cd: 7, hp: 170, fire: 1.4, dmg: 20, shot: "horn", double: true },
+    skunk: { name: "Skunk", cost: 150, cd: 25, hp: 99999, bomb: true },
+    cow: { name: "Cow", cost: 300, cd: 9, hp: 220, fire: 2.4, dmg: 75, shot: "milk" },
     frog: { name: "Frog", cost: 350, cd: 10, hp: 220, fire: 3.2, dmg: 25, shot: "slime", freeze: 2.2 },
   };
-  const ORDER = Object.keys(BIRDS);
-  const UNLOCK_NOTE = {
-    owl: "Owls are tough walls that soak up damage.",
-    penguin: "Penguins throw snowballs that slow robots.",
-    eagle: "Eagles shoot two feathers at a time.",
-    rooster: "Roosters explode and wreck robots in a 3 by 3 area.",
-    pelican: "Pelicans hurl heavy fish.",
-    frog: "Frogs spit slime that freezes robots solid.",
-  };
+  const ORDER = Object.keys(ANIMALS);
   const ROBOTS = {
     scout: { hp: 190, sp: 15, dps: 40, val: 50 },
     helmet: { hp: 520, sp: 15, dps: 40, val: 100 },
@@ -207,7 +199,7 @@
   const S = { mode: "title" };
   function reset() {
     Object.assign(S, {
-      mode: "play", seeds: 150, score: 0, wave: 0, unlocked: 2,
+      mode: "play", seeds: 150, score: 0, wave: 0, unlocked: ORDER.length,
       grid: new Array(ROWS * COLS).fill(null), robots: [], shots: [], pickups: [], parts: [], texts: [], runners: [],
       guards: new Array(ROWS).fill(true), cool: {}, sel: null, recall: false, hover: null,
       harvestT: 10, queue: [], spawnT: 0, spawnGap: 8, total: 0, spawned: 0, waveDone: true, nextWaveT: 0.5,
@@ -221,7 +213,7 @@
 
   const rowY = (row) => GY + row * CH + CH / 2;
   const colX = (col) => GX + col * CW + CW / 2;
-  const birds = () => S.grid.filter(Boolean);
+  const animals = () => S.grid.filter(Boolean);
 
   function startWave() {
     S.wave++;
@@ -244,7 +236,7 @@
     S.spawnT = n === 1 ? 14 : 4;
     S.banner = 2.4;
     S.bannerText = `Wave ${n}`;
-    S.bannerSub = n % 6 === 0 ? "A giant robot is coming" : n === 1 ? "Plant chicks for seeds, then peckers to fight" : "Here they come";
+    S.bannerSub = n % 6 === 0 ? "A giant robot is coming" : n === 1 ? "Plant chicks for seeds, then hedgehogs to fight" : "Here they come";
     sfx("wave");
   }
 
@@ -270,7 +262,7 @@
 
   function selectCard(id) {
     if (!id || ORDER.indexOf(id) >= S.unlocked) return;
-    const b = BIRDS[id];
+    const b = ANIMALS[id];
     if ((S.cool[id] || 0) > 0) { sfx("nope"); return; }
     if (S.seeds < b.cost) { sfx("nope"); float(150, 128, `Need ${b.cost} seeds`, "#fff"); return; }
     S.sel = S.sel === id ? null : id;
@@ -296,7 +288,7 @@
     const c = cellAt(p);
     if (!c) return;
     if (S.recall) {
-      if (S.grid[c.i]) { feathers(S.grid[c.i]); S.grid[c.i] = null; sfx("place"); }
+      if (S.grid[c.i]) { poof(S.grid[c.i]); S.grid[c.i] = null; sfx("place"); }
       S.recall = false;
       return;
     }
@@ -339,10 +331,10 @@
       S.parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 80, r: rand(size * 0.5, size), life: rand(0.4, 0.9), max: 0.9, c: colors[i % colors.length], g: grav, sq: Math.random() < 0.5 });
     }
   }
-  function feathers(b) { burst(b.x, b.y, 12, ["#ffffff", "#ffe27a", "#f2c200"], 160, 5, 120); }
+  function poof(b) { burst(b.x, b.y, 12, ["#ffffff", "#ffe27a", "#f2c200"], 160, 5, 120); }
 
   function place(id, c) {
-    const d = BIRDS[id];
+    const d = ANIMALS[id];
     if (S.seeds < d.cost || (S.cool[id] || 0) > 0) { S.sel = null; return; }
     S.seeds -= d.cost;
     S.cool[id] = d.cd;
@@ -361,7 +353,7 @@
   }
 
   function shoot(b) {
-    const d = BIRDS[b.type];
+    const d = ANIMALS[b.type];
     S.shots.push({ x: b.x + 22, y: b.y - 6, row: b.row, dmg: d.dmg, kind: d.shot, slow: d.slow || 0, freeze: d.freeze || 0, t: 0 });
     b.kick = 1;
     sfx("shoot");
@@ -372,7 +364,7 @@
     for (const r of S.robots) {
       if (Math.abs(r.row - b.row) <= 1 && Math.abs(r.x - b.x) < CW * 1.6) { r.hp -= 1800; r.flash = 0.2; }
     }
-    burst(b.x, b.y, 40, ["#ff7a1a", "#ffd23f", "#ff3b1f", "#5a4a40"], 380, 9, 300);
+    burst(b.x, b.y, 50, ["#b6e36a", "#8e7cc3", "#d9f2a0", "#6a5a8a"], 360, 11, 60);
     S.shake = 12;
     sfx("boom");
   }
@@ -420,24 +412,16 @@
       S.waveDone = true;
       S.nextWaveT = 7;
       S.seeds += 50 + S.wave * 10;
-      if (S.unlocked < ORDER.length) {
-        const id = ORDER[S.unlocked];
-        S.unlocked++;
-        S.banner = 3.2;
-        S.bannerText = `New bird: ${BIRDS[id].name}`;
-        S.bannerSub = UNLOCK_NOTE[id] || "";
-      } else {
-        S.banner = 2.4;
-        S.bannerText = `Wave ${S.wave} cleared`;
-        S.bannerSub = `+${50 + S.wave * 10} bonus seeds`;
-      }
+      S.banner = 2.4;
+      S.bannerText = `Wave ${S.wave} cleared`;
+      S.bannerSub = `+${50 + S.wave * 10} bonus seeds`;
       sfx("wave");
     }
     if (S.waveDone) { S.nextWaveT -= dt; if (S.nextWaveT <= 0) startWave(); }
 
-    // birds
-    for (const b of birds()) {
-      const d = BIRDS[b.type];
+    // animals
+    for (const b of animals()) {
+      const d = ANIMALS[b.type];
       b.age += dt;
       b.flash -= dt;
       b.kick = Math.max(0, b.kick - dt * 5);
@@ -478,7 +462,7 @@
         hit.flash = 0.07;
         if (s.slow) hit.slow = s.slow;
         if (s.freeze) hit.freeze = s.freeze;
-        burst(s.x, s.y, s.kind === "slime" ? 8 : 4, s.kind === "slime" ? ["#9be84a", "#c8ff7a"] : s.kind === "snow" ? ["#e8f7ff", "#9fd8ff"] : ["#ffd27a", "#c98a4b"], 120, 3);
+        burst(s.x, s.y, s.kind === "slime" ? 8 : 4, s.kind === "slime" ? ["#9be84a", "#c8ff7a"] : s.kind === "mud" ? ["#7a4a2a", "#a8744a"] : s.kind === "milk" ? ["#ffffff", "#dff1ff"] : ["#d9cfb2", "#8a6a4a"], 120, 3);
         sfx("hit");
       }
     }
@@ -498,7 +482,7 @@
         r.eating = true;
         target.hp -= r.dps * k * dt;
         target.flash = 0.06;
-        if (target.hp <= 0) { feathers(target); S.grid[r.row * COLS + col] = null; sfx("clank"); }
+        if (target.hp <= 0) { poof(target); S.grid[r.row * COLS + col] = null; sfx("clank"); }
       } else {
         r.eating = false;
         r.x -= r.sp * k * dt;
@@ -554,7 +538,7 @@
     g.beginPath(); g.moveTo(-6, 22); g.lineTo(-6, 28); g.moveTo(6, 22); g.lineTo(6, 28); g.stroke();
   }
 
-  function drawBird(g, type, t) {
+  function drawAnimal(g, type, t) {
     if (type === "chick") {
       feet(g);
       E(g, 0, -17, 3, 6, "#ffd93b", 0.3);
@@ -564,54 +548,61 @@
       eye(g, 8, -4);
       P(g, [[17, -1], [27, 2], [17, 6]], "#ff9a1f");
       E(g, 4, 2, 4, 2.5, "rgba(255, 120, 120, 0.5)");
-    } else if (type === "pecker") {
-      feet(g, "#555");
-      P(g, [[-16, 6], [-32, -4], [-28, 14]], "#6e4420");
-      E(g, 0, 6, 20, 18, "#8b5a2b");
-      E(g, 6, 11, 11, 10, "#f1d9b5");
-      E(g, 4, -10, 13, 10, "#d33a2c");
-      P(g, [[2, -20], [-6, -26], [8, -18]], "#d33a2c");
-      eye(g, 9, -8, 3.2);
-      P(g, [[15, -8], [34, -4], [15, -1]], "#5d5d5d");
-    } else if (type === "owl") {
-      P(g, [[-20, -14], [-14, -32], [-6, -18]], "#7a4f2a");
-      P(g, [[20, -14], [14, -32], [6, -18]], "#7a4f2a");
-      E(g, 0, 2, 26, 27, "#9a6a3c");
-      E(g, 0, 12, 17, 15, "#e9d3b0");
-      for (let i = 0; i < 3; i++) P(g, [[-8 + i * 8, 8], [-4 + i * 8, 12], [i * 8, 8]], "#c4a57c");
-      E(g, -9, -6, 10, 10, "#f7c948"); E(g, 9, -6, 10, 10, "#f7c948");
-      E(g, -9, -6, 6, 6.5, "#1b1410"); E(g, 9, -6, 6, 6.5, "#1b1410");
-      E(g, -7, -8, 2, 2, "#fff"); E(g, 11, -8, 2, 2, "#fff");
-      P(g, [[-3, 2], [3, 2], [0, 8]], "#ff9a1f");
-      feet(g);
-    } else if (type === "penguin") {
-      feet(g);
-      E(g, 0, 4, 20, 25, "#22262e");
-      E(g, 4, 8, 13, 18, "#f8f8f8");
-      R(g, -16, -8, 32, 6, "#3fa9f5", 3);
-      P(g, [[-12, -6], [-20, 8], [-12, 8]], "#3fa9f5");
-      eye(g, 8, -14, 3.2);
-      P(g, [[15, -13], [25, -10], [15, -7]], "#ff9a1f");
-      E(g, -16, 8, 6, 12, "#1a1d24", 0.3);
-    } else if (type === "eagle") {
-      feet(g, "#f2c200");
-      P(g, [[-16, 10], [-32, 4], [-28, 20]], "#4a2a14");
-      E(g, 0, 8, 21, 19, "#6b3f1f");
-      E(g, -6, 10, 12, 10, "#55301a", -0.3);
-      E(g, 6, -10, 14, 12, "#fafafa");
-      eye(g, 10, -12, 3);
-      g.strokeStyle = "#3a2410"; g.lineWidth = 2.5; g.beginPath(); g.moveTo(5, -19); g.lineTo(15, -15); g.stroke();
-      P(g, [[17, -11], [29, -9], [27, -2], [21, -5], [17, -4]], "#f2c200");
-    } else if (type === "rooster") {
-      feet(g);
-      P(g, [[-16, 0], [-34, -16], [-30, -2], [-36, 6], [-18, 10]], "#2e7d4f");
-      E(g, 0, 6, 21, 19, "#e0552b");
-      E(g, 5, 11, 12, 10, "#ffb37a");
-      E(g, 4, -13, 11, 10, "#e0552b");
-      E(g, 0, -24, 4, 5, "#e31b23"); E(g, 6, -25, 4, 5, "#e31b23"); E(g, 11, -22, 3.5, 4.5, "#e31b23");
-      E(g, 15, -2, 3, 5, "#e31b23");
-      eye(g, 8, -14, 3);
-      P(g, [[14, -12], [23, -9], [14, -6]], "#ffcc33");
+    } else if (type === "hedgehog") {
+      for (let i = 0; i < 9; i++) {
+        const a = -2.9 + i * 0.32, bx = Math.cos(a) * 18 - 4, by = Math.sin(a) * 14 + 8;
+        P(g, [[bx - 4, by], [bx + Math.cos(a) * 14, by + Math.sin(a) * 14], [bx + 4, by]], "#5a3e26");
+      }
+      E(g, -4, 8, 21, 16, "#8a6a4a");
+      E(g, 13, 10, 11, 10, "#e8cfa8");
+      E(g, 23, 9, 3.2, 3, "#2a1a12");
+      eye(g, 14, 4, 2.8);
+      E(g, -10, 22, 5, 3, "#5a3e26"); E(g, 8, 22, 5, 3, "#5a3e26");
+    } else if (type === "turtle") {
+      E(g, -12, 20, 7, 5, "#8fcf6a"); E(g, 10, 20, 7, 5, "#8fcf6a");
+      E(g, 22, 4, 9, 8, "#8fcf6a");
+      eye(g, 24, 1, 2.8);
+      E(g, -2, 6, 26, 19, "#2f7a3a");
+      E(g, -2, 4, 22, 16, "#3f8f4a");
+      for (const [x, y] of [[-12, 0], [0, -6], [10, 2], [-4, 10], [8, 12], [-14, 12]]) E(g, x, y, 5, 4, "#6cb35a");
+    } else if (type === "pig") {
+      g.strokeStyle = "#f38aa8"; g.lineWidth = 2.5; g.lineCap = "round";
+      g.beginPath(); g.arc(-24, 2, 4, 0, Math.PI * 1.6); g.stroke();
+      R(g, -14, 16, 7, 12, "#f38aa8", 3); R(g, 6, 16, 7, 12, "#f38aa8", 3);
+      E(g, 0, 6, 22, 18, "#ffb3c7");
+      P(g, [[2, -10], [8, -22], [12, -8]], "#f38aa8");
+      E(g, 18, 6, 7, 6, "#f38aa8");
+      E(g, 16, 6, 1.4, 2, "#a8456a"); E(g, 20, 6, 1.4, 2, "#a8456a");
+      eye(g, 10, -4, 3);
+    } else if (type === "goat") {
+      R(g, -14, 16, 6, 13, "#cfc6af", 3); R(g, 6, 16, 6, 13, "#cfc6af", 3);
+      E(g, -4, 8, 20, 15, "#e9e3d3");
+      g.strokeStyle = "#9a8f78"; g.lineWidth = 4; g.lineCap = "round";
+      g.beginPath(); g.moveTo(8, -14); g.quadraticCurveTo(0, -30, -10, -24); g.stroke();
+      E(g, 2, -8, 7, 3, "#d4ccb8", 0.4);
+      E(g, 13, -6, 11, 10, "#e9e3d3");
+      P(g, [[14, 2], [22, 2], [18, 14]], "#cfc6af");
+      eye(g, 16, -8, 2.8);
+      E(g, 23, -2, 2.2, 1.6, "#8a7f68");
+    } else if (type === "skunk") {
+      E(g, -16, -8, 12, 22, "#2a2a30", -0.5);
+      E(g, -16, -8, 4, 17, "#f4f4f4", -0.5);
+      E(g, 2, 9, 20, 15, "#2a2a30");
+      R(g, -10, 18, 6, 10, "#2a2a30", 3); R(g, 8, 18, 6, 10, "#2a2a30", 3);
+      E(g, 13, -4, 11, 10, "#2a2a30");
+      E(g, 12, -9, 3, 7, "#f4f4f4");
+      eye(g, 16, -5, 2.8);
+      E(g, 24, -1, 2.5, 2, "#ff8fb0");
+    } else if (type === "cow") {
+      R(g, -16, 16, 7, 13, "#e8e8e8", 3); R(g, 8, 16, 7, 13, "#e8e8e8", 3);
+      E(g, -4, 7, 23, 16, "#fafafa");
+      E(g, -12, 2, 7, 5, "#26272b", 0.4); E(g, 2, 12, 6, 5, "#26272b"); E(g, -16, 14, 4, 3, "#26272b");
+      E(g, 10, -16, 2.5, 5, "#e8dcc0", -0.4);
+      E(g, 4, -8, 7, 3.4, "#fafafa", 0.4);
+      E(g, 14, -6, 12, 11, "#fafafa");
+      E(g, 22, -1, 8, 6.5, "#ffb3c7");
+      E(g, 20, -1, 1.3, 1.6, "#a8456a"); E(g, 25, -1, 1.3, 1.6, "#a8456a");
+      eye(g, 15, -9, 2.8);
     } else if (type === "frog") {
       E(g, -16, 20, 10, 6, "#2f7d3a", 0.2); E(g, 16, 20, 10, 6, "#2f7d3a", -0.2);
       E(g, 0, 8, 24, 18, "#4caf50");
@@ -622,14 +613,6 @@
       g.beginPath(); g.arc(8, 0, 12, 0.15 * Math.PI, 0.55 * Math.PI); g.stroke();
       E(g, 21, 5, 4, 3, "#9be84a");
       E(g, -12, 2, 4, 2.5, "rgba(255, 140, 140, 0.45)");
-    } else if (type === "pelican") {
-      feet(g);
-      E(g, -2, 8, 21, 18, "#f4f4ee");
-      E(g, -8, 10, 12, 9, "#d8d8cc", -0.3);
-      E(g, 6, -12, 11, 10, "#f4f4ee");
-      P(g, [[12, -14], [40, -10], [36, -6], [26, 6], [14, -2]], "#ff9a1f");
-      P(g, [[14, -6], [36, -6], [26, 6]], "#f07a12");
-      eye(g, 8, -15, 3);
     }
   }
 
@@ -731,7 +714,7 @@
       E(ctx, 22, y + 6, 16, 22, "#ff8fb0");
       E(ctx, 16, y, 3, 4, "#fff"); E(ctx, 27, y + 12, 3.5, 3, "#fff"); E(ctx, 20, y + 20, 2.5, 2.5, "#fff");
       if (S.guards && S.guards[r]) {
-        ctx.save(); ctx.translate(36, y + 14); ctx.scale(0.6, 0.6); drawBird(ctx, "chick", now); ctx.restore();
+        ctx.save(); ctx.translate(36, y + 14); ctx.scale(0.6, 0.6); drawAnimal(ctx, "chick", now); ctx.restore();
       }
     }
     // hedge and ground
@@ -752,13 +735,13 @@
     ctx.fillText(fmt(S.seeds || 0), 49, BAR_Y + 71);
     // cards
     for (let i = 0; i < ORDER.length; i++) {
-      const id = ORDER[i], d = BIRDS[id], c = cardRect(i);
+      const id = ORDER[i], d = ANIMALS[id], c = cardRect(i);
       const locked = i >= (S.unlocked || 2);
       R(ctx, c.x, c.y, c.w, c.h, S.sel === id ? "#ffe066" : "#e8c27a", 8);
       R(ctx, c.x + 3, c.y + 3, c.w - 6, c.h - 26, locked ? "#3a5a35" : "#5fb43f", 6);
       if (!locked) {
         ctx.save(); ctx.beginPath(); ctx.rect(c.x + 3, c.y + 3, c.w - 6, c.h - 26); ctx.clip();
-        ctx.translate(c.x + c.w / 2 - 2, c.y + 34); ctx.scale(0.74, 0.74); drawBird(ctx, id, now); ctx.restore();
+        ctx.translate(c.x + c.w / 2 - 2, c.y + 34); ctx.scale(0.74, 0.74); drawAnimal(ctx, id, now); ctx.restore();
         R(ctx, c.x + 3, c.y + c.h - 21, c.w - 6, 18, "#fff6dc", 4);
         ctx.fillStyle = "#3a2410"; ctx.font = '15px "Lilita One", sans-serif';
         ctx.fillText(d.cost, c.x + c.w / 2 - 6, c.y + c.h - 11);
@@ -825,7 +808,7 @@
         const ok = S.recall ? !!S.grid[c.i] : !S.grid[c.i];
         ctx.fillStyle = ok ? "rgba(255, 255, 255, 0.25)" : "rgba(255, 60, 60, 0.25)";
         ctx.fillRect(GX + c.col * CW, GY + c.row * CH, CW, CH);
-        if (S.sel && ok) { ctx.save(); ctx.globalAlpha = 0.5; ctx.translate(colX(c.col), rowY(c.row)); drawBird(ctx, S.sel, now); ctx.restore(); }
+        if (S.sel && ok) { ctx.save(); ctx.globalAlpha = 0.5; ctx.translate(colX(c.col), rowY(c.row)); drawAnimal(ctx, S.sel, now); ctx.restore(); }
       }
     }
 
@@ -836,9 +819,9 @@
         const bob = Math.sin(now * 0.004 + b.col) * 1.5;
         ctx.translate(b.x - b.kick * 4, b.y + bob);
         E(ctx, 0, 30, 20, 5, "rgba(0, 0, 0, 0.2)");
-        if (b.type === "rooster") { const s = 1 + (1 - b.fuse) * 0.35; ctx.scale(s, s); }
-        drawBird(ctx, b.type, now);
-        if (b.type === "rooster" && Math.floor(b.fuse * 10) % 2) { ctx.globalAlpha = 0.5; E(ctx, 0, 0, 24, 24, "#fff"); ctx.globalAlpha = 1; }
+        if (b.type === "skunk") { const s = 1 + (1 - b.fuse) * 0.35; ctx.scale(s, s); }
+        drawAnimal(ctx, b.type, now);
+        if (b.type === "skunk" && Math.floor(b.fuse * 10) % 2) { ctx.globalAlpha = 0.5; E(ctx, 0, 0, 24, 24, "#fff"); ctx.globalAlpha = 1; }
         if (b.flash > 0) { ctx.globalAlpha = 0.35; E(ctx, 0, 2, 24, 26, "#ff5040"); ctx.globalAlpha = 1; }
         if (b.type === "chick" && b.lay < 1.2) drawSeed(ctx, -16, 18, 0.7);
         ctx.restore();
@@ -851,21 +834,21 @@
     }
 
     for (const s of S.shots || []) {
-      if (s.kind === "snow") { E(ctx, s.x, s.y, 8, 8, "#f2fbff"); E(ctx, s.x - 2, s.y - 2, 3, 3, "#bfe6ff"); }
-      else if (s.kind === "fish") {
-        ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.t * 14);
-        E(ctx, 0, 0, 13, 6, "#7ab8d9"); P(ctx, [[-11, 0], [-19, -7], [-19, 7]], "#5a98b9"); E(ctx, 7, -1, 1.6, 1.6, "#1b1410");
+      if (s.kind === "mud") { E(ctx, s.x, s.y, 9, 7, "#7a4a2a"); E(ctx, s.x - 2, s.y - 2, 3, 2, "#a8744a"); E(ctx, s.x - 11, s.y + 3, 2.5, 2.5, "#7a4a2a"); }
+      else if (s.kind === "milk") {
+        ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.t * 12);
+        R(ctx, -6, -9, 12, 18, "#ffffff", 4); R(ctx, -3, -13, 6, 5, "#3fa9f5", 2); R(ctx, -6, -1, 12, 4, "#3fa9f5", 1);
         ctx.restore();
       } else if (s.kind === "slime") {
         const w = 1 + Math.sin(s.t * 30) * 0.15;
         E(ctx, s.x, s.y, 10 * w, 8 / w, "#7fd12f"); E(ctx, s.x + 2, s.y - 2, 3.5, 2.5, "#c8ff7a");
         E(ctx, s.x - 12, s.y + 2, 3, 3, "#7fd12f");
-      } else if (s.kind === "feather") { E(ctx, s.x, s.y, 12, 3.5, "#fafafa"); E(ctx, s.x - 4, s.y, 6, 1.2, "#c9b48a"); }
-      else { E(ctx, s.x, s.y, 7, 4.5, "#c98a4b"); E(ctx, s.x + 1, s.y - 1.5, 3, 1.5, "#ffd9a0"); }
+      } else if (s.kind === "horn") { P(ctx, [[s.x - 10, s.y - 4], [s.x + 12, s.y], [s.x - 10, s.y + 4]], "#d9cfb2"); }
+      else { R(ctx, s.x - 9, s.y - 1.5, 18, 3, "#5a3e26", 1.5); P(ctx, [[s.x + 9, s.y - 3], [s.x + 15, s.y], [s.x + 9, s.y + 3]], "#5a3e26"); }
     }
 
     for (const u of S.runners || []) {
-      ctx.save(); ctx.translate(u.x, u.y - 14 + Math.abs(Math.sin(u.x * 0.08)) * -6); ctx.scale(0.9, 0.9); drawBird(ctx, "chick", now); ctx.restore();
+      ctx.save(); ctx.translate(u.x, u.y - 14 + Math.abs(Math.sin(u.x * 0.08)) * -6); ctx.scale(0.9, 0.9); drawAnimal(ctx, "chick", now); ctx.restore();
     }
 
     for (const pk of S.pickups || []) drawSeed(ctx, pk.x, pk.y + Math.sin(now * 0.006 + pk.bob) * 2, 1.4 + (pk.life < 2 ? Math.sin(now * 0.03) * 0.1 : 0));
