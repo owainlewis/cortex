@@ -104,7 +104,7 @@
       <p id="msg">Robots are marching on the coop. Put animals on the grass to stop them before they reach the eggs.</p>
       <ul class="tips" id="tips">
         <li>Tap an animal card, then tap a square to place it.</li>
-        <li>Chicks lay golden seeds. Tap seeds to collect them. You also get a harvest every 10 seconds.</li>
+        <li>Chicks lay 30 golden seeds every 5 seconds. Tap seeds to collect them. You also get a harvest every 10 seconds.</li>
         <li>Each lane has one guard chick. It charges once if a robot gets through.</li>
         <li>Clearing a wave gives bonus seeds. Recall removes an animal.</li>
         <li>Keys: <b>1-8</b> pick an animal, <b>R</b> recall, <b>P</b> pause.</li>
@@ -428,8 +428,8 @@
       if (b.type === "chick") {
         b.lay -= dt;
         if (b.lay <= 0) {
-          b.lay = rand(8, 10);
-          S.pickups.push({ x: b.x + rand(-14, 14), y: b.y - 10, vy: -170, floor: b.y + 22, life: 8, val: 25, bob: rand(0, 6) });
+          b.lay = 5;
+          S.pickups.push({ x: b.x + rand(-14, 14), y: b.y - 10, vy: -170, floor: b.y + 22, life: 8, val: 30, bob: rand(0, 6) });
           b.kick = 1;
         }
       }
