@@ -130,13 +130,15 @@
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const fmt = (n) => Math.floor(n).toLocaleString();
 
-  let scale = 1;
+  let scale = 1, bgDirty = true;
+  const bg = document.createElement("canvas");
   function resize() {
     const r = cv.getBoundingClientRect();
     const d = Math.min(window.devicePixelRatio || 1, 2);
     cv.width = Math.max(1, Math.round(r.width * d));
     cv.height = Math.max(1, Math.round(r.height * d));
     scale = cv.width / W;
+    bgDirty = true;
   }
   new ResizeObserver(resize).observe(cv);
   resize();
@@ -374,6 +376,7 @@
     S.score += r.val;
     float(r.x, r.y - 40, `+${r.val}`);
     burst(r.x, r.y, r.type === "boss" ? 50 : 16, ["#9aa5b1", "#5b6570", "#ffcc33", "#ff3b3b"], r.type === "boss" ? 360 : 220, 6);
+    burst(r.x, r.y - 10, r.type === "boss" ? 16 : 7, ["#6b6b6b", "#8a8a8a", "#4a4a4a"], 70, r.type === "boss" ? 22 : 13, -50);
     sfx("clank");
   }
 
@@ -529,9 +532,43 @@
   }
 
   // ---------- drawing ----------
-  function E(g, x, y, rx, ry, c, rot = 0) { g.fillStyle = c; g.beginPath(); g.ellipse(x, y, rx, ry, rot, 0, TAU); g.fill(); }
+  const toneCache = new Map();
+  function tone(hex, amt) {
+    const key = hex + amt;
+    let out = toneCache.get(key);
+    if (out) return out;
+    let h = hex.slice(1);
+    if (h.length === 3) h = h.replace(/./g, (c) => c + c);
+    const n = parseInt(h, 16), t = amt > 0 ? 255 : 0, a = Math.abs(amt);
+    const ch = (v) => Math.round(v + (t - v) * a);
+    out = `rgb(${ch((n >> 16) & 255)}, ${ch((n >> 8) & 255)}, ${ch(n & 255)})`;
+    toneCache.set(key, out);
+    return out;
+  }
+  const isHex = (c) => typeof c === "string" && c[0] === "#";
+  function E(g, x, y, rx, ry, c, rot = 0) {
+    if (isHex(c) && rx >= 6 && ry >= 6) {
+      const gr = g.createRadialGradient(x - rx * 0.35, y - ry * 0.45, Math.min(rx, ry) * 0.08, x, y, Math.max(rx, ry) * 1.1);
+      gr.addColorStop(0, tone(c, 0.3)); gr.addColorStop(0.5, c); gr.addColorStop(1, tone(c, -0.32));
+      g.fillStyle = gr;
+    } else g.fillStyle = c;
+    g.beginPath(); g.ellipse(x, y, rx, ry, rot, 0, TAU); g.fill();
+  }
+  function shadow(g, x, y, rx, ry, a = 0.38) {
+    const gr = g.createRadialGradient(x, y, 0, x, y, rx);
+    gr.addColorStop(0, `rgba(20, 30, 10, ${a})`); gr.addColorStop(1, "rgba(20, 30, 10, 0)");
+    g.save(); g.translate(x, y); g.scale(1, ry / rx); g.translate(-x, -y);
+    g.fillStyle = gr; g.beginPath(); g.arc(x, y, rx, 0, TAU); g.fill(); g.restore();
+  }
   function P(g, pts, c) { g.fillStyle = c; g.beginPath(); pts.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.closePath(); g.fill(); }
-  function R(g, x, y, w, h, c, r = 4) { g.fillStyle = c; g.beginPath(); g.roundRect(x, y, w, h, r); g.fill(); }
+  function R(g, x, y, w, h, c, r = 4) {
+    if (isHex(c) && h >= 10 && w >= 6) {
+      const gr = g.createLinearGradient(x, y, x + w * 0.4, y + h);
+      gr.addColorStop(0, tone(c, 0.28)); gr.addColorStop(0.45, c); gr.addColorStop(1, tone(c, -0.3));
+      g.fillStyle = gr;
+    } else g.fillStyle = c;
+    g.beginPath(); g.roundRect(x, y, w, h, r); g.fill();
+  }
   function eye(g, x, y, r = 3.6) { E(g, x, y, r * 1.35, r * 1.45, "#fff"); E(g, x + r * 0.35, y, r * 0.8, r, "#1b1410"); E(g, x + r * 0.05, y - r * 0.4, r * 0.3, r * 0.3, "#fff"); }
   function feet(g, c = "#ff9a1f") {
     g.strokeStyle = c; g.lineWidth = 3; g.lineCap = "round";
@@ -625,14 +662,16 @@
     if (r.type === "runner") g.scale(0.85, 0.85);
     const body = r.type === "runner" ? "#ff8a3d" : r.type === "boss" ? "#7b6cff" : "#c9d1d8";
     const dark = r.type === "runner" ? "#c25a16" : r.type === "boss" ? "#4b3fbf" : "#8a96a3";
-    E(g, 0, 36, 22, 5, "rgba(0, 0, 0, 0.22)");
+    shadow(g, 0, 36, 28, 7);
     if (r.type === "tank") {
       R(g, -30, 18, 60, 16, "#3a3f45", 8);
       for (let i = -24; i <= 24; i += 12) E(g, i + ((r.t * 20) % 12) - 6, 26, 4, 4, "#6c737b");
       R(g, -28, -10, 56, 30, "#6f7b86", 8);
       R(g, -24, -4, 20, 12, "#55606b", 3);
       R(g, -16, -32, 30, 24, "#8a96a3", 6);
+      g.shadowColor = "#ff3b3b"; g.shadowBlur = 10;
       R(g, -14, -26, 16, 7, "#ff3b3b", 3);
+      g.shadowBlur = 0;
       R(g, -40, -24, 26, 6, "#4a525a", 3);
     } else {
       if (r.type === "runner") {
@@ -642,13 +681,19 @@
         R(g, -14 + walk * 4, 30, 12, 5, "#3a3f45", 2); R(g, 2 - walk * 4, 30, 12, 5, "#3a3f45", 2);
       }
       R(g, -18, -14, 36, 32, body, 8);
+      R(g, -14, -11, 4, 26, "rgba(255, 255, 255, 0.28)", 2);
+      for (const [x, y] of [[-14, -10], [14, -10], [-14, 14], [14, 14]]) { E(g, x, y, 1.6, 1.6, "#5b6570"); E(g, x - 0.5, y - 0.5, 0.7, 0.7, "rgba(255, 255, 255, 0.7)"); }
       R(g, -10, -6, 20, 14, dark, 4);
+      g.strokeStyle = "rgba(0, 0, 0, 0.25)"; g.lineWidth = 1; g.strokeRect(-10, -6, 20, 14);
       E(g, -4, 1, 3, 3, "#ffcc33"); E(g, 4, 1, 3, 3, "#ff3b3b");
       R(g, -32 - chew * 4, -2 + chew * 2, 18, 7, dark, 3);
       E(g, -33 - chew * 4, 1 + chew * 2, 5, 5, "#3a3f45");
       R(g, -16, -40, 32, 26, body, 7);
       R(g, -17, -33, 20, 9, "#2a2f36", 4);
+      g.shadowColor = "#ff3b3b"; g.shadowBlur = 10;
       R(g, -15, -31, 16, 5, "#ff3b3b", 2);
+      g.shadowBlur = 0;
+      R(g, -13, -38, 4, 22, "rgba(255, 255, 255, 0.22)", 2);
       E(g, -11, -29, 3, 2, "#ffd0d0");
       g.strokeStyle = dark; g.lineWidth = 2; g.beginPath(); g.moveTo(4, -40); g.lineTo(4, -50); g.stroke();
       E(g, 4, -52, 3.5, 3.5, Math.sin(now * 0.008 + r.x) > 0 ? "#ff3b3b" : "#7a1b1b");
@@ -688,39 +733,110 @@
     g.restore();
   }
 
-  function drawBackground(now) {
-    const sky = ctx.createLinearGradient(0, 0, 0, GY);
-    sky.addColorStop(0, "#8fdcff");
-    sky.addColorStop(1, "#c9f0a8");
-    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, GY);
-    E(ctx, 100, GY + 10, 180, 50, "#6cc04a"); E(ctx, 460, GY + 14, 220, 60, "#5fb43f");
-    // fence
-    ctx.fillStyle = "#a8743f";
-    for (let x = 12; x < W; x += 44) R(ctx, x, GY - 34, 10, 34, "#a8743f", 3);
-    R(ctx, 0, GY - 26, W, 6, "#8a5a2b", 2);
-    // grid
-    ctx.fillStyle = "#3f9a2e"; ctx.fillRect(0, GY, W, ROWS * CH);
-    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
-      ctx.fillStyle = (r + c) % 2 ? "#4fae3a" : "#5bbd44";
-      ctx.fillRect(GX + c * CW, GY + r * CH, CW, CH);
-    }
-    ctx.fillStyle = "#3a8a2a"; ctx.fillRect(0, GY, GX, ROWS * CH);
-    // tufts
-    ctx.fillStyle = "rgba(255, 255, 255, 0.12)";
-    for (let i = 0; i < 40; i++) { const x = GX + ((i * 137) % (COLS * CW)), y = GY + ((i * 251) % (ROWS * CH)); E(ctx, x, y, 3, 1.5, "rgba(30, 90, 20, 0.35)"); }
-    // eggs and guards
-    for (let r = 0; r < ROWS; r++) {
-      const y = rowY(r);
-      E(ctx, 22, y + 6, 16, 22, "#ff8fb0");
-      E(ctx, 16, y, 3, 4, "#fff"); E(ctx, 27, y + 12, 3.5, 3, "#fff"); E(ctx, 20, y + 20, 2.5, 2.5, "#fff");
-      if (S.guards && S.guards[r]) {
-        ctx.save(); ctx.translate(36, y + 14); ctx.scale(0.6, 0.6); drawAnimal(ctx, "chick", now); ctx.restore();
+  function seeded(seed) { let v = seed; return () => { v = (v * 9301 + 49297) % 233280; return v / 233280; }; }
+
+  function buildBackground() {
+    bg.width = cv.width; bg.height = cv.height;
+    const g = bg.getContext("2d");
+    g.setTransform(scale, 0, 0, scale, 0, 0);
+    const rnd = seeded(7);
+    // sky and clouds
+    const sky = g.createLinearGradient(0, 0, 0, GY);
+    sky.addColorStop(0, "#7cc4ec"); sky.addColorStop(0.7, "#cde8f2"); sky.addColorStop(1, "#e6f0d6");
+    g.fillStyle = sky; g.fillRect(0, 0, W, GY);
+    for (const [cx, cy, s] of [[90, 120, 1], [330, 112, 1.3], [520, 126, 0.9]]) {
+      for (let i = 0; i < 7; i++) {
+        const x = cx + (i - 3) * 14 * s, y = cy - Math.sin((i / 6) * Math.PI) * 10 * s, r = (12 + Math.sin(i * 1.7) * 4 + 6) * s;
+        const gr = g.createRadialGradient(x - r * 0.3, y - r * 0.4, 1, x, y, r);
+        gr.addColorStop(0, "rgba(255, 255, 255, 0.95)"); gr.addColorStop(1, "rgba(225, 235, 245, 0.75)");
+        g.fillStyle = gr; g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
       }
     }
-    // hedge and ground
+    // tree line
+    for (let x = -20; x < W + 30; x += 18) {
+      const r = 16 + rnd() * 14, y = GY - 22 - rnd() * 8;
+      E(g, x, y, r, r * 0.9, rnd() < 0.5 ? "#3e7a3a" : "#4a8a40");
+    }
+    g.fillStyle = "#6fa84f"; g.fillRect(0, GY - 22, W, 22);
+    // fence
+    for (let x = 12; x < W; x += 44) {
+      R(g, x, GY - 38, 10, 38, "#a8743f", 2);
+      g.strokeStyle = "rgba(70, 40, 15, 0.35)"; g.lineWidth = 0.8;
+      for (let i = 0; i < 3; i++) { g.beginPath(); g.moveTo(x + 2 + i * 3, GY - 36); g.lineTo(x + 2 + i * 3 + (rnd() - 0.5) * 2, GY - 2); g.stroke(); }
+      P(g, [[x, GY - 38], [x + 5, GY - 44], [x + 10, GY - 38]], "#9a6a38");
+    }
+    for (const y of [GY - 30, GY - 16]) {
+      R(g, 0, y, W, 6, "#8f6234", 2);
+      g.strokeStyle = "rgba(60, 35, 10, 0.3)"; g.beginPath(); g.moveTo(0, y + 3); g.lineTo(W, y + 3.4); g.stroke();
+    }
+    // lawn with mowing stripes
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+      const x = GX + c * CW, y = GY + r * CH;
+      g.fillStyle = c % 2 ? "#4f9433" : "#5ea53e";
+      g.fillRect(x, y, CW, CH);
+      if (r % 2) { g.fillStyle = "rgba(0, 0, 0, 0.045)"; g.fillRect(x, y, CW, CH); }
+    }
+    const blades = ["#3f7d2a", "#6db04a", "#579a3a", "#7cc057", "#4a8a30", "#86c65e"];
+    g.lineCap = "round";
+    for (let i = 0; i < 9000; i++) {
+      const x = GX + rnd() * COLS * CW, y = GY + rnd() * ROWS * CH, len = 3 + rnd() * 5, a = -Math.PI / 2 + (rnd() - 0.5) * 0.8;
+      g.strokeStyle = blades[Math.floor(rnd() * blades.length)];
+      g.globalAlpha = 0.55 + rnd() * 0.45;
+      g.lineWidth = 0.8 + rnd() * 0.6;
+      g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len); g.stroke();
+    }
+    g.globalAlpha = 1;
+    for (let i = 0; i < 14; i++) shadow(g, GX + rnd() * COLS * CW, GY + rnd() * ROWS * CH, 30 + rnd() * 30, 18 + rnd() * 14, 0.08);
+    for (let i = 0; i < 26; i++) {
+      const x = GX + rnd() * COLS * CW, y = GY + rnd() * ROWS * CH;
+      for (let k = 0; k < 5; k++) E(g, x + Math.cos(k * 1.26) * 2.6, y + Math.sin(k * 1.26) * 2.6, 2, 2, rnd() < 0.5 ? "#fff8e8" : "#fbe7f0");
+      E(g, x, y, 1.4, 1.4, "#f2c200");
+    }
+    // straw strip and nests
+    g.fillStyle = "#7d5f33"; g.fillRect(0, GY, GX, ROWS * CH);
+    const straw = ["#d9b45a", "#c79a3e", "#e8c873", "#b58a35"];
+    for (let i = 0; i < 1400; i++) {
+      const x = rnd() * GX, y = GY + rnd() * ROWS * CH, a = rnd() * Math.PI, len = 4 + rnd() * 8;
+      g.strokeStyle = straw[i % 4]; g.lineWidth = 1; g.globalAlpha = 0.8;
+      g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len * 0.5); g.stroke();
+    }
+    g.globalAlpha = 1;
+    for (let r = 0; r < ROWS; r++) {
+      const y = rowY(r);
+      shadow(g, 24, y + 26, 24, 8, 0.4);
+      for (let i = 0; i < 40; i++) {
+        const a = rnd() * TAU, rr = 16 + rnd() * 6;
+        g.strokeStyle = straw[i % 4]; g.lineWidth = 1.4;
+        g.beginPath(); g.moveTo(24 + Math.cos(a) * rr, y + 22 + Math.sin(a) * rr * 0.35); g.lineTo(24 + Math.cos(a + 0.5) * rr, y + 22 + Math.sin(a + 0.5) * rr * 0.35); g.stroke();
+      }
+      const shell = r % 2 ? "#e8c8a0" : "#f4e8d4";
+      E(g, 22, y + 6, 14, 19, shell);
+      for (let i = 0; i < 9; i++) E(g, 14 + rnd() * 16, y - 6 + rnd() * 24, 0.9, 0.9, "rgba(120, 80, 40, 0.45)");
+      E(g, 17, y - 3, 3, 6, "rgba(255, 255, 255, 0.5)", -0.3);
+    }
+    // soil and hedge
     const by = GY + ROWS * CH;
-    ctx.fillStyle = "#6b4a2b"; ctx.fillRect(0, by, W, H - by);
-    for (let x = -10; x < W + 20; x += 40) E(ctx, x, by + 10, 30, 22, x % 80 ? "#2f7d2a" : "#3a9033");
+    const soil = g.createLinearGradient(0, by, 0, H);
+    soil.addColorStop(0, "#5e4126"); soil.addColorStop(1, "#3e2a17");
+    g.fillStyle = soil; g.fillRect(0, by, W, H - by);
+    for (let i = 0; i < 60; i++) E(g, rnd() * W, by + 30 + rnd() * (H - by - 30), 1.5 + rnd() * 3, 1 + rnd() * 2, rnd() < 0.5 ? "#7a6a58" : "#8f7f6a");
+    for (let x = -10; x < W + 20; x += 34) E(g, x, by + 12, 28, 20, "#2a6a26");
+    const leaves = ["#2f7d2a", "#3a9033", "#46a03c", "#28682a"];
+    for (let i = 0; i < 500; i++) {
+      const x = rnd() * W, y = by + rnd() * 30 - 4;
+      E(g, x, y, 3 + rnd() * 2, 2 + rnd() * 1.5, leaves[i % 4], rnd() * Math.PI);
+    }
+    bgDirty = false;
+  }
+
+  function drawBackground(now) {
+    if (bgDirty) buildBackground();
+    ctx.drawImage(bg, 0, 0, W, H);
+    for (let r = 0; r < ROWS; r++) {
+      if (S.guards && S.guards[r]) {
+        ctx.save(); ctx.translate(40, rowY(r) + 16); ctx.scale(0.55, 0.55); drawAnimal(ctx, "chick", now); ctx.restore();
+      }
+    }
   }
 
   function drawBar(now) {
@@ -818,7 +934,7 @@
         ctx.save();
         const bob = Math.sin(now * 0.004 + b.col) * 1.5;
         ctx.translate(b.x - b.kick * 4, b.y + bob);
-        E(ctx, 0, 30, 20, 5, "rgba(0, 0, 0, 0.2)");
+        shadow(ctx, 0, 30, 26, 7);
         if (b.type === "skunk") { const s = 1 + (1 - b.fuse) * 0.35; ctx.scale(s, s); }
         drawAnimal(ctx, b.type, now);
         if (b.type === "skunk" && Math.floor(b.fuse * 10) % 2) { ctx.globalAlpha = 0.5; E(ctx, 0, 0, 24, 24, "#fff"); ctx.globalAlpha = 1; }
