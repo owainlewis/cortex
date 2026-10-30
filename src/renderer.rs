@@ -757,11 +757,7 @@ fn line_gutter(line_idx: usize, point_line: usize, changed: bool, width: usize) 
     let number_width = width.saturating_sub(3);
     let change_marker = if changed { "+" } else { " " };
     let point_marker = if line_idx == point_line { ">" } else { " " };
-    let number = if line_idx == point_line {
-        line_idx + 1
-    } else {
-        line_idx.abs_diff(point_line)
-    };
+    let number = line_idx + 1;
 
     format!("{change_marker}{point_marker}{number:>number_width$} ")
 }
@@ -1664,9 +1660,29 @@ mod tests {
         assert_eq!(frame.modeline_style, ModelineStyle::Clean);
         assert_eq!(frame.lines[0].gutter, " >  1 ");
         assert!(frame.lines[0].current);
-        assert_eq!(frame.lines[1].gutter, "    1 ");
+        assert_eq!(frame.lines[1].gutter, "    2 ");
         assert!(!frame.lines[1].current);
         assert_eq!(frame.cursor, CursorPosition { col: 6, row: 0 });
+    }
+
+    #[test]
+    fn gutter_numbers_stay_absolute_when_point_moves() {
+        let buffer = buffer_with_text("notes.txt", "alpha\nbeta\ngamma\n");
+        let mut view = View::new();
+        let size = TerminalSize { cols: 40, rows: 5 };
+        let numbers = |view: &View| {
+            build_frame(&buffer, view, size, None, None, None)
+                .lines
+                .iter()
+                .take(3)
+                .map(|line| line.gutter[2..].trim().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        let before = numbers(&view);
+        view.set_point(buffer.line_start_char(2), &buffer);
+        assert_eq!(before, vec!["1", "2", "3"]);
+        assert_eq!(numbers(&view), before);
     }
 
     #[test]
