@@ -4,6 +4,7 @@ mod cli;
 mod clipboard;
 mod command_registry;
 mod commands;
+mod completion;
 mod editor;
 pub mod highlighter;
 mod input;

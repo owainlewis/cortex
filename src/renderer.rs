@@ -25,6 +25,7 @@ const EMPTY_SPACE_MARKER: &str = " ~";
 const MODELINE_BRAND: &str = "CORTEX";
 const MIN_GUTTER_TOTAL_WIDTH: usize = 12;
 const MAX_PICKER_INDENT_DEPTH: usize = 4;
+const MENU_ROWS: usize = 8;
 /// Maximum cells in one dense retained frame.
 ///
 /// The current and previous frame coexist while diffing, so arbitrary `u16`
@@ -276,6 +277,7 @@ impl Default for Renderer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Frame {
     lines: Vec<ScreenLine>,
+    menu: Vec<MenuLine>,
     modeline: String,
     cursor: CursorPosition,
     modeline_style: ModelineStyle,
@@ -347,6 +349,22 @@ struct StyledSegment {
 enum ScreenLineKind {
     Text,
     EmptySpace,
+}
+
+/// One completion row shown above the minibuffer while a prompt is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuItem<'a> {
+    pub label: &'a str,
+    pub keys: &'a str,
+    pub detail: &'a str,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MenuLine {
+    label: String,
+    detail: String,
+    selected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -454,6 +472,7 @@ impl Renderer {
         command_line: Option<&str>,
         keycast: Option<&str>,
         search_range: Option<Range<usize>>,
+        menu: &[MenuItem],
     ) -> io::Result<()> {
         let cells = retained_cell_buffer(size)?;
         let viewport_height = self.viewport_height(size);
@@ -473,6 +492,7 @@ impl Renderer {
             keycast,
             &highlighted_lines,
             search_range,
+            menu,
         );
 
         self.paint(writer, paint_editor_frame(frame, size, cells))
@@ -598,6 +618,7 @@ fn build_frame_with_selection(
         None,
         &[],
         None,
+        &[],
     )
 }
 
@@ -621,6 +642,7 @@ fn build_frame_with_keycast(
         keycast,
         &[],
         None,
+        &[],
     )
 }
 
@@ -636,6 +658,7 @@ fn build_frame_with_highlights(
     keycast: Option<&str>,
     highlighted_lines: &[Vec<HighlightSpan>],
     search_range: Option<Range<usize>>,
+    menu: &[MenuItem],
 ) -> Frame {
     let width = size.cols as usize;
     let viewport_height = size.rows.saturating_sub(1) as usize;
@@ -729,8 +752,12 @@ fn build_frame_with_highlights(
         ModelineStyle::Clean
     };
 
+    let menu = menu_lines(menu, viewport_height, width);
+    lines.truncate(viewport_height.saturating_sub(menu.len()));
+
     Frame {
         lines,
+        menu,
         modeline,
         cursor,
         modeline_style,
@@ -767,16 +794,46 @@ fn empty_gutter(width: usize) -> String {
 }
 
 fn command_line_text(input: &str) -> String {
-    if let Some(command) = input.strip_prefix("M-x ") {
-        let matches = crate::command_registry::matches(command)
-            .take(4)
-            .map(|spec| spec.name)
-            .collect::<Vec<_>>();
-        if !matches.is_empty() {
-            return format!(" {input}  [{}]", matches.join("  "));
-        }
-    }
     format!(" {input}")
+}
+
+/// Lays out at most `MENU_ROWS` items, scrolled so the selected item is
+/// visible, and always leaves one row of buffer text above the menu.
+fn menu_lines(items: &[MenuItem], viewport_height: usize, width: usize) -> Vec<MenuLine> {
+    let rows = MENU_ROWS.min(viewport_height.saturating_sub(1));
+    if rows == 0 || items.is_empty() {
+        return Vec::new();
+    }
+    let selected = items.iter().position(|item| item.selected).unwrap_or(0);
+    let start = selected.saturating_sub(rows - 1);
+    let shown = &items[start..items.len().min(start + rows)];
+    let label_width = shown
+        .iter()
+        .map(|item| measure_cells(item.label, usize::MAX))
+        .max()
+        .unwrap_or(0)
+        .min(width / 2);
+    let keys_width = shown
+        .iter()
+        .map(|item| measure_cells(item.keys, usize::MAX))
+        .max()
+        .unwrap_or(0);
+    shown
+        .iter()
+        .map(|item| {
+            let label = fit_status_line(item.label, label_width);
+            let detail = if keys_width == 0 {
+                item.detail.to_string()
+            } else {
+                format!("{:<keys_width$}  {}", item.keys, item.detail)
+            };
+            MenuLine {
+                label: format!(" {label}  "),
+                detail,
+                selected: item.selected,
+            }
+        })
+        .collect()
 }
 
 fn command_line_cursor(input: &str, size: TerminalSize) -> CursorPosition {
@@ -1100,6 +1157,33 @@ fn paint_editor_frame(frame: Frame, size: TerminalSize, mut cells: Vec<Cell>) ->
         }
 
         fill_row(&mut cells, row_start, width, plain_style(foreground));
+    }
+
+    for line in &frame.menu {
+        let row_start = cells.len();
+        let style = TextStyle {
+            foreground: if line.selected {
+                THEME.picker_selected_fg
+            } else {
+                THEME.picker_fg
+            },
+            background: Some(if line.selected {
+                THEME.picker_selected_bg
+            } else {
+                THEME.modeline_bg
+            }),
+            bold: line.selected,
+            ..plain_style(THEME.picker_fg)
+        };
+        push_cells(&mut cells, &line.label, style, width);
+        let detail_style = TextStyle {
+            foreground: THEME.gutter_fg,
+            bold: false,
+            ..style
+        };
+        let remaining = width.saturating_sub(cells.len() - row_start);
+        push_cells(&mut cells, &line.detail, detail_style, remaining);
+        fill_row(&mut cells, row_start, width, style);
     }
 
     if size.rows > 0 {
@@ -1666,6 +1750,80 @@ mod tests {
     }
 
     #[test]
+    fn menu_rows_sit_above_the_minibuffer_and_follow_the_selection() {
+        let buffer = buffer_with_text("notes.txt", "alpha\nbeta\n");
+        let names: Vec<String> = (0..12).map(|index| format!("item-{index}")).collect();
+        let size = TerminalSize { cols: 40, rows: 12 };
+        let frame_for = |selected: usize| {
+            let items: Vec<super::MenuItem> = names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| super::MenuItem {
+                    label: name,
+                    keys: if index == 0 { "C-x C-s" } else { "" },
+                    detail: "does a thing",
+                    selected: index == selected,
+                })
+                .collect();
+            super::build_frame_with_highlights(
+                &buffer,
+                &View::new(),
+                size,
+                None,
+                None,
+                None,
+                Some("M-x item"),
+                None,
+                &[],
+                None,
+                &items,
+            )
+        };
+
+        let frame = frame_for(0);
+        assert_eq!(frame.menu.len(), super::MENU_ROWS);
+        assert_eq!(frame.lines.len() + frame.menu.len(), 11);
+        assert!(frame.menu[0].label.contains("item-0"));
+        assert!(frame.menu[0].detail.starts_with("C-x C-s  does a thing"));
+        assert!(frame.menu[0].selected);
+
+        let frame = frame_for(11);
+        assert!(frame.menu.last().unwrap().selected);
+        assert!(frame.menu.last().unwrap().label.contains("item-11"));
+
+        let painted =
+            super::paint_editor_frame(frame, size, super::retained_cell_buffer(size).unwrap());
+        assert_eq!(painted.cells.len(), 40 * 12);
+    }
+
+    #[test]
+    fn menu_leaves_a_row_of_text_in_a_short_terminal() {
+        let buffer = buffer_with_text("notes.txt", "alpha\n");
+        let item = super::MenuItem {
+            label: "save-buffer",
+            keys: "",
+            detail: "",
+            selected: true,
+        };
+        let items = vec![item; 5];
+        let frame = super::build_frame_with_highlights(
+            &buffer,
+            &View::new(),
+            TerminalSize { cols: 20, rows: 4 },
+            None,
+            None,
+            None,
+            Some("M-x "),
+            None,
+            &[],
+            None,
+            &items,
+        );
+        assert_eq!(frame.lines.len(), 1);
+        assert_eq!(frame.menu.len(), 2);
+    }
+
+    #[test]
     fn gutter_numbers_stay_absolute_when_point_moves() {
         let buffer = buffer_with_text("notes.txt", "alpha\nbeta\ngamma\n");
         let mut view = View::new();
@@ -2164,6 +2322,7 @@ mod tests {
             None,
             &[],
             Some(3..6),
+            &[],
         );
         let searched: String = frame.lines[0]
             .segments
@@ -2203,6 +2362,7 @@ mod tests {
                 None,
                 &[],
                 Some(11..15),
+                &[],
             );
             let searched: String = frame.lines[0]
                 .segments
@@ -2436,6 +2596,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
@@ -2462,6 +2623,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
@@ -2487,6 +2649,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .unwrap();
         let column = super::editor_gutter_width(&buffer, 80) + code.find("hello").unwrap();
@@ -2518,6 +2681,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
@@ -2544,6 +2708,7 @@ mod tests {
                 None,
                 Some("C-x"),
                 None,
+                &[],
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
@@ -2617,6 +2782,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .unwrap_err();
 
@@ -2668,6 +2834,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .unwrap_err();
 
@@ -2701,6 +2868,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    &[],
                 )
                 .unwrap();
         }
@@ -2746,6 +2914,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .unwrap();
         output.clear();
@@ -2765,6 +2934,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
@@ -2782,6 +2952,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .unwrap();
         let unchanged_output = String::from_utf8_lossy(&output);
@@ -2801,6 +2972,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
@@ -2928,6 +3100,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .unwrap();
         output.clear();
@@ -2944,6 +3117,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .unwrap();
         let output = String::from_utf8_lossy(&output);
@@ -2988,26 +3162,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_modeline_lists_commands_when_named_prompt_opens() {
-        let buffer = buffer_with_text("notes.txt", "alpha\n");
-
-        let frame = build_frame(
-            &buffer,
-            &View::new(),
-            TerminalSize { cols: 120, rows: 3 },
-            None,
-            None,
-            Some("M-x "),
-        );
-
-        assert!(frame.modeline.contains("save-buffer"));
-        assert!(frame.modeline.contains("find-file"));
-        assert!(frame.modeline.contains("switch-buffer"));
-        assert_eq!(frame.cursor, CursorPosition { col: 5, row: 2 });
-    }
-
-    #[test]
-    fn command_completion_hint_does_not_move_the_input_cursor() {
+    fn command_input_keeps_the_cursor_after_the_typed_text() {
         let buffer = buffer_with_text("notes.txt", "alpha\n");
         for cols in [12, 40, 80] {
             let frame = build_frame(
@@ -3020,10 +3175,6 @@ mod tests {
             );
             assert!(frame.modeline.starts_with(" M-x sav"));
             assert_eq!(frame.cursor, CursorPosition { col: 8, row: 2 });
-            if cols >= 40 {
-                assert!(frame.modeline.contains("save-buffer"));
-                assert!(!frame.modeline.contains("find-file"));
-            }
         }
     }
 

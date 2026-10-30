@@ -13,6 +13,8 @@ pub enum Command {
     DeleteForward,
     OpenCommandLine,
     OpenPath,
+    OpenDirectory,
+    KeyboardQuit,
     Search,
     SearchBackward,
     Help,
@@ -145,6 +147,8 @@ pub(crate) fn dispatch_at(
         Command::KillLine
         | Command::KillRegion
         | Command::OpenPath
+        | Command::OpenDirectory
+        | Command::KeyboardQuit
         | Command::Search
         | Command::SearchBackward
         | Command::Help

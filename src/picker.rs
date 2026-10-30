@@ -212,7 +212,7 @@ impl DirectoryPicker {
             }
             Key::Backspace => self.browse_parent(),
             Key::Enter => self.open_selected(),
-            Key::Escape => DirectoryPickerAction::Quit,
+            Key::Escape | Key::Ctrl('g') => DirectoryPickerAction::Quit,
             Key::Ctrl('x') => {
                 self.pending_ctrl_x = true;
                 self.status_message = Some("C-x".to_string());

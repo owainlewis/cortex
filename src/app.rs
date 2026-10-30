@@ -2,12 +2,13 @@ use crate::{
     buffer::Buffer,
     clipboard::Clipboard,
     command_registry, commands,
+    completion::{self, Candidate},
     editor::{Editor, OpenResult, SwitchError},
     input::key_from_event,
     keymap::{Keymap, KeymapResult},
     kill_ring::KillRing,
     picker::{DirectoryPicker, DirectoryPickerAction},
-    renderer::{Renderer, StatusKind, TerminalSize},
+    renderer::{MenuItem, Renderer, StatusKind, TerminalSize},
     search::{Direction, IncrementalSearch},
     signals::TerminationSignals,
     terminal::TerminalSession,
@@ -36,6 +37,11 @@ struct AppState {
     dirty_quit_prompt: bool,
     command_line: Option<String>,
     prompt_kind: Option<PromptKind>,
+    candidates: Vec<Candidate>,
+    selected: usize,
+    // Up or Down picked a candidate, so Enter takes it over the typed text.
+    navigated: bool,
+    buffer_names: Vec<String>,
     keycast: Option<String>,
     last_search: Option<String>,
     search: Option<IncrementalSearch>,
@@ -66,7 +72,6 @@ enum PromptKind {
 enum AppAction {
     Continue,
     FindFile(PathBuf),
-    OpenFile(PathBuf),
     SwitchBuffer(String),
     Quit,
     ForceQuit,
@@ -147,6 +152,7 @@ fn run_editor<W: io::Write>(
             Event::Key(key) => {
                 if key.kind == KeyEventKind::Press {
                     let key = key_from_event(key);
+                    app_state.buffer_names = editor.switch_candidates();
                     let action = {
                         let (buffer, view) = editor.active_mut();
                         app_state.handle_key(key, &mut keymap, buffer, view)
@@ -217,10 +223,6 @@ fn apply_app_action(
                 AppControl::Continue
             }
         },
-        AppAction::OpenFile(path) => {
-            open_file_in_editor(editor, &path, app_state);
-            AppControl::Continue
-        }
         AppAction::SwitchBuffer(name) => {
             switch_buffer(editor, &name, app_state);
             AppControl::Continue
@@ -413,6 +415,7 @@ impl AppState {
             return self.handle_command_line_key(key, buffer, view);
         }
 
+        let prefix = keymap.pending_label();
         match keymap.resolve(key) {
             KeymapResult::Command(command) => self.execute_command(command, "", buffer, view),
             KeymapResult::PendingPrefix => {
@@ -424,7 +427,15 @@ impl AppState {
             KeymapResult::Unbound => {
                 self.last_yank = None;
                 buffer.break_undo_group();
-                self.clear_status();
+                match (prefix, keycast_text(key)) {
+                    (Some(prefix), Some(key)) => {
+                        self.set_status(format!("{prefix} {key} is undefined"), StatusKind::Info)
+                    }
+                    (None, Some(key)) => {
+                        self.set_status(format!("{key} is undefined"), StatusKind::Info)
+                    }
+                    _ => self.clear_status(),
+                }
                 AppAction::Continue
             }
         }
@@ -460,6 +471,7 @@ impl AppState {
         }
         if let Some(input) = self.command_line.as_mut() {
             input.push_str(&crate::input::single_line_paste(text));
+            self.refresh_candidates();
             self.clear_status();
             return;
         }
@@ -469,25 +481,98 @@ impl AppState {
         self.clear_status();
     }
 
-    fn start_command_line(&mut self) -> AppAction {
-        self.command_line = Some(String::new());
-        self.prompt_kind = Some(PromptKind::Command);
+    fn start_prompt(&mut self, kind: PromptKind, input: String) -> AppAction {
+        self.command_line = Some(input);
+        self.prompt_kind = Some(kind);
+        self.refresh_candidates();
         self.clear_status();
         AppAction::Continue
     }
 
-    fn start_find_file(&mut self) -> AppAction {
-        self.command_line = Some(String::new());
-        self.prompt_kind = Some(PromptKind::FindFile);
-        self.clear_status();
-        AppAction::Continue
+    fn start_command_line(&mut self) -> AppAction {
+        self.start_prompt(PromptKind::Command, String::new())
+    }
+
+    fn start_find_file(&mut self, active_path: &Path) -> AppAction {
+        self.start_prompt(
+            PromptKind::FindFile,
+            completion::directory_prompt(active_path),
+        )
     }
 
     fn start_switch_buffer(&mut self) -> AppAction {
-        self.command_line = Some(String::new());
-        self.prompt_kind = Some(PromptKind::SwitchBuffer);
-        self.clear_status();
-        AppAction::Continue
+        self.start_prompt(PromptKind::SwitchBuffer, String::new())
+    }
+
+    fn close_prompt(&mut self) -> (String, PromptKind) {
+        self.candidates.clear();
+        self.selected = 0;
+        self.navigated = false;
+        (
+            self.command_line.take().unwrap_or_default(),
+            self.prompt_kind.take().unwrap_or(PromptKind::Command),
+        )
+    }
+
+    fn refresh_candidates(&mut self) {
+        let input = self.command_line.as_deref().unwrap_or_default();
+        self.candidates = match self.prompt_kind {
+            Some(PromptKind::Command) => completion::commands(input),
+            Some(PromptKind::FindFile) => completion::paths(input),
+            Some(PromptKind::SwitchBuffer) => completion::buffers(input, &self.buffer_names),
+            None => Vec::new(),
+        };
+        self.selected = 0;
+        self.navigated = false;
+    }
+
+    fn move_selection(&mut self, forward: bool) {
+        let len = self.candidates.len();
+        if len == 0 {
+            return;
+        }
+        self.selected = if forward {
+            (self.selected + 1) % len
+        } else {
+            (self.selected + len - 1) % len
+        };
+        self.navigated = true;
+    }
+
+    /// The candidate Enter should take instead of the typed text: the one
+    /// picked with Up or Down, or the first match when the typed text names
+    /// no command or buffer. Typed file paths always win, so a new file can
+    /// be created even when an existing name starts with it.
+    fn chosen_candidate(&self, input: &str) -> Option<&Candidate> {
+        let candidate = self.candidates.get(self.selected)?;
+        let prefer = self.navigated
+            || match self.prompt_kind {
+                Some(PromptKind::Command) => {
+                    // An empty prompt runs `help`, as it always has.
+                    let text = command_registry::command_text(input);
+                    let name = text.split_whitespace().next().unwrap_or("");
+                    !name.is_empty() && command_registry::lookup(name).is_none()
+                }
+                Some(PromptKind::SwitchBuffer) => true,
+                _ => false,
+            };
+        prefer.then_some(candidate)
+    }
+
+    fn menu_items(&self) -> Vec<MenuItem<'_>> {
+        if self.command_line.is_none() {
+            return Vec::new();
+        }
+        self.candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| MenuItem {
+                label: &candidate.label,
+                keys: candidate.keys,
+                detail: &candidate.detail,
+                selected: index == self.selected,
+            })
+            .collect()
     }
 
     fn active_region(&self, buffer: &Buffer, view: &View) -> Option<Range<usize>> {
@@ -679,32 +764,66 @@ impl AppState {
                 if let Some(input) = self.command_line.as_mut() {
                     input.push(ch);
                 }
+                self.refresh_candidates();
                 AppAction::Continue
             }
             crate::input::Key::Backspace => {
                 if let Some(input) = self.command_line.as_mut() {
                     text::pop_grapheme(input);
                 }
+                self.refresh_candidates();
                 AppAction::Continue
             }
-            crate::input::Key::Tab if self.prompt_kind == Some(PromptKind::Command) => {
+            crate::input::Key::MetaBackspace => {
                 if let Some(input) = self.command_line.as_mut() {
-                    *input = command_registry::complete(input);
+                    completion::delete_component(input);
                 }
+                self.refresh_candidates();
+                AppAction::Continue
+            }
+            crate::input::Key::Tab => {
+                if let Some(candidate) = self.candidates.get(self.selected) {
+                    self.command_line = Some(candidate.replacement.clone());
+                    self.refresh_candidates();
+                }
+                AppAction::Continue
+            }
+            crate::input::Key::Down | crate::input::Key::Ctrl('n') => {
+                self.move_selection(true);
+                AppAction::Continue
+            }
+            crate::input::Key::Up | crate::input::Key::Ctrl('p') => {
+                self.move_selection(false);
                 AppAction::Continue
             }
             crate::input::Key::Enter => {
-                let input = self.command_line.take().unwrap_or_default();
-                match self.prompt_kind.take().unwrap_or(PromptKind::Command) {
+                let typed = self.command_line.clone().unwrap_or_default();
+                let (input, directory) = match self.chosen_candidate(&typed) {
+                    Some(candidate) => (candidate.replacement.clone(), candidate.directory),
+                    None => (typed, false),
+                };
+                if directory || self.needs_argument(&input) {
+                    // Descend into the directory, or wait for the argument
+                    // a command needs, without closing the prompt.
+                    let input = match command_registry::lookup(input.trim()) {
+                        Some(spec) if !directory => format!("{} ", spec.name),
+                        _ => input,
+                    };
+                    self.command_line = Some(input);
+                    self.refresh_candidates();
+                    return AppAction::Continue;
+                }
+                let (_, kind) = self.close_prompt();
+                match kind {
                     PromptKind::Command => self.run_command_line(&input, buffer, view),
-                    PromptKind::FindFile => self.submit_find_file(&input, buffer.path()),
+                    PromptKind::FindFile => self.submit_find_file(&input),
                     PromptKind::SwitchBuffer => self.submit_switch_buffer(&input),
                 }
             }
-            crate::input::Key::Escape => {
+            crate::input::Key::Escape | crate::input::Key::Ctrl('g') => {
                 self.last_yank = None;
-                self.command_line = None;
-                let message = match self.prompt_kind.take().unwrap_or(PromptKind::Command) {
+                let (_, kind) = self.close_prompt();
+                let message = match kind {
                     PromptKind::Command => "Command canceled",
                     PromptKind::FindFile => "Find file canceled",
                     PromptKind::SwitchBuffer => "Switch buffer canceled",
@@ -716,22 +835,21 @@ impl AppState {
         }
     }
 
-    fn submit_find_file(&mut self, input: &str, active_path: &Path) -> AppAction {
+    fn needs_argument(&self, input: &str) -> bool {
+        let text = command_registry::command_text(input);
+        self.prompt_kind == Some(PromptKind::Command)
+            && command_registry::parse(input).is_ok_and(|invocation| invocation.argument.is_empty())
+            && command_registry::lookup(text.split_whitespace().next().unwrap_or(""))
+                .is_some_and(|spec| spec.requires_argument())
+    }
+
+    fn submit_find_file(&mut self, input: &str) -> AppAction {
         if input.trim().is_empty() {
             self.set_status("Find file requires a path", StatusKind::Error);
             return AppAction::Continue;
         }
 
-        let path = PathBuf::from(input);
-        if path.is_absolute() {
-            AppAction::FindFile(path)
-        } else {
-            let directory = active_path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            AppAction::FindFile(directory.join(path))
-        }
+        AppAction::FindFile(completion::expand_home(input))
     }
 
     fn submit_switch_buffer(&mut self, input: &str) -> AppAction {
@@ -800,7 +918,13 @@ impl AppState {
             }
             Command::GotoLine => self.goto_line(argument, buffer, view),
             Command::RepeatSearch => self.repeat_search(buffer, view),
-            Command::OpenFile => self.start_find_file(),
+            Command::OpenFile => self.start_find_file(buffer.path()),
+            Command::OpenDirectory => self.run_open_directory(argument),
+            Command::KeyboardQuit => {
+                self.mark = None;
+                self.set_status("Quit", StatusKind::Info);
+                AppAction::Continue
+            }
             Command::SwitchBuffer => self.start_switch_buffer(),
             Command::Search | Command::SearchBackward => {
                 let direction = if command == Command::Search {
@@ -922,20 +1046,24 @@ impl AppState {
 
     fn run_open_command(&mut self, path_text: &str) -> AppAction {
         if path_text.is_empty() {
-            self.set_status("Usage: /open <path>", StatusKind::Error);
+            self.set_status("Usage: open <path>", StatusKind::Error);
             return AppAction::Continue;
         }
 
-        let path = PathBuf::from(path_text);
+        AppAction::FindFile(completion::expand_home(path_text))
+    }
+
+    fn run_open_directory(&mut self, path_text: &str) -> AppAction {
+        let path = completion::expand_home(if path_text.is_empty() { "." } else { path_text });
         match is_directory_path(&path) {
-            Ok(true) => {
+            Ok(true) => AppAction::FindFile(path),
+            Ok(false) => {
                 self.set_status(
-                    format!("Open failed: {} is a directory", path.display()),
+                    format!("Not a directory: {}", path.display()),
                     StatusKind::Error,
                 );
                 AppAction::Continue
             }
-            Ok(false) => AppAction::OpenFile(path),
             Err(error) => {
                 self.set_status(format!("Open failed: {error}"), StatusKind::Error);
                 AppAction::Continue
@@ -946,7 +1074,9 @@ impl AppState {
     fn handle_dirty_quit_key(&mut self, key: crate::input::Key) -> AppAction {
         match key {
             crate::input::Key::Char('y') => AppAction::ForceQuit,
-            crate::input::Key::Char('n') | crate::input::Key::Escape => {
+            crate::input::Key::Char('n')
+            | crate::input::Key::Escape
+            | crate::input::Key::Ctrl('g') => {
                 self.dirty_quit_prompt = false;
                 self.set_status("Quit canceled", StatusKind::Info);
                 AppAction::Continue
@@ -1087,6 +1217,7 @@ fn render<W: io::Write>(
             .as_ref()
             .and_then(|search| search.active_match.as_ref())
             .map(|found| found.range.clone()),
+        &app_state.menu_items(),
     )
 }
 
@@ -1887,6 +2018,298 @@ mod tests {
         assert!(buffer.is_dirty());
     }
 
+    fn press(
+        app: &mut AppState,
+        keymap: &mut Keymap,
+        buffer: &mut Buffer,
+        view: &mut View,
+        keys: &[Key],
+    ) -> AppAction {
+        let mut action = AppAction::Continue;
+        for key in keys {
+            action = app.handle_key(*key, keymap, buffer, view);
+        }
+        action
+    }
+
+    fn type_keys(text: &str) -> Vec<Key> {
+        text.chars().map(Key::Char).collect()
+    }
+
+    #[test]
+    fn command_menu_lists_matches_and_runs_the_first_for_a_partial_name() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "one\ntwo\nthree");
+        let mut view = View::new();
+
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Meta('x')],
+        );
+        assert!(app.menu_items().len() > 30);
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &type_keys("goto"),
+        );
+        let labels: Vec<_> = app
+            .menu_items()
+            .iter()
+            .map(|item| item.label.to_string())
+            .collect();
+        assert_eq!(labels, ["goto-line"]);
+
+        // goto-line needs a number, so Enter keeps the prompt open for it.
+        press(&mut app, &mut keymap, &mut buffer, &mut view, &[Key::Enter]);
+        assert_eq!(app.command_line.as_deref(), Some("goto-line "));
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Char('3'), Key::Enter],
+        );
+        assert_eq!(app.command_line, None);
+        assert!(app.menu_items().is_empty());
+        assert_eq!(buffer.line_for_char(view.point()), 2);
+    }
+
+    #[test]
+    fn command_menu_completes_paths_and_descends_into_directories() {
+        let dir = test_dir("menu-open");
+        fs::create_dir(dir.join("src")).unwrap();
+        fs::write(dir.join("src").join("main.rs"), "fn main() {}").unwrap();
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Meta('x')],
+        );
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &type_keys("open"),
+        );
+        press(&mut app, &mut keymap, &mut buffer, &mut view, &[Key::Enter]);
+        assert_eq!(app.command_line.as_deref(), Some("open-file "));
+
+        let typed = format!("{}/s", dir.display());
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &type_keys(&typed),
+        );
+        press(&mut app, &mut keymap, &mut buffer, &mut view, &[Key::Tab]);
+        let src = format!("open-file {}/src/", dir.display());
+        assert_eq!(app.command_line.as_deref(), Some(src.as_str()));
+        assert_eq!(app.menu_items()[0].label, "main.rs");
+
+        let action = press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Down, Key::Enter],
+        );
+        assert_eq!(action, AppAction::FindFile(dir.join("src").join("main.rs")));
+        assert_eq!(buffer.text(), "old");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn enter_on_a_selected_directory_descends_instead_of_opening() {
+        let dir = test_dir("menu-descend");
+        fs::create_dir(dir.join("docs")).unwrap();
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Ctrl('x'), Key::Ctrl('f')],
+        );
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::MetaBackspace],
+        );
+        let typed = format!("{}/", dir.display());
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &type_keys(&typed),
+        );
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Down, Key::Up, Key::Enter],
+        );
+        let expected = format!("{}/docs/", dir.display());
+        assert!(app.command_line.as_deref().unwrap().ends_with(&expected));
+
+        // Typed text wins without navigation, so the directory itself opens.
+        let action = press(&mut app, &mut keymap, &mut buffer, &mut view, &[Key::Enter]);
+        assert_eq!(
+            action,
+            AppAction::FindFile(crate::completion::expand_home(&expected))
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn switch_buffer_menu_defaults_to_the_other_buffer() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+        app.buffer_names = vec!["src/app.rs".to_string(), "notes.txt".to_string()];
+
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Ctrl('x'), Key::Char('b')],
+        );
+        assert_eq!(app.menu_items().len(), 2);
+        let action = press(&mut app, &mut keymap, &mut buffer, &mut view, &[Key::Enter]);
+        assert_eq!(action, AppAction::SwitchBuffer("src/app.rs".to_string()));
+
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Ctrl('x'), Key::Char('b')],
+        );
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &type_keys("note"),
+        );
+        let action = press(&mut app, &mut keymap, &mut buffer, &mut view, &[Key::Enter]);
+        assert_eq!(action, AppAction::SwitchBuffer("notes.txt".to_string()));
+    }
+
+    #[test]
+    fn ctrl_g_cancels_prompts_prefixes_and_the_mark() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Meta('x'), Key::Char('s'), Key::Ctrl('g')],
+        );
+        assert_eq!(app.command_line, None);
+        assert!(app.menu_items().is_empty());
+        assert_eq!(app.status_message.as_deref(), Some("Command canceled"));
+
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Ctrl(' '), Key::Ctrl('f')],
+        );
+        assert!(app.active_region(&buffer, &view).is_some());
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Ctrl('x'), Key::Ctrl('g')],
+        );
+        assert_eq!(keymap.pending_label(), None);
+        assert_eq!(app.mark, None);
+        assert_eq!(app.status_message.as_deref(), Some("Quit"));
+        assert_eq!(buffer.text(), "old");
+    }
+
+    #[test]
+    fn escape_then_x_opens_the_command_menu() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Escape],
+        );
+        assert_eq!(app.status_message.as_deref(), Some("ESC"));
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Char('x')],
+        );
+        assert_eq!(app.command_line.as_deref(), Some(""));
+        assert_eq!(buffer.text(), "old");
+    }
+
+    #[test]
+    fn undefined_keys_say_so() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("notes.txt", "old");
+        let mut view = View::new();
+
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Ctrl('x'), Key::Char('z')],
+        );
+        assert_eq!(app.status_message.as_deref(), Some("C-x z is undefined"));
+        press(
+            &mut app,
+            &mut keymap,
+            &mut buffer,
+            &mut view,
+            &[Key::Ctrl('t')],
+        );
+        assert_eq!(app.status_message.as_deref(), Some("C-t is undefined"));
+        assert_eq!(buffer.text(), "old");
+    }
+
     #[test]
     fn meta_x_starts_command_line_without_editing_the_buffer() {
         let mut app = AppState::default();
@@ -2152,8 +2575,9 @@ mod tests {
         let action = app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
 
         assert_eq!(action, AppAction::Continue);
-        assert_eq!(app.command_line.as_deref(), Some(""));
-        assert_eq!(app.prompt_text().as_deref(), Some("Find file: "));
+        let prefill = app.command_line.clone().unwrap();
+        assert!(prefill.ends_with('/'));
+        assert_eq!(app.prompt_text().unwrap(), format!("Find file: {prefill}"));
         assert_eq!(app.status_message, None);
         assert_eq!(buffer.text(), "old");
         assert!(!buffer.is_dirty());
@@ -2206,26 +2630,36 @@ mod tests {
         let mut app = AppState::default();
 
         assert_eq!(
-            app.submit_find_file(
-                " leading and trailing.txt ",
-                Path::new("/tmp/project/current.txt")
-            ),
+            app.submit_find_file("/tmp/project/ leading and trailing.txt "),
             AppAction::FindFile(PathBuf::from("/tmp/project/ leading and trailing.txt "))
         );
     }
 
     #[test]
-    fn find_file_resolves_relative_paths_from_the_active_buffer_directory() {
+    fn find_file_starts_in_the_active_directory_and_expands_home() {
+        let dir = test_dir("find-file-prefill");
         let mut app = AppState::default();
+        let mut buffer = Buffer::open(dir.join("main.rs")).unwrap();
+        let mut view = View::new();
+        let mut keymap = Keymap::new();
+        app.handle_key(Key::Ctrl('x'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('f'), &mut keymap, &mut buffer, &mut view);
+        let prefill = format!("{}/", dir.display());
+        assert_eq!(app.command_line.as_deref(), Some(prefill.as_str()));
 
+        for ch in "sibling.rs".chars() {
+            app.handle_key(Key::Char(ch), &mut keymap, &mut buffer, &mut view);
+        }
         assert_eq!(
-            app.submit_find_file("sibling.rs", Path::new("/tmp/project/src/main.rs")),
-            AppAction::FindFile(PathBuf::from("/tmp/project/src/sibling.rs"))
+            app.handle_key(Key::Enter, &mut keymap, &mut buffer, &mut view),
+            AppAction::FindFile(dir.join("sibling.rs"))
         );
+        let home = std::env::var("HOME").unwrap();
         assert_eq!(
-            app.submit_find_file("/tmp/absolute.rs", Path::new("/tmp/project/src/main.rs")),
-            AppAction::FindFile(PathBuf::from("/tmp/absolute.rs"))
+            app.submit_find_file("~/notes.md"),
+            AppAction::FindFile(Path::new(&home).join("notes.md"))
         );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2275,7 +2709,7 @@ mod tests {
         let mut app = AppState::default();
 
         assert_eq!(
-            apply_app_action(&mut editor, &mut app, AppAction::OpenFile(second.clone())),
+            apply_app_action(&mut editor, &mut app, AppAction::FindFile(second.clone())),
             AppControl::Continue
         );
         assert_eq!(editor.active().0.path(), second);
@@ -2461,7 +2895,7 @@ mod tests {
         let command = format!("/open {}", target_path.display());
         let action = run_slash_command(&command, &mut app, &mut keymap, &mut buffer, &mut view);
 
-        assert_eq!(action, AppAction::OpenFile(target_path));
+        assert_eq!(action, AppAction::FindFile(target_path));
         assert_eq!(buffer.path(), current_path.as_path());
         assert_eq!(buffer.text(), "current");
         assert_eq!(view.point(), 1);
@@ -2469,7 +2903,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_open_reports_directory_without_replacing_buffer() {
+    fn slash_open_browses_a_directory_without_replacing_buffer() {
         let dir = test_dir("slash-open-directory");
         let current_path = dir.join("current.txt");
         let nested_dir = dir.join("nested");
@@ -2483,12 +2917,9 @@ mod tests {
         let command = format!("/open {}", nested_dir.display());
         let action = run_slash_command(&command, &mut app, &mut keymap, &mut buffer, &mut view);
 
-        assert_eq!(action, AppAction::Continue);
+        // Directories route to the picker instead of failing.
+        assert_eq!(action, AppAction::FindFile(nested_dir));
         assert_eq!(buffer.path(), current_path.as_path());
-        assert!(app
-            .status_message
-            .as_deref()
-            .is_some_and(|message| message.contains("is a directory")));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2508,7 +2939,7 @@ mod tests {
         let command = format!("/open {}", target_path.display());
         let action = run_slash_command(&command, &mut app, &mut keymap, &mut buffer, &mut view);
 
-        assert_eq!(action, AppAction::OpenFile(target_path));
+        assert_eq!(action, AppAction::FindFile(target_path));
         assert_eq!(buffer.path(), current_path.as_path());
         assert_eq!(buffer.text(), "xcurrent");
         fs::remove_dir_all(dir).unwrap();
