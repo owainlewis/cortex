@@ -130,9 +130,9 @@ It includes shared prompts for commands and buffer navigation, a directory picke
 | `C-Space` | Set the mark |
 | `C-w` | Cut the active region |
 | `C-k` | Cut to the end of the line |
-| `C-y` | Yank the newest cut |
+| `C-y` | Yank the newest cut, or text copied in another app since |
 | `M-y` | Replace the last yank with an older cut |
-| `M-w` | Copy the active region to the macOS clipboard |
+| `M-w` | Copy the active region to the kill ring and macOS clipboard |
 | `C-c C-v` | Paste the macOS clipboard into the buffer or active prompt |
 | `C-/` or `C-_` | Undo the last edit |
 | `C-x u` | Undo the last edit |
@@ -249,14 +249,18 @@ Repeating with an empty query recalls the previous accepted or named search, if 
 ## Cuts and history
 
 Cortex keeps the last 32 nonempty cuts in memory.
-`C-y` inserts the newest cut; repeated `M-y` cycles through older cuts and wraps to the newest.
+Cuts and `M-w` copies also go to the macOS clipboard, so they paste into other apps.
+Consecutive cuts join into one entry, so `C-k C-k C-k` then `C-y` restores all three; backward word cuts join in front.
+`C-y` inserts the newest cut; if another app copied text since Cortex last used the clipboard, that text becomes the newest cut first.
+Repeated `M-y` cycles through older cuts and wraps to the newest.
 Movement, edits, save, buffer changes, and undo/redo end yank-pop, so it cannot replace unrelated text.
 `M-x yank-pop` also works after a yank.
 Each kill, yank, and yank-pop is one undo step.
-The ring is local to this process and does not read or write the system clipboard.
+The ring itself is local to this process.
 
-Clipboard commands run only when requested, using macOS `pbcopy` and `pbpaste`.
-Copy keeps the region and buffer unchanged; clipboard paste is one literal undo step and clears the selection.
+Cortex uses macOS `pbcopy` and `pbpaste` on cuts, copies, `C-y`, and `C-c C-v`.
+Copy leaves the buffer unchanged and clears the selection; clipboard paste is one literal undo step and clears the selection.
+A clipboard failure never loses a cut: the text stays in the ring and the modeline reports the error.
 In editable prompts, `C-c C-v` flattens line breaks and tabs without submitting the prompt.
 Clipboard commands time out after two seconds and reject transfers above 16 MiB or invalid UTF-8, leaving buffer text intact.
 Clipboard errors in a prompt remain visible until the next prompt key; the entered text is preserved.

@@ -49,6 +49,10 @@ struct AppState {
     kill_ring: KillRing,
     clipboard: Clipboard,
     last_yank: Option<YankState>,
+    last_kill: Option<KillState>,
+    // The text Cortex last wrote to or read from the system clipboard. A
+    // different clipboard on yank means another app copied something new.
+    clipboard_text: Option<String>,
     last_disk_check: Option<Instant>,
 }
 
@@ -59,6 +63,14 @@ struct YankState {
     range: Range<usize>,
     point_after: usize,
     ring_index: usize,
+}
+
+/// Where the last kill left point, so an immediately following kill joins it.
+#[derive(Debug, PartialEq, Eq)]
+struct KillState {
+    buffer_id: u64,
+    revision: u64,
+    point: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -593,7 +605,7 @@ impl AppState {
         AppAction::Continue
     }
 
-    fn kill_region(&mut self, buffer: &mut Buffer, view: &mut View) -> AppAction {
+    fn kill_region(&mut self, buffer: &mut Buffer, view: &mut View, chained: bool) -> AppAction {
         let Some(region) = self.active_region(buffer, view) else {
             self.set_status("No active region", StatusKind::Error);
             return AppAction::Continue;
@@ -602,13 +614,11 @@ impl AppState {
         let text = buffer.text_range(region.clone());
         let point_after = buffer.delete_with_points(region.clone(), view.point(), region.start);
         view.set_point(point_after, buffer);
-        self.kill_ring.push(text);
-        self.mark = None;
-        self.set_status("Cut region", StatusKind::Success);
+        self.record_kill(text, false, chained, buffer, point_after, "Cut region");
         AppAction::Continue
     }
 
-    fn kill_line(&mut self, buffer: &mut Buffer, view: &mut View) -> AppAction {
+    fn kill_line(&mut self, buffer: &mut Buffer, view: &mut View, chained: bool) -> AppAction {
         let point = view.point();
         let Some(region) = kill_line_range(buffer, point) else {
             self.set_status("Nothing to cut", StatusKind::Error);
@@ -618,13 +628,17 @@ impl AppState {
         let text = buffer.text_range(region.clone());
         let point_after = buffer.delete_with_points(region, point, point);
         view.set_point(point_after, buffer);
-        self.kill_ring.push(text);
-        self.mark = None;
-        self.set_status("Cut line", StatusKind::Success);
+        self.record_kill(text, false, chained, buffer, point_after, "Cut line");
         AppAction::Continue
     }
 
-    fn kill_word(&mut self, buffer: &mut Buffer, view: &mut View, forward: bool) -> AppAction {
+    fn kill_word(
+        &mut self,
+        buffer: &mut Buffer,
+        view: &mut View,
+        forward: bool,
+        chained: bool,
+    ) -> AppAction {
         let point = view.point();
         let end = buffer.word_boundary(point, forward);
         if point == end {
@@ -635,10 +649,64 @@ impl AppState {
         let text = buffer.text_range(range.clone());
         let point_after = buffer.delete_with_points(range.clone(), point, range.start);
         view.set_point(point_after, buffer);
-        self.kill_ring.push(text);
-        self.mark = None;
-        self.set_status("Cut word", StatusKind::Success);
+        self.record_kill(text, !forward, chained, buffer, point_after, "Cut word");
         AppAction::Continue
+    }
+
+    /// Adds a kill to the ring, joining it to the previous kill when the
+    /// two were consecutive, and copies the newest entry to the clipboard.
+    fn record_kill(
+        &mut self,
+        text: String,
+        before: bool,
+        chained: bool,
+        buffer: &Buffer,
+        point_after: usize,
+        message: &str,
+    ) {
+        if chained {
+            self.kill_ring.append(&text, before);
+        } else {
+            self.kill_ring.push(text);
+        }
+        self.last_kill = Some(KillState {
+            buffer_id: buffer.id(),
+            revision: buffer.revision(),
+            point: point_after,
+        });
+        self.mark = None;
+        self.export_newest_kill(message);
+    }
+
+    fn export_newest_kill(&mut self, message: &str) {
+        let Some(newest) = self.kill_ring.get(0).map(str::to_string) else {
+            return;
+        };
+        match self.clipboard.copy(&newest) {
+            Ok(()) => {
+                self.clipboard_text = Some(newest);
+                self.set_status(message, StatusKind::Success);
+            }
+            Err(error) => self.set_status(
+                format!("{message}; clipboard copy failed: {error}"),
+                StatusKind::Error,
+            ),
+        }
+    }
+
+    /// Text copied in another app since Cortex last used the clipboard
+    /// becomes the newest kill, so C-y pastes it.
+    fn import_clipboard(&mut self) {
+        let Ok(text) = self.clipboard.paste() else {
+            return;
+        };
+        if text.is_empty() || self.clipboard_text.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        if self.kill_ring.get(0) != Some(text.as_str()) {
+            self.kill_ring.push(text.clone());
+        }
+        self.clipboard_text = Some(text);
     }
 
     fn goto_line(&mut self, argument: &str, buffer: &Buffer, view: &mut View) -> AppAction {
@@ -656,6 +724,7 @@ impl AppState {
     }
 
     fn yank(&mut self, buffer: &mut Buffer, view: &mut View) -> AppAction {
+        self.import_clipboard();
         let Some(text) = self.kill_ring.get(0) else {
             self.set_status("No cut text", StatusKind::Error);
             return AppAction::Continue;
@@ -717,16 +786,16 @@ impl AppState {
             self.set_status("No active region", StatusKind::Error);
             return AppAction::Continue;
         };
-        let result = self
+        if let Err(error) = self
             .clipboard
             .check_size(buffer.text_range_len_bytes(region.clone()))
-            .and_then(|()| self.clipboard.copy(&buffer.text_range(region)));
-        match result {
-            Ok(()) => self.set_status("Copied region to clipboard", StatusKind::Success),
-            Err(error) => {
-                self.set_status(format!("Clipboard copy failed: {error}"), StatusKind::Error)
-            }
+        {
+            self.set_status(format!("Copy failed: {error}"), StatusKind::Error);
+            return AppAction::Continue;
         }
+        self.kill_ring.push(buffer.text_range(region));
+        self.mark = None;
+        self.export_newest_kill("Copied region");
         AppAction::Continue
     }
 
@@ -888,6 +957,11 @@ impl AppState {
         if !command.continues_undo_group() {
             buffer.break_undo_group();
         }
+        let chained = self.last_kill.take().is_some_and(|kill| {
+            kill.buffer_id == buffer.id()
+                && kill.revision == buffer.revision()
+                && kill.point == view.point()
+        });
         match command {
             Command::OpenCommandLine => self.start_command_line(),
             Command::Indent | Command::Outdent => {
@@ -907,14 +981,14 @@ impl AppState {
                 }
             }
             Command::SetMark => self.set_mark(view),
-            Command::KillRegion => self.kill_region(buffer, view),
-            Command::KillLine => self.kill_line(buffer, view),
+            Command::KillRegion => self.kill_region(buffer, view, chained),
+            Command::KillLine => self.kill_line(buffer, view, chained),
             Command::Yank => self.yank(buffer, view),
             Command::YankPop => self.yank_pop(buffer, view),
             Command::CopyRegion => self.copy_region(buffer, view),
             Command::ClipboardPaste => self.paste_clipboard(buffer, view),
             Command::KillWord | Command::BackwardKillWord => {
-                self.kill_word(buffer, view, command == Command::KillWord)
+                self.kill_word(buffer, view, command == Command::KillWord, chained)
             }
             Command::GotoLine => self.goto_line(argument, buffer, view),
             Command::RepeatSearch => self.repeat_search(buffer, view),
@@ -1370,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_copy_preserves_region_text_history_and_kill_ring() {
+    fn copy_puts_the_region_in_the_kill_ring_and_the_clipboard() {
         let dir = test_dir("clipboard-copy");
         let mut app = app_with_test_clipboard(&dir);
         app.kill_ring.push("local cut".to_string());
@@ -1388,10 +1462,18 @@ mod tests {
             "e\u{301}界"
         );
         assert_eq!(buffer.text(), "ae\u{301}界z");
-        assert_eq!(app.mark, Some(1));
+        assert_eq!(app.mark, None);
         assert_eq!(view.point(), 4);
-        assert_eq!(app.kill_ring.get(0), Some("local cut"));
+        assert_eq!(app.kill_ring.get(0), Some("e\u{301}界"));
+        assert_eq!(app.kill_ring.get(1), Some("local cut"));
         assert_eq!(buffer.undo(), None);
+
+        // M-w then C-y pastes the copy.
+        app.handle_key(Key::Ctrl('e'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "ae\u{301}界ze\u{301}界");
+        assert_eq!(app.kill_ring.len(), 2);
+        app.mark = Some(0);
         run_slash_command(
             "clipboard-copy",
             &mut app,
@@ -1401,6 +1483,67 @@ mod tests {
         );
         assert_eq!(app.status_kind, Some(StatusKind::Success));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn kills_reach_the_clipboard_and_yank_picks_up_text_from_other_apps() {
+        let dir = test_dir("clipboard-sync");
+        let mut app = app_with_test_clipboard(&dir);
+        let mut buffer = buffer_with_text("sync.txt", "alpha beta");
+        let mut view = View::new();
+        let mut keymap = Keymap::new();
+
+        app.handle_key(Key::Meta('d'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(
+            fs::read_to_string(dir.join("clipboard-data")).unwrap(),
+            "alpha"
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Cut word"));
+
+        // Our own text on the clipboard is not added twice.
+        app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "alpha beta");
+        assert_eq!(app.kill_ring.len(), 1);
+
+        fs::write(dir.join("clipboard-data"), "from browser").unwrap();
+        app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "alphafrom browser beta");
+        assert_eq!(app.kill_ring.get(0), Some("from browser"));
+        assert_eq!(app.kill_ring.get(1), Some("alpha"));
+        app.handle_key(Key::Meta('y'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "alphaalpha beta");
+
+        // The same external text is imported once.
+        app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.kill_ring.len(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn consecutive_kills_join_into_one_entry() {
+        let mut app = AppState::default();
+        let mut keymap = Keymap::new();
+        let mut buffer = buffer_with_text("join.txt", "alpha\nbeta\ngamma");
+        let mut view = View::new();
+        for _ in 0..3 {
+            app.handle_key(Key::Ctrl('k'), &mut keymap, &mut buffer, &mut view);
+        }
+        assert_eq!(buffer.text(), "\ngamma");
+        assert_eq!(app.kill_ring.get(0), Some("alpha\nbeta"));
+        assert_eq!(app.kill_ring.len(), 1);
+        app.handle_key(Key::Ctrl('y'), &mut keymap, &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "alpha\nbeta\ngamma");
+
+        // Backward kills join in front; any other command starts a new entry.
+        app.handle_key(Key::Ctrl('e'), &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::MetaBackspace, &mut keymap, &mut buffer, &mut view);
+        app.handle_key(Key::MetaBackspace, &mut keymap, &mut buffer, &mut view);
+        assert_eq!(app.kill_ring.get(0), Some("alpha\nbeta"));
+        assert_eq!(app.kill_ring.len(), 2);
+        assert_eq!(buffer.text(), "\ngamma");
+        app.execute_command(commands::Command::Undo, "", &mut buffer, &mut view);
+        app.execute_command(commands::Command::Undo, "", &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "alpha\nbeta\ngamma");
     }
 
     #[test]
@@ -1476,19 +1619,29 @@ mod tests {
         let mut buffer = buffer_with_text("failure.txt", "keep");
         let mut view = View::new();
         let mut keymap = Keymap::new();
-        app.mark = Some(0);
         view.set_point(4, &buffer);
         for command in [
             commands::Command::CopyRegion,
             commands::Command::ClipboardPaste,
         ] {
+            app.mark = Some(0);
             app.execute_command(command, "", &mut buffer, &mut view);
             assert_eq!(buffer.text(), "keep");
-            assert_eq!(app.mark, Some(0));
             assert_eq!(view.point(), 4);
             assert_eq!(app.status_kind, Some(StatusKind::Error));
             assert_eq!(buffer.undo(), None);
         }
+        // The copy still reached the kill ring when the clipboard failed.
+        assert_eq!(app.kill_ring.get(0), Some("keep"));
+        app.execute_command(commands::Command::KillLine, "", &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "keep");
+        view.set_point(0, &buffer);
+        app.execute_command(commands::Command::KillLine, "", &mut buffer, &mut view);
+        assert_eq!(buffer.text(), "");
+        assert!(app
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.starts_with("Cut line; clipboard copy failed")));
         app.start_command_line();
         app.command_line = Some("original".to_string());
         app.handle_key(Key::Ctrl('c'), &mut keymap, &mut buffer, &mut view);
