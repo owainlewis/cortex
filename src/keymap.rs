@@ -9,6 +9,9 @@ pub struct Keymap {
 enum Prefix {
     CtrlX,
     CtrlC,
+    // Escape followed by a key acts as Meta, for terminals where Option
+    // does not send Meta.
+    Escape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +30,7 @@ impl Keymap {
         self.pending_prefix.map(|prefix| match prefix {
             Prefix::CtrlX => "C-x",
             Prefix::CtrlC => "C-c",
+            Prefix::Escape => "ESC",
         })
     }
 
@@ -36,7 +40,15 @@ impl Keymap {
 
     pub fn resolve(&mut self, key: Key) -> KeymapResult {
         if let Some(prefix) = self.pending_prefix.take() {
-            return resolve_prefixed(prefix, key);
+            return match (prefix, key) {
+                (_, Key::Ctrl('g')) | (Prefix::Escape, Key::Escape) => {
+                    KeymapResult::Command(Command::KeyboardQuit)
+                }
+                (Prefix::Escape, Key::Char(ch)) => self.resolve(Key::Meta(ch.to_ascii_lowercase())),
+                (Prefix::Escape, Key::Backspace) => self.resolve(Key::MetaBackspace),
+                (Prefix::Escape, _) => KeymapResult::Unbound,
+                _ => resolve_prefixed(prefix, key),
+            };
         }
 
         match key {
@@ -48,6 +60,11 @@ impl Keymap {
                 self.pending_prefix = Some(Prefix::CtrlC);
                 KeymapResult::PendingPrefix
             }
+            Key::Escape => {
+                self.pending_prefix = Some(Prefix::Escape);
+                KeymapResult::PendingPrefix
+            }
+            Key::Ctrl('g') => KeymapResult::Command(Command::KeyboardQuit),
             Key::Meta('w') => KeymapResult::Command(Command::CopyRegion),
             Key::Char(ch) => KeymapResult::Command(Command::Insert(ch)),
             Key::Enter => KeymapResult::Command(Command::InsertNewline),
@@ -100,10 +117,146 @@ fn resolve_prefixed(prefix: Prefix, key: Key) -> KeymapResult {
     }
 }
 
+/// The key sequence shown beside a command in the command menu.
+/// A test checks that each label resolves back to its command.
+pub fn binding_label(command: Command) -> Option<&'static str> {
+    Some(match command {
+        Command::SaveBuffer => "C-x C-s",
+        Command::OpenFile => "C-x C-f",
+        Command::SwitchBuffer => "C-x b",
+        Command::ReloadBuffer => "C-x C-r",
+        Command::Quit => "C-x C-c",
+        Command::Undo => "C-/",
+        Command::Search => "C-s",
+        Command::SearchBackward => "C-r",
+        Command::OpenCommandLine => "M-x",
+        Command::KeyboardQuit => "C-g",
+        Command::InsertNewline => "Enter",
+        Command::Indent => "Tab",
+        Command::Outdent => "S-Tab",
+        Command::DeleteBackward => "Backspace",
+        Command::DeleteForward => "C-d",
+        Command::MoveForwardChar => "C-f",
+        Command::MoveBackwardChar => "C-b",
+        Command::MoveNextLine => "C-n",
+        Command::MovePreviousLine => "C-p",
+        Command::MoveToLineStart => "C-a",
+        Command::MoveToLineEnd => "C-e",
+        Command::MoveForwardWord => "M-f",
+        Command::MoveBackwardWord => "M-b",
+        Command::MoveToBufferStart => "M-<",
+        Command::MoveToBufferEnd => "M->",
+        Command::PageDown => "C-v",
+        Command::PageUp => "M-v",
+        Command::SetMark => "C-Space",
+        Command::KillRegion => "C-w",
+        Command::KillLine => "C-k",
+        Command::KillWord => "M-d",
+        Command::BackwardKillWord => "M-Backspace",
+        Command::CopyRegion => "M-w",
+        Command::ClipboardPaste => "C-c C-v",
+        Command::Yank => "C-y",
+        Command::YankPop => "M-y",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Keymap, KeymapResult};
+    use super::{binding_label, Keymap, KeymapResult};
     use crate::{commands::Command, input::Key};
+
+    fn parse_label(label: &str) -> Vec<Key> {
+        label
+            .split(' ')
+            .map(|part| match part {
+                "Enter" => Key::Enter,
+                "Tab" => Key::Tab,
+                "S-Tab" => Key::BackTab,
+                "Backspace" => Key::Backspace,
+                "M-Backspace" => Key::MetaBackspace,
+                "C-Space" => Key::Ctrl(' '),
+                _ if part.chars().count() == 1 => Key::Char(part.chars().next().unwrap()),
+                _ => {
+                    let (modifier, ch) = part.split_at(2);
+                    let ch = ch.chars().next().unwrap();
+                    match modifier {
+                        "C-" => Key::Ctrl(ch),
+                        "M-" => Key::Meta(ch),
+                        _ => panic!("unknown label {part}"),
+                    }
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_menu_binding_label_resolves_to_its_command() {
+        let mut labelled = 0;
+        for spec in crate::command_registry::COMMANDS {
+            let Some(command) = spec.command() else {
+                continue;
+            };
+            let Some(label) = binding_label(command) else {
+                continue;
+            };
+            labelled += 1;
+            let mut keymap = Keymap::new();
+            let keys = parse_label(label);
+            let (last, prefix) = keys.split_last().unwrap();
+            for key in prefix {
+                assert_eq!(keymap.resolve(*key), KeymapResult::PendingPrefix, "{label}");
+            }
+            assert_eq!(
+                keymap.resolve(*last),
+                KeymapResult::Command(command),
+                "{label}"
+            );
+        }
+        assert!(labelled > 30);
+    }
+
+    #[test]
+    fn escape_acts_as_meta_for_the_next_key() {
+        for (key, command) in [
+            (Key::Char('x'), Command::OpenCommandLine),
+            (Key::Char('f'), Command::MoveForwardWord),
+            (Key::Char('<'), Command::MoveToBufferStart),
+            (Key::Backspace, Command::BackwardKillWord),
+        ] {
+            let mut keymap = Keymap::new();
+            assert_eq!(keymap.resolve(Key::Escape), KeymapResult::PendingPrefix);
+            assert_eq!(keymap.pending_label(), Some("ESC"));
+            assert_eq!(keymap.resolve(key), KeymapResult::Command(command));
+            assert_eq!(keymap.pending_label(), None);
+        }
+        let mut keymap = Keymap::new();
+        keymap.resolve(Key::Escape);
+        assert_eq!(keymap.resolve(Key::Ctrl('n')), KeymapResult::Unbound);
+    }
+
+    #[test]
+    fn ctrl_g_quits_alone_or_after_any_prefix() {
+        assert_eq!(
+            Keymap::new().resolve(Key::Ctrl('g')),
+            KeymapResult::Command(Command::KeyboardQuit)
+        );
+        for prefix in [Key::Ctrl('x'), Key::Ctrl('c'), Key::Escape] {
+            let mut keymap = Keymap::new();
+            keymap.resolve(prefix);
+            assert_eq!(
+                keymap.resolve(Key::Ctrl('g')),
+                KeymapResult::Command(Command::KeyboardQuit)
+            );
+            assert_eq!(keymap.pending_label(), None);
+        }
+        let mut keymap = Keymap::new();
+        keymap.resolve(Key::Escape);
+        assert_eq!(
+            keymap.resolve(Key::Escape),
+            KeymapResult::Command(Command::KeyboardQuit)
+        );
+    }
 
     #[test]
     fn word_buffer_and_page_keys_resolve_to_navigation_commands() {

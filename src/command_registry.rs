@@ -111,10 +111,24 @@ pub const COMMANDS: &[CommandSpec] = &[
     ),
     command(
         "open-file",
-        "Open a file path relative to the working directory",
+        "Open a file, or browse a directory, relative to the working directory",
         &["open"],
         Command::OpenPath,
         Some("path"),
+    ),
+    command(
+        "open-directory",
+        "Browse a directory in the picker",
+        &["dir"],
+        Command::OpenDirectory,
+        Some("path"),
+    ),
+    command(
+        "keyboard-quit",
+        "Cancel the current prompt, prefix, or region",
+        &[],
+        Command::KeyboardQuit,
+        None,
     ),
     command(
         "execute-extended-command",
@@ -322,9 +336,40 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
 ];
 
-fn command_text(input: &str) -> &str {
+pub fn command_text(input: &str) -> &str {
     let input = input.trim_start();
     input.strip_prefix('/').unwrap_or(input).trim_start()
+}
+
+impl CommandSpec {
+    pub fn aliases(&self) -> &'static [&'static str] {
+        self.aliases
+    }
+
+    pub fn takes_argument(&self) -> bool {
+        self.argument.is_some()
+    }
+
+    pub fn takes_path(&self) -> bool {
+        self.argument == Some("path")
+    }
+
+    /// Whether the menu waits for an argument instead of running bare.
+    pub fn requires_argument(&self) -> bool {
+        matches!(self.argument, Some("path" | "line"))
+    }
+
+    /// Whether the command menu offers this command.
+    pub fn listed(&self) -> bool {
+        matches!(self.target, Target::Command(_))
+    }
+
+    pub fn command(&self) -> Option<Command> {
+        match self.target {
+            Target::Command(command) => Some(command),
+            Target::Character => None,
+        }
+    }
 }
 
 pub fn lookup(name: &str) -> Option<&'static CommandSpec> {
@@ -368,41 +413,6 @@ pub fn parse(input: &str) -> Result<Invocation<'_>, String> {
     Ok(Invocation { command, argument })
 }
 
-pub fn matches(input: &str) -> impl Iterator<Item = &'static CommandSpec> + '_ {
-    let prefix = command_text(input);
-    COMMANDS.iter().filter(move |spec| {
-        spec.name.starts_with(prefix) || spec.aliases.iter().any(|alias| alias.starts_with(prefix))
-    })
-}
-
-pub fn complete(input: &str) -> String {
-    let name = command_text(input);
-    if name.chars().any(char::is_whitespace) {
-        return input.to_string();
-    }
-    if let Some(spec) = lookup(name) {
-        return spec.name.to_string();
-    }
-    let mut candidates = matches(name);
-    let Some(first) = candidates.next() else {
-        return input.to_string();
-    };
-    let mut prefix = first.name;
-    for candidate in candidates {
-        let len = prefix
-            .bytes()
-            .zip(candidate.name.bytes())
-            .take_while(|(a, b)| a == b)
-            .count();
-        prefix = &prefix[..len];
-    }
-    if prefix.is_empty() {
-        input.to_string()
-    } else {
-        prefix.to_string()
-    }
-}
-
 pub fn help(argument: &str) -> Result<String, String> {
     if argument.is_empty() {
         return Ok(format!(
@@ -424,7 +434,7 @@ pub fn help(argument: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{complete, lookup, parse, Target, COMMANDS};
+    use super::{lookup, parse, Target, COMMANDS};
     use crate::{
         commands::Command,
         input::Key,
@@ -500,35 +510,6 @@ mod tests {
         ] {
             assert!(parse(input).is_err(), "{input:?}");
         }
-    }
-
-    #[test]
-    fn completion_uses_names_shared_prefixes_and_legacy_aliases() {
-        assert_eq!(complete("sav"), "save-buffer");
-        assert_eq!(complete("/save"), "save-buffer");
-        assert_eq!(complete("delete"), "delete-");
-        assert_eq!(complete("/next"), "repeat-search");
-        assert_eq!(complete("no-such-command"), "no-such-command");
-        assert_eq!(complete("search-forward save"), "search-forward save");
-        assert_eq!(complete("日"), "日");
-    }
-
-    #[test]
-    fn leading_whitespace_is_accepted_by_parsing_hints_and_completion() {
-        for input in ["  sav", " /  sav", "\u{2003}save"] {
-            assert_eq!(complete(input), "save-buffer");
-            assert_eq!(
-                super::matches(input)
-                    .map(|spec| spec.name)
-                    .collect::<Vec<_>>(),
-                ["save-buffer"]
-            );
-            assert_eq!(
-                parse(&complete(input)).unwrap().command,
-                Command::SaveBuffer
-            );
-        }
-        assert_eq!(complete("  search-forward save"), "  search-forward save");
     }
 
     #[test]

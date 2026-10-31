@@ -97,7 +97,8 @@ There is no formal crate-level enforcement because all modules are in one binary
 | `view.rs` | Point, scroll offsets, viewport height, and preferred display column | Buffer queries | Text, file identity, or rendering styles |
 | `commands.rs` | Core editing, movement, save, reload, undo, redo, and quit outcomes | Buffer and View | Prompt-driven commands and application-wide state |
 | `command_registry.rs` | Static names, aliases, descriptions, argument validation, and prefix completion | Command enum | Editor state or command execution |
-| `input.rs` and `keymap.rs` | Terminal-key normalization and one pending `C-x` prefix | Crossterm events and the command enum | Command execution or configurable bindings |
+| `completion.rs` | Command, path, and buffer candidates for the minibuffer menu | Command registry, keymap labels, and directory reads | Prompt state or rendering |
+| `input.rs` and `keymap.rs` | Terminal-key normalization, one pending `C-x`, `C-c`, or `Esc` prefix, and menu binding labels | Crossterm events and the command enum | Command execution or configurable bindings |
 | `picker.rs` | Directory tree rows, selection, lazy expansion, and picker key handling | Filesystem directory reads and normalized input keys | File buffers or the editor event loop |
 | `highlighter.rs` | Language definitions and buffer-revision keyed highlight caches | Buffer text windows and Tree-sitter | Buffer text or terminal styles |
 | `renderer.rs` | Theme, frame composition, syntax highlighter, retained cells, diffing, and flush | Buffer, View, picker, Unicode helpers, and Crossterm | Editor mutations or terminal lifecycle |

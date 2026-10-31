@@ -94,7 +94,7 @@ Existing files open with their current contents.
 Missing files open as empty clean buffers attached to the requested path.
 Saving can create the target file when its parent directory already exists.
 Saving does not create missing parent directories.
-Inside Cortex, `C-x C-f` accepts an existing or missing file path.
+Inside Cortex, `C-x C-f` starts with the active file's directory filled in and lists its entries as you type.
 Enter a missing path, edit the empty buffer, and save to create the file.
 Enter a directory path to browse it in the directory picker.
 Directories open a picker that lists non-hidden entries.
@@ -142,8 +142,10 @@ It includes shared prompts for commands and buffer navigation, a directory picke
 | `C-x C-r` | Reload a clean buffer from disk |
 | `C-x C-s` | Save the file |
 | `C-x C-c` | Quit |
+| `C-g` | Cancel the current prompt, key prefix, or region |
+| `Esc` then a key | Same as Meta with that key, so `Esc x` is `M-x` |
 | Tab / Shift-Tab | Indent or outdent the active region; otherwise insert to a tab stop or outdent the current line |
-| `M-x` | Open the named command prompt |
+| `M-x` | Open the command menu |
 
 If any open buffer is dirty, `C-x C-c` asks whether to quit without saving.
 Press `y` to confirm.
@@ -166,19 +168,27 @@ Pasted text is ignored in the directory picker.
 
 ## Named commands
 
-Press `M-x`, type a command name, and press Enter.
-The minibuffer shows matching names as you type.
-Tab completes a unique match or the shared prefix of several matches.
+Press `M-x` (or `Esc x`) to open the command menu.
+A list above the minibuffer shows every matching command with its key binding and description, and narrows as you type.
+Up and Down (or `C-n` and `C-p`) move through the list, Tab completes the selected entry, and Enter runs it.
+Enter on a partial name such as `sav` runs the first match.
+Commands that need a path or line number, such as `open` or `goto-line`, keep the menu open for the argument.
+Path arguments list directory entries as you type and accept `~` for the home directory.
+Enter on a selected directory moves into it; Enter on typed text opens exactly what you typed, so new files can be created.
+In a path, `//` or `/~/` starts again from the root or home directory, and `M-Backspace` removes the last path part.
 Use `help <command>` for a description.
-Escape cancels the prompt; unknown names and invalid arguments report an error without changing text.
+Escape or `C-g` cancels the menu; unknown names and invalid arguments report an error without changing text.
+Keys with no binding report that they are undefined.
 
 | Command | Action | Existing alias |
 | --- | --- | --- |
 | `save-buffer` | Save the current file | `/save` |
 | `reload-buffer` | Reload a clean buffer from disk | `/reload` |
-| `find-file` | Prompt for a file or directory relative to the active file | |
-| `switch-buffer` | Prompt for an open buffer | |
-| `open-file <path>` | Open a file relative to the working directory | `/open <path>` |
+| `find-file` | Prompt for a file or directory, starting in the active file's directory | |
+| `switch-buffer` | Pick an open buffer from a list; Enter alone switches to the most recent other buffer | |
+| `open-file <path>` | Open a file, or browse a directory, relative to the working directory | `open`, `/open <path>` |
+| `open-directory [path]` | Browse a directory in the picker | `dir` |
+| `keyboard-quit` | Cancel the current prompt, prefix, or region | |
 | `search-forward [text]` | Start incremental search, or find supplied literal text | `/search [text]` |
 | `search-backward [text]` | Start reverse incremental search, or find supplied literal text | |
 | `repeat-search` | Repeat the previous search | `/next` |
@@ -205,8 +215,7 @@ Escape cancels the prompt; unknown names and invalid arguments report an error w
 | `help`, `help <command>` | List commands or describe one | `/help`, `/commands` |
 
 Aliases also work without a leading slash.
-`open-file` and `/open` reject directories and open another buffer without discarding unsaved changes.
-Use `find-file` to browse a directory.
+Opening a file never discards unsaved changes in other buffers.
 Typing `/` in the editor still inserts a slash.
 
 Words contain Unicode letters and numbers plus underscore; combining marks remain with their grapheme.
@@ -234,7 +243,7 @@ Repeating with an empty query recalls the previous accepted or named search, if 
 | Enter | Open the selected regular file or expand the selected directory |
 | Left | Collapse the selected directory or move to its parent row |
 | Backspace | Browse to the parent directory |
-| Escape | Quit the picker |
+| Escape or `C-g` | Quit the picker |
 | `C-x C-c` | Quit the picker |
 
 ## Cuts and history
@@ -276,9 +285,7 @@ See [docs/release.md](docs/release.md) for the release checklist.
 
 Redo is available through `M-x redo` and has no dedicated keybinding.
 Cortex shows one active buffer at a time.
-The switch-buffer prompt requires an exact path or a unique file name and does not offer completion yet.
 The directory picker can expand directories, but it is still a minimal picker.
-The slash command `/open <path>` opens files only, not directories.
 Internal splits, tabs, and an embedded terminal are deferred in favour of external terminal panes.
 There is no config, plugin system, LSP, or AI integration.
 Long lines are clipped to the terminal width instead of wrapped.

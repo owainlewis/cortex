@@ -117,6 +117,19 @@ impl Editor {
         self.buffers.iter().any(|entry| entry.buffer.is_dirty())
     }
 
+    /// Buffer paths for the switch-buffer menu, the active buffer last so
+    /// Enter on an empty prompt switches to another buffer.
+    pub fn switch_candidates(&self) -> Vec<String> {
+        let mut names: Vec<String> = (0..self.buffers.len())
+            .rev()
+            .filter(|index| *index != self.active)
+            .chain(std::iter::once(self.active))
+            .map(|index| self.buffers[index].buffer.path().display().to_string())
+            .collect();
+        names.dedup();
+        names
+    }
+
     pub fn names(&self) -> String {
         self.buffers
             .iter()
