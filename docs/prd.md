@@ -107,15 +107,18 @@ Regular expressions and project-wide replacement are outside this batch.
 
 ## 7. Kill ring and macOS clipboard
 
-A bounded kill ring retains recent cuts for `C-y` and `M-y`.
+A bounded kill ring retains recent cuts and copies for `C-y` and `M-y`.
+Consecutive kills join into one ring entry, as in Emacs.
 Yank-pop replaces the previous yank only while that interaction is still valid.
 Intervening edits, movement, and buffer changes must not allow stale ranges to replace unrelated text.
 Copy-region retains text without deleting it.
 
-Clipboard commands are explicit local operations using macOS clipboard tools.
-`M-w` copies the active region and `C-c C-v` pastes the system clipboard.
-Clipboard failures leave buffer text intact and show an actionable status.
-Do not inspect, synchronize, persist, or transmit clipboard contents automatically.
+Clipboard access uses macOS clipboard tools and happens only as part of a user command.
+Each kill and `M-w` copy writes the newest ring entry to the system clipboard.
+`C-y` first reads the clipboard; text another app copied since Cortex last used the clipboard becomes the newest kill.
+`C-c C-v` pastes the system clipboard literally without touching the ring.
+Clipboard failures leave buffer text intact, keep the cut in the ring, and show an actionable status.
+Do not poll, persist, or transmit clipboard contents outside these commands.
 Tests use controlled clipboard adapters.
 
 ## 8. Syntax highlighting and visual surface
@@ -168,7 +171,7 @@ These are target bindings; consult the README for those currently implemented.
 | Tab, Shift-Tab, Enter | Indent, outdent, indented newline |
 | `C-Space`, `C-w`, `C-k` | Mark, kill region, kill line |
 | `C-y`, `M-y` | Yank, yank-pop |
-| `M-w`, `C-c C-v` | Copy region to clipboard; clipboard paste |
+| `M-w`, `C-c C-v` | Copy region to kill ring and clipboard; clipboard paste |
 | `C-/`, `C-_`, `C-x u` | Undo |
 | `C-s`, `C-r` | Forward/reverse incremental search |
 | `M-x` | Named command, including redo, goto-line, and query-replace |

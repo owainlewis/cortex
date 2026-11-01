@@ -244,7 +244,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     ),
     command(
         "copy-region",
-        "Copy the active region to the macOS clipboard",
+        "Copy the active region to the kill ring and macOS clipboard",
         &["clipboard-copy"],
         Command::CopyRegion,
         None,
@@ -319,7 +319,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         Command::BackwardKillWord,
         None,
     ),
-    command("yank", "Insert the newest kill", &[], Command::Yank, None),
+    command(
+        "yank",
+        "Insert the newest kill or newer clipboard text",
+        &[],
+        Command::Yank,
+        None,
+    ),
     command(
         "yank-pop",
         "Replace the last yank with an older kill",

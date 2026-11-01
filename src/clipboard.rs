@@ -16,6 +16,9 @@ pub struct Clipboard {
     paste_program: PathBuf,
     timeout: Duration,
     transfer_limit: usize,
+    // Unit tests run in parallel and must not touch the shared system
+    // clipboard, so the default clipboard is inert under test.
+    enabled: bool,
 }
 
 impl Default for Clipboard {
@@ -25,6 +28,7 @@ impl Default for Clipboard {
             paste_program: PathBuf::from("/usr/bin/pbpaste"),
             timeout: PROCESS_TIMEOUT,
             transfer_limit: TRANSFER_LIMIT,
+            enabled: !cfg!(test),
         }
     }
 }
@@ -32,6 +36,9 @@ impl Default for Clipboard {
 impl Clipboard {
     pub fn copy(&self, text: &str) -> io::Result<()> {
         self.check_size(text.len())?;
+        if !self.enabled {
+            return Ok(());
+        }
         let deadline = Instant::now() + self.timeout;
         let mut child = Command::new(&self.copy_program)
             .env("LC_ALL", "en_US.UTF-8")
@@ -63,6 +70,9 @@ impl Clipboard {
     }
 
     pub fn paste(&self) -> io::Result<String> {
+        if !self.enabled {
+            return Ok(String::new());
+        }
         let deadline = Instant::now() + self.timeout;
         let mut child = Command::new(&self.paste_program)
             .env("LC_ALL", "en_US.UTF-8")
@@ -118,6 +128,7 @@ impl Clipboard {
         Self {
             copy_program,
             paste_program,
+            enabled: true,
             ..Self::default()
         }
     }
